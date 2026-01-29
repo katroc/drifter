@@ -202,10 +202,17 @@ struct SettingsState {
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InputMode {
+pub enum ModalAction {
+    None,
+    ClearHistory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputMode {
     Normal,
     Browsing,  // Actively navigating in Hopper
     Filter,
+    Confirmation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -615,6 +622,9 @@ pub struct App {
     wizard: WizardState,
     theme: Theme,
     theme_names: Vec<&'static str>,
+    // Modal State
+    pub pending_action: ModalAction,
+    pub confirmation_msg: String,
 }
 
 impl App {
@@ -657,6 +667,8 @@ impl App {
             wizard: WizardState::new(),
             theme,
             theme_names: Theme::list_names(),
+            pending_action: ModalAction::None,
+            confirmation_msg: String::new(),
         };
 
         let status_clone = app.clamav_status.clone();
@@ -821,6 +833,38 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
 
         if event::poll(tick_rate)? {
             if let Event::Key(key) = event::read()? {
+                // Handle Confirmation Mode
+                if app.input_mode == InputMode::Confirmation {
+                     match key.code {
+                        KeyCode::Char('y') | KeyCode::Enter => {
+                            // Execute Action
+                            if app.pending_action == ModalAction::ClearHistory {
+                                let conn = conn_mutex.lock().unwrap();
+                                let filter_str = if app.history_filter == HistoryFilter::All { None } else { Some(app.history_filter.as_str()) };
+                                let _ = crate::db::clear_history(&conn, filter_str);
+                                
+                                app.selected_history = 0;
+                                app.status_message = format!("History cleared ({})", app.history_filter.as_str());
+                                let _ = app.refresh_jobs(&conn);
+                            }
+                            
+                            // Reset
+                            app.input_mode = InputMode::Normal;
+                            app.pending_action = ModalAction::None;
+                            app.confirmation_msg.clear();
+                        }
+                        KeyCode::Char('n') | KeyCode::Esc => {
+                            // Cancel
+                            app.input_mode = InputMode::Normal;
+                            app.pending_action = ModalAction::None;
+                            app.confirmation_msg.clear();
+                            app.status_message = "Action cancelled".to_string();
+                        }
+                        _ => {}
+                     }
+                     continue;
+                }
+
                 // Handle wizard mode separately
                 if app.show_wizard {
                     match key.code {
@@ -1105,6 +1149,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                     _ => {}
                                 }
                             }
+                            InputMode::Confirmation => {},
                         }
                     }
                     AppFocus::Queue => {
@@ -1163,31 +1208,14 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                 let _ = app.refresh_jobs(&conn);
                             }
                             KeyCode::Char('c') => {
-                                // Clear only what is shown (e.g. Completed) or all completed non-quarantined if All.
-                                // Logic: delete all jobs where status is 'complete' (for now, simply rely on clear_completed function logic if generic, or implement specific).
-                                // Current queue 'c' implementation clears completed. History 'c' should probably clear history.
-                                // Let's use a new DB function delete_history_jobs(filter)? Or just delete all visible?
-                                // Simplified: Clear displayed history items.
-                                let ids_to_delete: Vec<i64> = app.history.iter().map(|j| j.id).collect();
-                                if !ids_to_delete.is_empty() {
-                                    let conn = conn_mutex.lock().unwrap();
-                                    let mut count = 0;
-                                    for id in ids_to_delete {
-                                        // Don't delete quarantined items unless explicitly filtered for?
-                                        // Safety: only delete 'complete' or 'quarantined_removed'. 'quarantined' should arguably stay?
-                                        // Let's iterate and check status.
-                                        let status_ok = true; // For now delete all visible
-                                        if status_ok {
-                                            let _ = crate::db::delete_job(&conn, id);
-                                            count += 1;
-                                        }
-                                    }
-                                    if count > 0 {
-                                        app.status_message = format!("Cleared {} history items", count);
-                                        let _ = app.refresh_jobs(&conn);
-                                        app.selected_history = 0;
-                                    }
-                                }
+                                // Trigger confirmation logic for History
+                                app.input_mode = InputMode::Confirmation;
+                                app.pending_action = ModalAction::ClearHistory;
+                                app.confirmation_msg = format!("Clear {} history entries? This cannot be undone.", match app.history_filter {
+                                    HistoryFilter::All => "ALL",
+                                    HistoryFilter::Complete => "completed",
+                                    HistoryFilter::Quarantined => "quarantined",
+                                });
                             }
                             KeyCode::Char('d') | KeyCode::Delete => {
                                 if !app.history.is_empty() && app.selected_history < app.history.len() {
@@ -1754,6 +1782,9 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
         InputMode::Browsing => {
             "Hopper: ←/→ dirs | ↑/↓ select | /: Filter | t: Tree | space: Select | s: Stage | Esc: Exit"
         }
+        InputMode::Confirmation => {
+            "Confirmation Required"
+        }
         InputMode::Normal => match app.focus {
             AppFocus::Rail => "Tab/Right: Content | ↑/↓: Switch Tab | q: Quit",
             AppFocus::Browser => "↑/↓: Select | a/Enter: Browse | Tab: Next Panel",
@@ -1774,6 +1805,43 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let footer = Paragraph::new(status_line).style(app.theme.muted_style());
     f.render_widget(footer, area);
 }
+
+fn draw_confirmation_modal(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    if app.input_mode != InputMode::Confirmation {
+        return;
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(app.theme.border_type)
+        .title(" Confirmation ")
+        .style(app.theme.panel_style())
+        .border_style(app.theme.border_active_style());
+
+    let area = centered_rect(area, 60, 20);
+    f.render_widget(ratatui::widgets::Clear, area); // Clear background
+    f.render_widget(block.clone(), area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .split(block.inner(area));
+
+    let msg = Paragraph::new(app.confirmation_msg.as_str())
+        .wrap(Wrap { trim: true })
+        .alignment(ratatui::layout::Alignment::Center)
+        .style(app.theme.text_style());
+    
+    f.render_widget(msg, chunks[0]);
+
+    let actions = Paragraph::new("Enter/y: Confirm  |  Esc/n: Cancel")
+        .alignment(ratatui::layout::Alignment::Center)
+        .style(app.theme.accent_style().add_modifier(Modifier::BOLD));
+    
+    f.render_widget(actions, chunks[1]);
+}
+
 
 fn draw_system_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let av_status = app.clamav_status.lock().unwrap().clone();
@@ -1890,6 +1958,9 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
     }
     draw_system_status(f, app, root[1]);
     draw_footer(f, app, root[2]);
+    
+    // Render Modal last (on top)
+    draw_confirmation_modal(f, app, f.size());
 }
 
 
@@ -2209,6 +2280,7 @@ fn draw_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
         InputMode::Filter => " Hopper (Filter) ",
         InputMode::Normal if is_focused => " Hopper (Press 'a' to browse) ",
         InputMode::Normal => " Hopper ",
+        InputMode::Confirmation => " Hopper ",
     };
 
     let block = Block::default()

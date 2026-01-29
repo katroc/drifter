@@ -275,6 +275,33 @@ pub fn delete_job(conn: &Connection, job_id: i64) -> Result<()> {
     Ok(())
 }
 
+// Clear history based on filter (All, Complete, Quarantined)
+// Always excludes "active" jobs (pending, scanning, uploading)
+pub fn clear_history(conn: &Connection, filter: Option<&str>) -> Result<()> {
+    let base_query = "DELETE FROM jobs WHERE status NOT IN ('pending', 'scanning', 'uploading', 'failed_retryable')";
+    
+    match filter {
+        Some("Quarantined") => {
+            conn.execute(
+                &format!("{} AND (status = 'quarantined' OR status = 'quarantined_removed')", base_query),
+                [],
+            )?;
+        }
+        Some("Complete") => {
+            conn.execute(
+                &format!("{} AND status = 'complete'", base_query),
+                [],
+            )?;
+        }
+        _ => {
+            // All: clears complete, quarantined, failed, etc.
+            conn.execute(base_query, [])?;
+        }
+    }
+    
+    Ok(())
+}
+
 pub fn insert_event(conn: &Connection, job_id: i64, event_type: &str, message: &str) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
