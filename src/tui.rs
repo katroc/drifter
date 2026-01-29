@@ -863,6 +863,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
 
                 // Meta keys (Quit, Tab)
                 if !capturing_input {
+                    let old_focus = app.focus;
                     match key.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Tab => {
@@ -914,6 +915,10 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                             };
                         }
                         _ => {}
+                    }
+                    // If focus changed, don't also process this key in focus-specific handling
+                    if app.focus != old_focus {
+                        continue;
                     }
                 }
 
