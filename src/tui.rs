@@ -1745,8 +1745,14 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
             AppFocus::Queue => "↑/↓: Select | Enter: Details | c: Clear Done | r: Retry | d: Delete",
             AppFocus::History => "Tab: Rail | Left: Queue",
             AppFocus::Quarantine => "Tab: Rail | Left: Rail | d: Clear | R: Refresh",
-            AppFocus::SettingsCategory => "Tab/Right: Fields | Left: Rail | ↑/↓: Category",
-            AppFocus::SettingsFields => "Tab: Rail | Left: Category | Enter: Edit | s: Save",
+            AppFocus::SettingsCategory => match app.settings.active_category {
+                 SettingsCategory::S3 | SettingsCategory::Scanner => "Tab/Right: Fields | Left: Rail | ↑/↓: Category | t: Test",
+                 _ => "Tab/Right: Fields | Left: Rail | ↑/↓: Category",
+            },
+            AppFocus::SettingsFields => match app.settings.active_category {
+                 SettingsCategory::S3 | SettingsCategory::Scanner => "Tab: Rail | Left: Category | Enter: Edit | s: Save | t: Test",
+                 _ => "Tab: Rail | Left: Category | Enter: Edit | s: Save",
+            },
         },
     };
     let status_line = format!("{} | {}", footer_text, app.status_message);
@@ -2316,10 +2322,7 @@ fn draw_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
         app.theme.border_style()
     };
 
-    let title = match app.settings.active_category {
-        SettingsCategory::S3 | SettingsCategory::Scanner => " Configuration (S: Save | t: Test) ",
-        _ => " Configuration (S: Save) ",
-    };
+    let title = " Configuration (S: Save Changes) ";
     let outer_block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
