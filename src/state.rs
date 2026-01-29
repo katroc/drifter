@@ -54,13 +54,20 @@ impl Coordinator {
         
         // Find jobs in "queued" state
         if let Some(job) = db::get_next_job(&conn, "queued")? {
-            // Move to scanning
-            db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
-            // Process scan
-            // Drop lock before long operation? Ideally yes, but for now we keep it simple or clone needed data.
-            // We can't hold lock across long ops.
-            drop(conn); 
-            self.process_scan(&job)?;
+            let scanner_enabled = self.config.lock().unwrap().scanner_enabled;
+            if scanner_enabled {
+                // Move to scanning
+                db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
+                // Process scan
+                drop(conn); 
+                self.process_scan(&job)?;
+            } else {
+                // Skip scan, move directly to uploading (or ready for upload)
+                // We fake a "clean" scan result
+                db::update_scan_status(&conn, job.id, "skipped", "scanned")?;
+                db::insert_event(&conn, job.id, "scan", "scan skipped by policy")?;
+                // Note: The next loop iteration will pick it up as "scanned" and move to "uploading"
+            }
             return Ok(()); // Loop again
         }
 

@@ -63,7 +63,11 @@ pub struct Config {
     pub concurrency_parts_per_file: usize,
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default = "default_scanner_enabled")]
+    pub scanner_enabled: bool,
 }
+
+fn default_scanner_enabled() -> bool { true }
 
 impl Default for Config {
     fn default() -> Self {
@@ -92,6 +96,7 @@ impl Default for Config {
             concurrency_upload_global: 4,
             concurrency_parts_per_file: 4,
             theme: Theme::default_name().to_string(),
+            scanner_enabled: true,
         }
     }
 }
@@ -178,6 +183,7 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         theme: Theme::resolve_name(&get_or("theme", Theme::default_name()))
             .unwrap_or(Theme::default_name())
             .to_string(),
+        scanner_enabled: get("scanner_enabled").map(|s| s == "true").unwrap_or(true),
     })
 }
 
@@ -223,7 +229,9 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
     db::set_setting(conn, "part_size_mb", &cfg.part_size_mb.to_string())?;
     db::set_setting(conn, "concurrency_upload_global", &cfg.concurrency_upload_global.to_string())?;
     db::set_setting(conn, "concurrency_parts_per_file", &cfg.concurrency_parts_per_file.to_string())?;
+    db::set_setting(conn, "concurrency_parts_per_file", &cfg.concurrency_parts_per_file.to_string())?;
     db::set_setting(conn, "theme", &cfg.theme)?;
+    db::set_setting(conn, "scanner_enabled", if cfg.scanner_enabled { "true" } else { "false" })?;
     
     // Save secret separately with obfuscation
     if let Some(ref secret) = cfg.s3_secret_key {

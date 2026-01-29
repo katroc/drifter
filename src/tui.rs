@@ -198,6 +198,7 @@ struct SettingsState {
     editing: bool,
     theme: String,
     original_theme: Option<String>,
+    scanner_enabled: bool,
 }
 
 
@@ -1311,13 +1312,28 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                     AppFocus::SettingsFields => {
                         let field_count = match app.settings.active_category {
                             SettingsCategory::S3 => 6,
-                            SettingsCategory::Scanner => 3,
+                            SettingsCategory::Scanner => 4,
                             SettingsCategory::Performance => 2,
                             SettingsCategory::Theme => 1,
                         };
                         match key.code {
                             KeyCode::Enter => {
-                                app.settings.editing = !app.settings.editing;
+                                // Special handling for Boolean Toggles (Scanner Enabled)
+                                if app.settings.active_category == SettingsCategory::Scanner && app.settings.selected_field == 3 {
+                                    app.settings.scanner_enabled = !app.settings.scanner_enabled;
+                                    
+                                    // Trigger Auto-Save logic immediately
+                                    let mut cfg = app.config.lock().unwrap();
+                                    app.settings.apply_to_config(&mut cfg);
+                                    let conn = conn_mutex.lock().unwrap();
+                                    if let Err(e) = crate::config::save_config_to_db(&conn, &cfg) {
+                                        app.status_message = format!("Save error: {}", e);
+                                    } else {
+                                        app.status_message = format!("Scanner {}", if app.settings.scanner_enabled { "Enabled" } else { "Disabled" });
+                                    }
+                                } else {
+                                    app.settings.editing = !app.settings.editing;
+                                }
                                 
                                 if app.settings.editing {
                                     // Entering edit mode
@@ -1346,7 +1362,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                                 0 => "S3 Endpoint", 1 => "S3 Bucket", 2 => "S3 Region", 3 => "Prefix", 4 => "Access Key", 5 => "Secret Key", _ => "Settings"
                                             },
                                             SettingsCategory::Scanner => match app.settings.selected_field {
-                                                0 => "ClamAV Host", 1 => "ClamAV Port", 2 => "Chunk Size", _ => "Scanner"
+                                                0 => "ClamAV Host", 1 => "ClamAV Port", 2 => "Chunk Size", 3 => "Enable Scanner", _ => "Scanner"
                                             },
                                             SettingsCategory::Performance => "Performance",
                                             SettingsCategory::Theme => "Theme",
@@ -1528,6 +1544,7 @@ impl SettingsState {
             editing: false,
             theme: cfg.theme.clone(),
             original_theme: None,
+            scanner_enabled: cfg.scanner_enabled,
         }
     }
 
@@ -1544,6 +1561,7 @@ impl SettingsState {
         if let Ok(v) = self.part_size.trim().parse() { cfg.part_size_mb = v; }
         if let Ok(v) = self.concurrency_global.trim().parse() { cfg.concurrency_upload_global = v; }
         cfg.theme = self.theme.clone();
+        cfg.scanner_enabled = self.scanner_enabled;
     }
 }
 
@@ -2501,6 +2519,7 @@ fn draw_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
             ("ClamAV Host", app.settings.clamd_host.as_str()),
             ("ClamAV Port", app.settings.clamd_port.as_str()),
             ("Scan Chunk Size (MB)", app.settings.scan_chunk_size.as_str()),
+            ("Enable Scanner", if app.settings.scanner_enabled { "[X] Enabled" } else { "[ ] Disabled" }),
         ],
         SettingsCategory::Performance => vec![
             ("Part Size (MB)", app.settings.part_size.as_str()),
