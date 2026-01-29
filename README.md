@@ -31,8 +31,9 @@ docker compose up -d
 
 This starts ClamAV on `localhost:3310`.
 
-### 2. Build and Run Drifter
+### 2. Installation Methods
 
+#### Option A: Build and Run Locally (Development)
 ```bash
 # Return to root directory
 cd ..
@@ -42,6 +43,28 @@ cargo build --release
 
 # Run
 ./target/release/drifter
+```
+
+#### Option B: Install System-Wide (Recommended)
+This installs the `drifter` binary to your Cargo bin path (typically `~/.cargo/bin`), allowing you to run it from anywhere.
+
+```bash
+# Install from source
+cargo install --path .
+
+# Run from anywhere
+drifter
+```
+
+#### Option C: Copy Binary to Another Machine
+The built binary is self-contained (mostly static, depends on standard glibc). You can scp it to other Linux machines:
+
+```bash
+# Build (if not already built)
+cargo build --release
+
+# Copy to remote server
+scp target/release/drifter user@remote-server:/usr/local/bin/
 ```
 
 ## Setup & Configuration
