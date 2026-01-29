@@ -590,7 +590,7 @@ impl App {
         let theme = Theme::from_name(&cfg_guard.theme);
         drop(cfg_guard);
 
-        let app = Self {
+        let mut app = Self {
             jobs: Vec::new(),
             history: Vec::new(),
             quarantine: Vec::new(),
@@ -608,7 +608,7 @@ impl App {
             last_watch_scan: Instant::now() - Duration::from_secs(10),
             _watcher: Watcher::new(conn, watcher_cfg),
             current_tab: AppTab::Transfers,
-            focus: AppFocus::Rail,
+            focus: AppFocus::Browser,
             settings,
             config: config.clone(),
             clamav_status: Arc::new(Mutex::new("Checking...".to_string())),
@@ -642,6 +642,8 @@ impl App {
                 std::thread::sleep(Duration::from_secs(5));
             }
         });
+        
+        app.picker.refresh();
 
         app
     }
@@ -929,6 +931,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                     AppTab::Settings => AppTab::Transfers,
                                 };
                             }
+                            KeyCode::Char('a') => app.focus = AppFocus::Browser,
                             _ => {}
                          }
                     }
@@ -1051,6 +1054,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                     if app.selected >= app.jobs.len() && app.selected > 0 { app.selected -= 1; }
                                 }
                             }
+                             KeyCode::Char('a') => app.focus = AppFocus::Browser,
                              _ => {}
                          }
                     }
@@ -1058,6 +1062,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                          match key.code {
                             KeyCode::Up | KeyCode::Char('k') => if app.selected_history > 0 { app.selected_history -= 1; },
                             KeyCode::Down | KeyCode::Char('j') => if app.selected_history + 1 < app.history.len() { app.selected_history += 1; },
+                            KeyCode::Char('a') => app.focus = AppFocus::Browser,
                             _ => {}
                          }
                     }
@@ -1087,6 +1092,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                 let conn = conn_mutex.lock().unwrap();
                                 let _ = app.refresh_jobs(&conn);
                             }
+                            KeyCode::Char('a') => app.focus = AppFocus::Browser,
                             _ => {}
                          }
                     }
@@ -1113,6 +1119,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                             KeyCode::Right | KeyCode::Enter => {
                                 app.focus = AppFocus::SettingsFields;
                             }
+                            KeyCode::Char('a') => app.focus = AppFocus::Browser,
                             _ => {}
                          }
                     }
@@ -1276,6 +1283,9 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                 // Launch setup wizard
                                 app.wizard = WizardState::new();
                                 app.show_wizard = true;
+                            }
+                            KeyCode::Char('a') if !app.settings.editing => {
+                                app.focus = AppFocus::Browser;
                             }
                             _ => {}
                         }
@@ -1874,11 +1884,7 @@ fn draw_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
         app.theme.border_style()
     };
 
-    let title = if is_focused {
-        format!(" Hopper (Browser) ")
-    } else {
-        " Hopper (Press 'a' to explore files) ".to_string()
-    };
+    let title = " Hopper (Browser) ".to_string();
 
     let block = Block::default()
         .borders(Borders::ALL)
