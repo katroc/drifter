@@ -124,11 +124,14 @@ pub fn list_active_jobs(conn: &Connection, limit: i64) -> Result<Vec<JobRow>> {
     Ok(rows)
 }
 
-pub fn list_history_jobs(conn: &Connection, limit: i64) -> Result<Vec<JobRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key FROM jobs WHERE status IN ('complete', 'quarantined', 'quarantined_removed') ORDER BY id DESC LIMIT ?",
-
-    )?;
+pub fn list_history_jobs(conn: &Connection, limit: i64, filter: Option<&str>) -> Result<Vec<JobRow>> {
+    let sql = match filter {
+        Some("Complete") => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key FROM jobs WHERE status = 'complete' ORDER BY id DESC LIMIT ?",
+        Some("Quarantined") => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key FROM jobs WHERE status IN ('quarantined', 'quarantined_removed') ORDER BY id DESC LIMIT ?",
+        _ => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key FROM jobs WHERE status IN ('complete', 'quarantined', 'quarantined_removed') ORDER BY id DESC LIMIT ?",
+    };
+    
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt
         .query_map(params![limit], |row| {
             Ok(JobRow {

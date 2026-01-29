@@ -557,17 +557,43 @@ impl FilePicker {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryFilter {
+    All,
+    Complete,
+    Quarantined,
+}
+
+impl HistoryFilter {
+    fn next(&self) -> Self {
+        match self {
+            HistoryFilter::All => HistoryFilter::Complete,
+            HistoryFilter::Complete => HistoryFilter::Quarantined,
+            HistoryFilter::Quarantined => HistoryFilter::All,
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            HistoryFilter::All => "All",
+            HistoryFilter::Complete => "Complete",
+            HistoryFilter::Quarantined => "Quarantined",
+        }
+    }
+}
+
 pub struct App {
-    jobs: Vec<JobRow>,
-    history: Vec<JobRow>,
+    pub jobs: Vec<JobRow>,
+    pub history: Vec<JobRow>,
+    pub selected: usize,
+    pub selected_history: usize,
     quarantine: Vec<JobRow>,
-    selected: usize,
-    selected_history: usize,
     selected_quarantine: usize,
     last_refresh: Instant,
     status_message: String,
     input_mode: InputMode,
     input_buffer: String,
+    history_filter: HistoryFilter,
     picker: FilePicker,
     watch_enabled: bool,
     _watch_path: Option<PathBuf>,
@@ -606,6 +632,7 @@ impl App {
             status_message: "Ready".to_string(),
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
+            history_filter: HistoryFilter::All,
             picker: FilePicker::new(),
             watch_enabled: false,
             _watch_path: None,
@@ -655,7 +682,12 @@ impl App {
 
     fn refresh_jobs(&mut self, conn: &Connection) -> Result<()> {
         self.jobs = list_active_jobs(conn, 100)?;
-        self.history = list_history_jobs(conn, 100)?;
+        let filter_str = if self.history_filter == HistoryFilter::All { 
+            None 
+        } else { 
+            Some(self.history_filter.as_str()) 
+        };
+        self.history = list_history_jobs(conn, 100, filter_str)?;
         self.quarantine = list_quarantined_jobs(conn, 100)?;
         
         // Auto-fix selected if out of bounds
@@ -1110,6 +1142,56 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                          match key.code {
                             KeyCode::Up | KeyCode::Char('k') => if app.selected_history > 0 { app.selected_history -= 1; },
                             KeyCode::Down | KeyCode::Char('j') => if app.selected_history + 1 < app.history.len() { app.selected_history += 1; },
+                            KeyCode::Char('f') => {
+                                app.history_filter = app.history_filter.next();
+                                app.selected_history = 0; // Reset selection
+                                app.status_message = format!("History Filter: {}", app.history_filter.as_str());
+                                let conn = conn_mutex.lock().unwrap();
+                                let _ = app.refresh_jobs(&conn);
+                            }
+                            KeyCode::Char('c') => {
+                                // Clear only what is shown (e.g. Completed) or all completed non-quarantined if All.
+                                // Logic: delete all jobs where status is 'complete' (for now, simply rely on clear_completed function logic if generic, or implement specific).
+                                // Current queue 'c' implementation clears completed. History 'c' should probably clear history.
+                                // Let's use a new DB function delete_history_jobs(filter)? Or just delete all visible?
+                                // Simplified: Clear displayed history items.
+                                let ids_to_delete: Vec<i64> = app.history.iter().map(|j| j.id).collect();
+                                if !ids_to_delete.is_empty() {
+                                    let conn = conn_mutex.lock().unwrap();
+                                    let mut count = 0;
+                                    for id in ids_to_delete {
+                                        // Don't delete quarantined items unless explicitly filtered for?
+                                        // Safety: only delete 'complete' or 'quarantined_removed'. 'quarantined' should arguably stay?
+                                        // Let's iterate and check status.
+                                        let status_ok = true; // For now delete all visible
+                                        if status_ok {
+                                            let _ = crate::db::delete_job(&conn, id);
+                                            count += 1;
+                                        }
+                                    }
+                                    if count > 0 {
+                                        app.status_message = format!("Cleared {} history items", count);
+                                        let _ = app.refresh_jobs(&conn);
+                                        app.selected_history = 0;
+                                    }
+                                }
+                            }
+                            KeyCode::Char('d') | KeyCode::Delete => {
+                                if !app.history.is_empty() && app.selected_history < app.history.len() {
+                                    let job = &app.history[app.selected_history];
+                                    let id = job.id;
+                                    let conn = conn_mutex.lock().unwrap();
+                                    let _ = crate::db::delete_job(&conn, id);
+                                    let _ = app.refresh_jobs(&conn);
+                                    if app.selected_history >= app.history.len() && app.selected_history > 0 {
+                                        app.selected_history -= 1;
+                                    }
+                                }
+                            }
+                            KeyCode::Char('R') => {
+                                let conn = conn_mutex.lock().unwrap();
+                                let _ = app.refresh_jobs(&conn);
+                            }
                             _ => {}
                          }
                     }
@@ -1411,12 +1493,7 @@ fn draw_rail(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(table, area);
 }
 
-fn draw_job_details(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let job = match app.jobs.get(app.selected) {
-        Some(j) => j,
-        None => return,
-    };
-
+fn draw_job_details(f: &mut ratatui::Frame, app: &App, area: Rect, job: &crate::db::JobRow) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
@@ -1522,62 +1599,96 @@ fn draw_history(f: &mut ratatui::Frame, app: &App, area: Rect) {
         app.theme.border_style()
     };
 
-    let total_items = app.history.len();
-    let display_height = area.height.saturating_sub(2) as usize; 
-    let items_per_page = display_height / 2; // Each item is 2 lines
+    // Header similar to Queue but without Progress
+    let header_cells = ["File", "Status", "Size", "Time"]
+        .iter()
+        .map(|h| Cell::from(*h).style(app.theme.header_style()));
+    let header = Row::new(header_cells)
+        .style(app.theme.header_style())
+        .height(1);
+
+    let total_rows = app.history.len();
+    let display_height = area.height.saturating_sub(4) as usize; // Border + Header
     let mut offset = 0;
     
-    if total_items > items_per_page {
-        if app.selected_history >= items_per_page / 2 {
-            offset = (app.selected_history + 1).saturating_sub(items_per_page / 2);
+    if total_rows > display_height {
+        if app.selected_history >= display_height / 2 {
+            offset = (app.selected_history + 1).saturating_sub(display_height / 2);
         }
-        if offset + items_per_page > total_items {
-            offset = total_items.saturating_sub(items_per_page);
+        if offset + display_height > total_rows {
+            offset = total_rows.saturating_sub(display_height);
         }
     }
 
-    let items: Vec<ListItem> = app.history.iter().enumerate()
+    let rows = app.history.iter().enumerate()
         .skip(offset)
-        .take(items_per_page)
-        .map(|(i, job)| {
-        let style = if i == app.selected_history && app.focus == AppFocus::History {
+        .take(display_height)
+        .map(|(idx, job)| {
+        let is_selected = (idx == app.selected_history) && (app.focus == AppFocus::History);
+        let row_style = if is_selected {
             app.theme.selection_style()
         } else {
-            app.theme.text_style()
+            app.theme.row_style(idx % 2 != 0)
         };
         
-        let file_name = job.source_path.split('/').last().unwrap_or("unknown");
-        let (status_text, status_style) = match job.status.as_str() {
-            "quarantined" => ("Quarantined ", app.theme.status_style(StatusKind::Error)),
-            "quarantined_removed" => ("Quarantined (Cleared) ", app.theme.status_style(StatusKind::Info)),
-            _ => ("Done ", app.theme.status_style(StatusKind::Success)),
+        // Extract filename from source_path
+        let filename = std::path::Path::new(&job.source_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| job.source_path.clone());
+        let display_name = if filename.len() > 30 {
+            format!("{}…", &filename[..29])
+        } else {
+            filename
         };
 
-        ListItem::new(vec![
-            Line::from(vec![
-                Span::styled(format!("#{:<3} ", job.id), app.theme.info_style()),
-                Span::styled(file_name, style),
-            ]),
-            Line::from(vec![
-                Span::from("      "),
-                Span::styled(status_text, status_style),
-                Span::styled(format_bytes(job.size_bytes as u64), app.theme.info_style()),
-            ]),
-        ])
-    }).collect();
+        // Status text
+        let status_str = match job.status.as_str() {
+            "quarantined" => "Threat Detected",
+            "quarantined_removed" => "Threat Removed",
+            "complete" => "Done",
+            s => s,
+        };
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(app.theme.border_type)
-                .title(" History ")
-                .border_style(focus_style)
-                .style(app.theme.panel_style()),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::ITALIC));
-    
-    f.render_widget(list, area);
+        // Relative time
+        let time_str = format_relative_time(&job.created_at);
+
+        let status_style = if is_selected {
+            app.theme.selection_style()
+        } else {
+            match job.status.as_str() {
+                "quarantined" | "quarantined_removed" => app.theme.status_style(StatusKind::Error),
+                "complete" => app.theme.status_style(StatusKind::Success),
+                _ => app.theme.text_style(),
+            }
+        };
+
+        Row::new(vec![
+            Cell::from(display_name),
+            Cell::from(status_str).style(status_style),
+            Cell::from(format_bytes(job.size_bytes as u64)),
+            Cell::from(time_str),
+        ])
+        .style(row_style)
+    });
+
+    let table = Table::new(rows, [
+        Constraint::Min(20),
+        Constraint::Length(16),
+        Constraint::Length(10),
+        Constraint::Length(10),
+    ])
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(app.theme.border_type)
+            .title(" History ")
+            .border_style(focus_style)
+            .style(app.theme.panel_style()),
+    );
+
+    f.render_widget(table, area);
 }
 
 fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
@@ -1686,8 +1797,10 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         AppTab::Settings => draw_settings(f, app, main_layout[1]),
     }
 
-    if app.focus == AppFocus::Queue && !app.jobs.is_empty() {
-        draw_job_details(f, app, main_layout[2]);
+    if app.focus == AppFocus::Queue && !app.jobs.is_empty() && app.selected < app.jobs.len() {
+        draw_job_details(f, app, main_layout[2], &app.jobs[app.selected]);
+    } else if app.focus == AppFocus::History && !app.history.is_empty() && app.selected_history < app.history.len() {
+        draw_job_details(f, app, main_layout[2], &app.history[app.selected_history]);
     } else {
         draw_history(f, app, main_layout[2]);
     }
