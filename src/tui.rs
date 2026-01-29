@@ -1,0 +1,2129 @@
+use crate::config::Config;
+use crate::db::{list_active_jobs, list_history_jobs, list_quarantined_jobs, JobRow};
+use crate::ingest::ingest_path;
+use crate::state::ProgressInfo;
+use crate::theme::{StatusKind, Theme};
+use crate::watch::Watcher;
+use anyhow::Result;
+use crossterm::event::{self, Event, KeyCode};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap};
+// #[allow(unused_imports)]
+// use ratatui::layout::Alignment;
+
+#[allow(dead_code)]
+fn centered_rect(
+    r: ratatui::layout::Rect,
+    percent_x: u16,
+    percent_y: u16,
+) -> ratatui::layout::Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+use ratatui::Terminal;
+use rusqlite::Connection;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::{self};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsCategory {
+    S3,
+    Scanner,
+    Performance,
+    Theme,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppTab {
+    Transfers,
+    Quarantine,
+    Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WizardStep {
+    Paths,
+    Scanner,
+    S3,
+    Performance,
+    Done,
+}
+
+#[derive(Debug, Clone)]
+struct WizardState {
+    step: WizardStep,
+    field: usize,
+    editing: bool,
+    // Paths
+    staging_dir: String,
+    quarantine_dir: String,
+    // Scanner
+    clamd_host: String,
+    clamd_port: String,
+    // S3
+    bucket: String,
+    region: String,
+    endpoint: String,
+    access_key: String,
+    secret_key: String,
+    // Performance
+    part_size: String,
+    concurrency: String,
+}
+
+impl WizardState {
+    fn new() -> Self {
+        Self {
+            step: WizardStep::Paths,
+            field: 0,
+            editing: false,
+            staging_dir: "./staging".to_string(),
+            quarantine_dir: "./quarantine".to_string(),
+            clamd_host: "127.0.0.1".to_string(),
+            clamd_port: "3310".to_string(),
+            bucket: String::new(),
+            region: "us-east-1".to_string(),
+            endpoint: String::new(),
+            access_key: String::new(),
+            secret_key: String::new(),
+            part_size: "64".to_string(),
+            concurrency: "4".to_string(),
+        }
+    }
+    
+    fn field_count(&self) -> usize {
+        match self.step {
+            WizardStep::Paths => 2,
+            WizardStep::Scanner => 2,
+            WizardStep::S3 => 5,
+            WizardStep::Performance => 2,
+            WizardStep::Done => 0,
+        }
+    }
+    
+    fn get_field_mut(&mut self) -> Option<&mut String> {
+        match (self.step, self.field) {
+            (WizardStep::Paths, 0) => Some(&mut self.staging_dir),
+            (WizardStep::Paths, 1) => Some(&mut self.quarantine_dir),
+            (WizardStep::Scanner, 0) => Some(&mut self.clamd_host),
+            (WizardStep::Scanner, 1) => Some(&mut self.clamd_port),
+            (WizardStep::S3, 0) => Some(&mut self.bucket),
+            (WizardStep::S3, 1) => Some(&mut self.region),
+            (WizardStep::S3, 2) => Some(&mut self.endpoint),
+            (WizardStep::S3, 3) => Some(&mut self.access_key),
+            (WizardStep::S3, 4) => Some(&mut self.secret_key),
+            (WizardStep::Performance, 0) => Some(&mut self.part_size),
+            (WizardStep::Performance, 1) => Some(&mut self.concurrency),
+            _ => None,
+        }
+    }
+    
+    fn next_step(&mut self) {
+        self.step = match self.step {
+            WizardStep::Paths => WizardStep::Scanner,
+            WizardStep::Scanner => WizardStep::S3,
+            WizardStep::S3 => WizardStep::Performance,
+            WizardStep::Performance => WizardStep::Done,
+            WizardStep::Done => WizardStep::Done,
+        };
+        self.field = 0;
+    }
+    
+    fn prev_step(&mut self) {
+        self.step = match self.step {
+            WizardStep::Paths => WizardStep::Paths,
+            WizardStep::Scanner => WizardStep::Paths,
+            WizardStep::S3 => WizardStep::Scanner,
+            WizardStep::Performance => WizardStep::S3,
+            WizardStep::Done => WizardStep::Performance,
+        };
+        self.field = 0;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppFocus {
+    Rail,
+    Browser, // Only in Transfers tab
+    Queue,   // Only in Transfers tab
+    History,
+    Quarantine, // Only in Quarantine tab
+    SettingsCategory, // Switch categories
+    SettingsFields,   // Edit fields
+}
+
+
+struct SettingsState {
+    endpoint: String,
+    bucket: String,
+    region: String,
+    prefix: String,
+    access_key: String,
+    secret_key: String,
+    clamd_host: String,
+    clamd_port: String,
+    scan_chunk_size: String,
+    part_size: String,
+    concurrency_global: String,
+    active_category: SettingsCategory,
+    selected_field: usize,
+    editing: bool,
+    theme: String,
+    original_theme: Option<String>,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputMode {
+    Normal,
+    Picker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerView {
+    List,
+    Tree,
+}
+
+#[derive(Clone)]
+struct FileEntry {
+    name: String,
+    path: PathBuf,
+    is_dir: bool,
+    is_parent: bool,
+    depth: usize,
+}
+
+struct FilePicker {
+    cwd: PathBuf,
+    entries: Vec<FileEntry>,
+    selected: usize,
+    last_error: Option<String>,
+    view: PickerView,
+    expanded: HashSet<PathBuf>,
+    selected_paths: HashSet<PathBuf>,
+}
+
+impl FilePicker {
+    fn new() -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut expanded = HashSet::new();
+        expanded.insert(cwd.clone());
+        Self {
+            cwd,
+            entries: Vec::new(),
+            selected: 0,
+            last_error: None,
+            view: PickerView::List,
+            expanded,
+            selected_paths: HashSet::new(),
+        }
+    }
+
+    fn refresh(&mut self) {
+        let result = match self.view {
+            PickerView::List => self.load_dir_list(&self.cwd),
+            PickerView::Tree => self.load_dir_tree(&self.cwd),
+        };
+        match result {
+            Ok(entries) => {
+                self.entries = entries;
+                if self.selected >= self.entries.len() {
+                    self.selected = self.entries.len().saturating_sub(1);
+                }
+                if self.entries.is_empty() {
+                    self.selected = 0;
+                }
+                self.last_error = None;
+            }
+            Err(err) => {
+                self.entries.clear();
+                self.selected = 0;
+                self.last_error = Some(err.to_string());
+            }
+        }
+    }
+
+    fn try_set_cwd(&mut self, path: PathBuf) {
+        match self.load_dir_list(&path) {
+            Ok(entries) => {
+                self.cwd = path;
+                self.entries = entries;
+                self.selected = 0;
+                self.last_error = None;
+                self.expanded.insert(self.cwd.clone());
+                if self.view == PickerView::Tree {
+                    self.entries = match self.load_dir_tree(&self.cwd) {
+                        Ok(tree) => tree,
+                        Err(err) => {
+                            self.last_error = Some(err.to_string());
+                            Vec::new()
+                        }
+                    };
+                }
+            }
+            Err(err) => {
+                self.last_error = Some(err.to_string());
+            }
+        }
+    }
+
+    fn load_dir_list(&self, path: &Path) -> Result<Vec<FileEntry>> {
+        let mut entries = Vec::new();
+        if let Some(parent) = path.parent() {
+            entries.push(FileEntry {
+                name: "..".to_string(),
+                path: parent.to_path_buf(),
+                is_dir: true,
+                is_parent: true,
+                depth: 0,
+            });
+        }
+        for entry in fs::read_dir(path)? {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            entries.push(FileEntry {
+                name,
+                path,
+                is_dir,
+                is_parent: false,
+                depth: 0,
+            });
+        }
+        entries.sort_by(
+            |a, b| match (a.is_parent, b.is_parent, a.is_dir, b.is_dir) {
+                (true, false, _, _) => std::cmp::Ordering::Less,
+                (false, true, _, _) => std::cmp::Ordering::Greater,
+                (_, _, true, false) => std::cmp::Ordering::Less,
+                (_, _, false, true) => std::cmp::Ordering::Greater,
+                _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            },
+        );
+        Ok(entries)
+    }
+
+    fn load_dir_tree(&self, path: &Path) -> Result<Vec<FileEntry>> {
+        let mut entries = Vec::new();
+        if let Some(parent) = path.parent() {
+            entries.push(FileEntry {
+                name: "..".to_string(),
+                path: parent.to_path_buf(),
+                is_dir: true,
+                is_parent: true,
+                depth: 0,
+            });
+        }
+        self.build_tree(path, 0, 4, &mut entries)?;
+        Ok(entries)
+    }
+
+    fn build_tree(
+        &self,
+        path: &Path,
+        depth: usize,
+        max_depth: usize,
+        entries: &mut Vec<FileEntry>,
+    ) -> Result<()> {
+        let dir_entries = match fs::read_dir(path) {
+            Ok(e) => e,
+            Err(_) => return Ok(()),
+        };
+
+        let mut children = Vec::new();
+        for entry in dir_entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            children.push(FileEntry {
+                name,
+                path,
+                is_dir,
+                is_parent: false,
+                depth,
+            });
+        }
+        children.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        });
+
+        for child in children {
+            let is_expanded = child.is_dir && self.expanded.contains(&child.path);
+            let child_path = child.path.clone();
+            entries.push(child);
+            if is_expanded && depth + 1 < max_depth {
+                let _ = self.build_tree(&child_path, depth + 1, max_depth, entries);
+            }
+        }
+        Ok(())
+    }
+
+    fn selected_entry(&self) -> Option<&FileEntry> {
+        self.entries.get(self.selected)
+    }
+
+    fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+
+    fn move_down(&mut self) {
+        if self.selected + 1 < self.entries.len() {
+            self.selected += 1;
+        }
+    }
+
+    fn page_up(&mut self) {
+        let step = 10;
+        if self.selected >= step {
+            self.selected -= step;
+        } else {
+            self.selected = 0;
+        }
+    }
+
+    fn page_down(&mut self) {
+        let step = 10;
+        self.selected = (self.selected + step).min(self.entries.len().saturating_sub(1));
+    }
+
+    fn go_parent(&mut self) {
+        if let Some(parent) = self.cwd.parent() {
+            self.try_set_cwd(parent.to_path_buf());
+        }
+    }
+
+    fn toggle_view(&mut self) {
+        self.view = match self.view {
+            PickerView::List => PickerView::Tree,
+            PickerView::Tree => PickerView::List,
+        };
+        self.refresh();
+    }
+
+    fn toggle_expand(&mut self) {
+        let entry = self.selected_entry().cloned();
+        if let Some(entry) = entry {
+            if entry.is_dir && !entry.is_parent {
+                if self.expanded.contains(&entry.path) {
+                    self.expanded.remove(&entry.path);
+                } else {
+                    self.expanded.insert(entry.path);
+                }
+                if self.view == PickerView::Tree {
+                    self.refresh();
+                }
+            }
+        }
+    }
+
+    fn toggle_select(&mut self) {
+        let entry = self.selected_entry().cloned();
+        if let Some(entry) = entry {
+            if entry.is_parent {
+                return;
+            }
+            if self.selected_paths.contains(&entry.path) {
+                self.selected_paths.remove(&entry.path);
+            } else {
+                self.selected_paths.insert(entry.path);
+            }
+        }
+    }
+
+    fn clear_selected(&mut self) {
+        self.selected_paths.clear();
+    }
+}
+
+pub struct App {
+    jobs: Vec<JobRow>,
+    history: Vec<JobRow>,
+    quarantine: Vec<JobRow>,
+    selected: usize,
+    selected_history: usize,
+    selected_quarantine: usize,
+    last_refresh: Instant,
+    status_message: String,
+    input_mode: InputMode,
+    input_buffer: String,
+    picker: FilePicker,
+    watch_enabled: bool,
+    _watch_path: Option<PathBuf>,
+    _watch_seen: HashSet<PathBuf>,
+    last_watch_scan: Instant,
+    _watcher: Watcher,
+    current_tab: AppTab,
+    focus: AppFocus,
+    settings: SettingsState,
+    config: Arc<Mutex<Config>>,
+    clamav_status: Arc<Mutex<String>>,
+    progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
+    // Wizard
+    show_wizard: bool,
+    wizard: WizardState,
+    theme: Theme,
+    theme_names: Vec<&'static str>,
+}
+
+impl App {
+    fn new(conn: Arc<Mutex<Connection>>, config: Arc<Mutex<Config>>, progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>) -> Self {
+        let cfg_guard = config.lock().unwrap();
+        let watcher_cfg = cfg_guard.clone();
+        let settings = SettingsState::from_config(&cfg_guard);
+        let theme = Theme::from_name(&cfg_guard.theme);
+        drop(cfg_guard);
+
+        let app = Self {
+            jobs: Vec::new(),
+            history: Vec::new(),
+            quarantine: Vec::new(),
+            selected: 0,
+            selected_history: 0,
+            selected_quarantine: 0,
+            last_refresh: Instant::now() - Duration::from_secs(5),
+            status_message: "Ready".to_string(),
+            input_mode: InputMode::Normal,
+            input_buffer: String::new(),
+            picker: FilePicker::new(),
+            watch_enabled: false,
+            _watch_path: None,
+            _watch_seen: HashSet::new(),
+            last_watch_scan: Instant::now() - Duration::from_secs(10),
+            _watcher: Watcher::new(conn, watcher_cfg),
+            current_tab: AppTab::Transfers,
+            focus: AppFocus::Rail,
+            settings,
+            config: config.clone(),
+            clamav_status: Arc::new(Mutex::new("Checking...".to_string())),
+            progress: progress.clone(),
+            show_wizard: false,
+            wizard: WizardState::new(),
+            theme,
+            theme_names: Theme::list_names(),
+        };
+
+        let status_clone = app.clamav_status.clone();
+        let config_clone = config.clone();
+        std::thread::spawn(move || {
+            loop {
+                // Read config for host/port
+                let (host, port) = {
+                    let cfg = config_clone.lock().unwrap();
+                    (cfg.clamd_host.clone(), cfg.clamd_port)
+                };
+                let addr = format!("{}:{}", host, port);
+                let status = if std::net::TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_secs(1)).is_ok() {
+                    "Connected"
+                } else {
+                    "Disconnected"
+                };
+                
+                {
+                    let mut s = status_clone.lock().unwrap();
+                    *s = status.to_string();
+                }
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        });
+
+        app
+    }
+
+    fn refresh_jobs(&mut self, conn: &Connection) -> Result<()> {
+        self.jobs = list_active_jobs(conn, 100)?;
+        self.history = list_history_jobs(conn, 100)?;
+        self.quarantine = list_quarantined_jobs(conn, 100)?;
+        
+        // Auto-fix selected if out of bounds
+        if self.selected >= self.jobs.len() {
+            self.selected = self.jobs.len().saturating_sub(1);
+        }
+        if self.selected_history >= self.history.len() {
+            self.selected_history = self.history.len().saturating_sub(1);
+        }
+        if self.selected_quarantine >= self.quarantine.len() {
+            self.selected_quarantine = self.quarantine.len().saturating_sub(1);
+        }
+        
+        self.last_refresh = Instant::now();
+        Ok(())
+    }
+}
+
+pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>, needs_wizard: bool) -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    let mut app = App::new(conn_mutex.clone(), cfg.clone(), progress);
+    app.show_wizard = needs_wizard;
+    
+    {
+        let conn = conn_mutex.lock().unwrap();
+        app.refresh_jobs(&conn)?;
+    }
+
+    let tick_rate = Duration::from_millis(200);
+    loop {
+        terminal.draw(|f| ui(f, &app))?;
+
+        if app.last_refresh.elapsed() > Duration::from_secs(1) {
+            let conn = conn_mutex.lock().unwrap();
+            app.refresh_jobs(&conn)?;
+        }
+
+        if app.watch_enabled && app.last_watch_scan.elapsed() > Duration::from_secs(2) {
+            let _conn = conn_mutex.lock().unwrap();
+            // ... (keep commented or simplified logic for now)
+            app.last_watch_scan = Instant::now();
+        }
+
+        if event::poll(tick_rate)? {
+            if let Event::Key(key) = event::read()? {
+                // Handle wizard mode separately
+                if app.show_wizard {
+                    match key.code {
+                        KeyCode::Char('q') if !app.wizard.editing => break,
+                        KeyCode::Esc if app.wizard.editing => {
+                            app.wizard.editing = false;
+                        }
+                        KeyCode::Enter => {
+                            if app.wizard.step == WizardStep::Done {
+                                // Save config and close wizard
+                                let conn = conn_mutex.lock().unwrap();
+                                let mut cfg = Config::default();
+                                cfg.staging_dir = app.wizard.staging_dir.clone();
+                                cfg.quarantine_dir = app.wizard.quarantine_dir.clone();
+                                cfg.clamd_host = app.wizard.clamd_host.clone();
+                                cfg.clamd_port = app.wizard.clamd_port.parse().unwrap_or(3310);
+                                cfg.s3_bucket = if app.wizard.bucket.is_empty() { None } else { Some(app.wizard.bucket.clone()) };
+                                cfg.s3_region = if app.wizard.region.is_empty() { None } else { Some(app.wizard.region.clone()) };
+                                cfg.s3_endpoint = if app.wizard.endpoint.is_empty() { None } else { Some(app.wizard.endpoint.clone()) };
+                                cfg.s3_access_key = if app.wizard.access_key.is_empty() { None } else { Some(app.wizard.access_key.clone()) };
+                                cfg.s3_secret_key = if app.wizard.secret_key.is_empty() { None } else { Some(app.wizard.secret_key.clone()) };
+                                cfg.part_size_mb = app.wizard.part_size.parse().unwrap_or(64);
+                                cfg.concurrency_upload_global = app.wizard.concurrency.parse().unwrap_or(4);
+                                cfg.concurrency_parts_per_file = 4;
+                                
+                                let _ = crate::config::save_config_to_db(&conn, &cfg);
+                                drop(conn);
+                                
+                                // Create directories if they don't exist
+                                let _ = std::fs::create_dir_all(&cfg.staging_dir);
+                                let _ = std::fs::create_dir_all(&cfg.quarantine_dir);
+                                let _ = std::fs::create_dir_all(&cfg.state_dir);
+                                
+                                // Update shared config
+                                let mut shared_cfg = app.config.lock().unwrap();
+                                *shared_cfg = cfg;
+                                drop(shared_cfg);
+                                
+                                // Reload settings state
+                                let cfg_guard = app.config.lock().unwrap();
+                                app.settings = SettingsState::from_config(&cfg_guard);
+                                
+                                app.show_wizard = false;
+                                app.status_message = "Setup complete!".to_string();
+                            } else {
+                                app.wizard.editing = !app.wizard.editing;
+                            }
+                        }
+                        KeyCode::Tab if !app.wizard.editing => {
+                            app.wizard.next_step();
+                        }
+                        KeyCode::BackTab if !app.wizard.editing => {
+                            app.wizard.prev_step();
+                        }
+                        KeyCode::Up if !app.wizard.editing => {
+                            if app.wizard.field > 0 {
+                                app.wizard.field -= 1;
+                            }
+                        }
+                        KeyCode::Down if !app.wizard.editing => {
+                            if app.wizard.field + 1 < app.wizard.field_count() {
+                                app.wizard.field += 1;
+                            }
+                        }
+                        KeyCode::Char(c) if app.wizard.editing => {
+                            if let Some(field) = app.wizard.get_field_mut() {
+                                field.push(c);
+                            }
+                        }
+                        KeyCode::Backspace if app.wizard.editing => {
+                            if let Some(field) = app.wizard.get_field_mut() {
+                                field.pop();
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                
+                // Determine if we are capturing input (e.g. editing settings or in picker typing)
+                let capturing_input = match app.focus {
+                    AppFocus::SettingsFields => app.settings.editing,
+                    AppFocus::Browser => app.input_mode == InputMode::Picker,
+                    _ => false,
+                };
+
+                // Meta keys (Quit, Tab)
+                if !capturing_input {
+                    match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Tab => {
+                            app.focus = match app.focus {
+                                AppFocus::Rail => match app.current_tab {
+                                    AppTab::Transfers => AppFocus::Browser,
+                                    AppTab::Quarantine => AppFocus::Quarantine,
+                                    AppTab::Settings => AppFocus::SettingsCategory,
+                                },
+                                AppFocus::Browser => AppFocus::Queue,
+                                AppFocus::Queue => AppFocus::History,
+                                AppFocus::SettingsCategory => AppFocus::SettingsFields,
+                                AppFocus::History | AppFocus::Quarantine | AppFocus::SettingsFields => AppFocus::Rail,
+                            };
+                        }
+                        KeyCode::BackTab => {
+                            app.focus = match app.focus {
+                                AppFocus::Rail => match app.current_tab {
+                                    AppTab::Transfers => AppFocus::History,
+                                    AppTab::Quarantine => AppFocus::Quarantine,
+                                    AppTab::Settings => AppFocus::SettingsFields,
+                                },
+                                AppFocus::History => AppFocus::Queue,
+                                AppFocus::Queue => AppFocus::Browser,
+                                AppFocus::SettingsFields => AppFocus::SettingsCategory,
+                                AppFocus::Browser | AppFocus::Quarantine | AppFocus::SettingsCategory => AppFocus::Rail,
+                            };
+                        }
+                        KeyCode::Right => {
+                             app.focus = match app.focus {
+                                AppFocus::Rail => match app.current_tab {
+                                    AppTab::Transfers => AppFocus::Browser,
+                                    AppTab::Quarantine => AppFocus::Quarantine,
+                                    AppTab::Settings => AppFocus::SettingsCategory,
+                                },
+                                AppFocus::Browser => AppFocus::Queue,
+                                AppFocus::Queue => AppFocus::History,
+                                AppFocus::SettingsCategory => AppFocus::SettingsFields,
+                                _ => app.focus,
+                            };
+                        }
+                        KeyCode::Left => {
+                             app.focus = match app.focus {
+                                AppFocus::History => AppFocus::Queue,
+                                AppFocus::Queue => AppFocus::Browser,
+                                AppFocus::Browser | AppFocus::Quarantine | AppFocus::SettingsCategory => AppFocus::Rail,
+                                AppFocus::SettingsFields => AppFocus::SettingsCategory,
+                                _ => app.focus,
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Focus-specific handling
+                match app.focus {
+                    AppFocus::Rail => {
+                         match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                app.current_tab = match app.current_tab {
+                                    AppTab::Transfers => AppTab::Settings,
+                                    AppTab::Quarantine => AppTab::Transfers,
+                                    AppTab::Settings => AppTab::Quarantine,
+                                };
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                app.current_tab = match app.current_tab {
+                                    AppTab::Transfers => AppTab::Quarantine,
+                                    AppTab::Quarantine => AppTab::Settings,
+                                    AppTab::Settings => AppTab::Transfers,
+                                };
+                            }
+                            _ => {}
+                         }
+                    }
+                    AppFocus::Browser => {
+                        match app.input_mode {
+                            InputMode::Normal => match key.code {
+                                KeyCode::Char('a') | KeyCode::Enter => {
+                                    app.input_mode = InputMode::Picker;
+                                    app.picker.refresh();
+                                    app.input_buffer.clear();
+                                    app.status_message = "Exploring files...".to_string();
+                                }
+                                _ => {}
+                            },
+                            InputMode::Picker => match key.code {
+                                KeyCode::Esc => app.input_mode = InputMode::Normal,
+                                KeyCode::Up => app.picker.move_up(),
+                                KeyCode::Down => app.picker.move_down(),
+                                KeyCode::PageUp => app.picker.page_up(),
+                                KeyCode::PageDown => app.picker.page_down(),
+                                KeyCode::Left => app.picker.go_parent(),
+                                KeyCode::Right => {
+                                    if let Some(entry) = app.picker.selected_entry() {
+                                        if entry.is_dir { 
+                                            if app.picker.view == PickerView::Tree {
+                                                app.picker.toggle_expand();
+                                            } else {
+                                                app.picker.try_set_cwd(entry.path.clone()); 
+                                                app.input_buffer.clear();
+                                            }
+                                        }
+                                    }
+                                }
+                                KeyCode::Char(' ') => app.picker.toggle_select(),
+                                KeyCode::Char('t') => app.picker.toggle_view(),
+                                KeyCode::Char('c') => app.picker.clear_selected(),
+                                KeyCode::Char('o') => {
+                                     if let Some(entry) = app.picker.selected_entry() {
+                                        if entry.is_dir { 
+                                            app.picker.try_set_cwd(entry.path.clone());
+                                            app.input_buffer.clear();
+                                        }
+                                     }
+                                }
+                                KeyCode::Char('s') => {
+                                    let paths: Vec<PathBuf> = app.picker.selected_paths.iter().cloned().collect();
+                                    if !paths.is_empty() {
+                                        let conn = conn_mutex.lock().unwrap();
+                                        let cfg_guard = cfg.lock().unwrap();
+                                        let staging = cfg_guard.staging_dir.clone();
+                                        drop(cfg_guard);
+                                        let mut total = 0;
+                                        for path in paths {
+                                            if let Ok(count) = ingest_path(&conn, &staging, &path.to_string_lossy()) {
+                                                total += count;
+                                            }
+                                        }
+                                        app.status_message = format!("Ingested {} items", total);
+                                        app.picker.clear_selected();
+                                        app.input_mode = InputMode::Normal;
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                     if let Some(entry) = app.picker.selected_entry() {
+                                        if entry.is_dir { 
+                                            app.picker.try_set_cwd(entry.path.clone());
+                                            app.input_buffer.clear();
+                                        } else {
+                                            let conn = conn_mutex.lock().unwrap();
+                                            let cfg_guard = cfg.lock().unwrap();
+                                            let staging = cfg_guard.staging_dir.clone();
+                                            drop(cfg_guard);
+                                            let _ = ingest_path(&conn, &staging, &entry.path.to_string_lossy());
+                                            app.status_message = "File added to queue".to_string();
+                                            app.input_mode = InputMode::Normal;
+                                        }
+                                     }
+                                }
+                                KeyCode::Backspace => {
+                                     if app.input_buffer.is_empty() {
+                                         app.picker.go_parent();
+                                     } else {
+                                         app.input_buffer.pop();
+                                     }
+                                }
+                                KeyCode::Char(c) => app.input_buffer.push(c),
+                                _ => {}
+                            }
+                        }
+                    }
+                    AppFocus::Queue => {
+                         match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => if app.selected > 0 { app.selected -= 1; },
+                            KeyCode::Down | KeyCode::Char('j') => if app.selected + 1 < app.jobs.len() { app.selected += 1; },
+                            KeyCode::Char('R') => {
+                                let conn = conn_mutex.lock().unwrap();
+                                let _ = app.refresh_jobs(&conn);
+                            }
+                            KeyCode::Char('r') => {
+                                if !app.jobs.is_empty() && app.selected < app.jobs.len() {
+                                    let id = app.jobs[app.selected].id;
+                                    let conn = conn_mutex.lock().unwrap();
+                                    let _ = crate::db::retry_job(&conn, id);
+                                    app.status_message = format!("Retried job {}", id);
+                                }
+                            }
+                            KeyCode::Char('d') | KeyCode::Delete => {
+                                if !app.jobs.is_empty() && app.selected < app.jobs.len() {
+                                    let id = app.jobs[app.selected].id;
+                                    let conn = conn_mutex.lock().unwrap();
+                                    let _ = crate::db::delete_job(&conn, id);
+                                    app.status_message = format!("Deleted job {}", id);
+                                    if app.selected >= app.jobs.len() && app.selected > 0 { app.selected -= 1; }
+                                }
+                            }
+                             _ => {}
+                         }
+                    }
+                    AppFocus::History => {
+                         match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => if app.selected_history > 0 { app.selected_history -= 1; },
+                            KeyCode::Down | KeyCode::Char('j') => if app.selected_history + 1 < app.history.len() { app.selected_history += 1; },
+                            _ => {}
+                         }
+                    }
+                    AppFocus::Quarantine => {
+                         match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => if app.selected_quarantine > 0 { app.selected_quarantine -= 1; },
+                            KeyCode::Down | KeyCode::Char('j') => if app.selected_quarantine + 1 < app.quarantine.len() { app.selected_quarantine += 1; },
+                            KeyCode::Char('d') | KeyCode::Delete => {
+                                if !app.quarantine.is_empty() && app.selected_quarantine < app.quarantine.len() {
+                                    let job = &app.quarantine[app.selected_quarantine];
+                                    let id = job.id;
+                                    let q_path = job.staged_path.clone();
+                                    
+                                    let conn = conn_mutex.lock().unwrap();
+                                    let _ = crate::db::update_scan_status(&conn, id, "removed", "quarantined_removed");
+                                    
+                                    if let Some(p) = q_path {
+                                        let _ = std::fs::remove_file(p);
+                                    }
+                                    
+                                    app.status_message = format!("Cleared quarantined job {} (record kept in history)", id);
+                                    
+                                    if app.selected_quarantine >= app.quarantine.len() && app.selected_quarantine > 0 { app.selected_quarantine -= 1; }
+                                }
+                            }
+                            KeyCode::Char('R') => {
+                                let conn = conn_mutex.lock().unwrap();
+                                let _ = app.refresh_jobs(&conn);
+                            }
+                            _ => {}
+                         }
+                    }
+                    AppFocus::SettingsCategory => {
+                         match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                app.settings.active_category = match app.settings.active_category {
+                                    SettingsCategory::S3 => SettingsCategory::Theme,
+                                    SettingsCategory::Scanner => SettingsCategory::S3,
+                                    SettingsCategory::Performance => SettingsCategory::Scanner,
+                                    SettingsCategory::Theme => SettingsCategory::Performance,
+                                };
+                                app.settings.selected_field = 0;
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                app.settings.active_category = match app.settings.active_category {
+                                    SettingsCategory::S3 => SettingsCategory::Scanner,
+                                    SettingsCategory::Scanner => SettingsCategory::Performance,
+                                    SettingsCategory::Performance => SettingsCategory::Theme,
+                                    SettingsCategory::Theme => SettingsCategory::S3,
+                                };
+                                app.settings.selected_field = 0;
+                            }
+                            KeyCode::Right | KeyCode::Enter => {
+                                app.focus = AppFocus::SettingsFields;
+                            }
+                            _ => {}
+                         }
+                    }
+                    AppFocus::SettingsFields => {
+                        let field_count = match app.settings.active_category {
+                            SettingsCategory::S3 => 6,
+                            SettingsCategory::Scanner => 3,
+                            SettingsCategory::Performance => 2,
+                            SettingsCategory::Theme => 1,
+                        };
+                        match key.code {
+                            KeyCode::Enter => {
+                                app.settings.editing = !app.settings.editing;
+                                
+                                if app.settings.editing {
+                                    // Entering edit mode
+                                    if app.settings.active_category == SettingsCategory::Theme {
+                                         app.settings.original_theme = Some(app.settings.theme.clone());
+                                    }
+                                } else {
+                                    // Exiting edit mode (Confirming) - Trigger Auto-Save
+                                    if app.settings.active_category == SettingsCategory::Theme {
+                                        app.settings.original_theme = None;
+                                    }
+
+                                    let mut cfg = app.config.lock().unwrap();
+                                    app.settings.apply_to_config(&mut cfg);
+                                    
+                                    // Apply theme immediately
+                                    app.theme = Theme::from_name(&cfg.theme);
+                                    
+                                    // Save entire config to database
+                                    let conn = conn_mutex.lock().unwrap();
+                                    if let Err(e) = crate::config::save_config_to_db(&conn, &cfg) {
+                                        app.status_message = format!("Save error: {}", e);
+                                    } else {
+                                        let field_name = match app.settings.active_category {
+                                            SettingsCategory::S3 => match app.settings.selected_field {
+                                                0 => "S3 Endpoint", 1 => "S3 Bucket", 2 => "S3 Region", 3 => "Prefix", 4 => "Access Key", 5 => "Secret Key", _ => "Settings"
+                                            },
+                                            SettingsCategory::Scanner => match app.settings.selected_field {
+                                                0 => "ClamAV Host", 1 => "ClamAV Port", 2 => "Chunk Size", _ => "Scanner"
+                                            },
+                                            SettingsCategory::Performance => "Performance",
+                                            SettingsCategory::Theme => "Theme",
+                                        };
+                                        app.status_message = format!("Saved: {}", field_name);
+                                    }
+                                }
+                            }
+                            KeyCode::Esc => {
+                                app.settings.editing = false;
+                                // Revert theme if cancelled
+                                if app.settings.active_category == SettingsCategory::Theme {
+                                    if let Some(orig) = &app.settings.original_theme {
+                                        app.settings.theme = orig.clone();
+                                        app.theme = Theme::from_name(orig);
+                                    }
+                                    app.settings.original_theme = None;
+                                }
+                            }
+                            // Theme cycle handling (Left/Right OR Up/Down when editing)
+                            KeyCode::Right | KeyCode::Down if app.settings.editing && app.settings.active_category == SettingsCategory::Theme => {
+                                let current = app.settings.theme.as_str();
+                                if let Some(idx) = app.theme_names.iter().position(|&n| n == current) {
+                                    let next_idx = (idx + 1) % app.theme_names.len();
+                                    app.settings.theme = app.theme_names[next_idx].to_string();
+                                    // Live preview
+                                    app.theme = Theme::from_name(&app.settings.theme);
+                                }
+                            }
+                            KeyCode::Left | KeyCode::Up if app.settings.editing && app.settings.active_category == SettingsCategory::Theme => {
+                                let current = app.settings.theme.as_str();
+                                if let Some(idx) = app.theme_names.iter().position(|&n| n == current) {
+                                    let prev_idx = (idx + app.theme_names.len() - 1) % app.theme_names.len();
+                                    app.settings.theme = app.theme_names[prev_idx].to_string();
+                                    // Live preview
+                                    app.theme = Theme::from_name(&app.settings.theme);
+                                }
+                            }
+                            // When editing, handle ALL characters including j/k/s
+                            KeyCode::Char(c) if app.settings.editing => {
+                                match (app.settings.active_category, app.settings.selected_field) {
+                                    (SettingsCategory::Theme, _) => {
+                                        // Specific handling for j/k in theme selection
+                                        if c == 'j' {
+                                            let current = app.settings.theme.as_str();
+                                            if let Some(idx) = app.theme_names.iter().position(|&n| n == current) {
+                                                let next_idx = (idx + 1) % app.theme_names.len();
+                                                app.settings.theme = app.theme_names[next_idx].to_string();
+                                                app.theme = Theme::from_name(&app.settings.theme);
+                                            }
+                                        } else if c == 'k' {
+                                            let current = app.settings.theme.as_str();
+                                            if let Some(idx) = app.theme_names.iter().position(|&n| n == current) {
+                                                let prev_idx = (idx + app.theme_names.len() - 1) % app.theme_names.len();
+                                                app.settings.theme = app.theme_names[prev_idx].to_string();
+                                                app.theme = Theme::from_name(&app.settings.theme);
+                                            }
+                                        }
+                                    }
+                                    (SettingsCategory::S3, 0) => app.settings.endpoint.push(c),
+                                    (SettingsCategory::S3, 1) => app.settings.bucket.push(c),
+                                    (SettingsCategory::S3, 2) => app.settings.region.push(c),
+                                    (SettingsCategory::S3, 3) => app.settings.prefix.push(c),
+                                    (SettingsCategory::S3, 4) => app.settings.access_key.push(c),
+                                    (SettingsCategory::S3, 5) => app.settings.secret_key.push(c),
+                                    (SettingsCategory::Scanner, 0) => app.settings.clamd_host.push(c),
+                                    (SettingsCategory::Scanner, 1) => app.settings.clamd_port.push(c),
+                                    (SettingsCategory::Scanner, 2) => app.settings.scan_chunk_size.push(c),
+                                    (SettingsCategory::Performance, 0) => app.settings.part_size.push(c),
+                                    (SettingsCategory::Performance, 1) => app.settings.concurrency_global.push(c),
+                                    _ => {}
+                                }
+                            }
+                            KeyCode::Backspace if app.settings.editing => {
+                                match (app.settings.active_category, app.settings.selected_field) {
+                                    (SettingsCategory::S3, 0) => { app.settings.endpoint.pop(); }
+                                    (SettingsCategory::S3, 1) => { app.settings.bucket.pop(); }
+                                    (SettingsCategory::S3, 2) => { app.settings.region.pop(); }
+                                    (SettingsCategory::S3, 3) => { app.settings.prefix.pop(); }
+                                    (SettingsCategory::S3, 4) => { app.settings.access_key.pop(); }
+                                    (SettingsCategory::S3, 5) => { app.settings.secret_key.pop(); }
+                                    (SettingsCategory::Scanner, 0) => { app.settings.clamd_host.pop(); }
+                                    (SettingsCategory::Scanner, 1) => { app.settings.clamd_port.pop(); }
+                                    (SettingsCategory::Scanner, 2) => { app.settings.scan_chunk_size.pop(); }
+                                    (SettingsCategory::Performance, 0) => { app.settings.part_size.pop(); }
+                                    (SettingsCategory::Performance, 1) => { app.settings.concurrency_global.pop(); }
+                                    _ => {}
+                                }
+                            }
+                            // Navigation only when NOT editing
+                            KeyCode::Up | KeyCode::Char('k') if !app.settings.editing => {
+                                if app.settings.selected_field > 0 { app.settings.selected_field -= 1; }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') if !app.settings.editing => {
+                                if app.settings.selected_field + 1 < field_count { app.settings.selected_field += 1; }
+                            }
+                            KeyCode::Char('s') if !app.settings.editing || (app.settings.editing && app.settings.active_category == SettingsCategory::Theme) => {
+                                // If saving while editing theme, exit edit mode and commit
+                                if app.settings.editing && app.settings.active_category == SettingsCategory::Theme {
+                                    app.settings.editing = false;
+                                    app.settings.original_theme = None;
+                                }
+
+                                let mut cfg = app.config.lock().unwrap();
+                                app.settings.apply_to_config(&mut cfg);
+                                
+                                // Apply theme immediately
+                                app.theme = Theme::from_name(&cfg.theme);
+                                
+                                // Save entire config to database
+                                let conn = conn_mutex.lock().unwrap();
+                                if let Err(e) = crate::config::save_config_to_db(&conn, &cfg) {
+                                    app.status_message = format!("Save error: {}", e);
+                                } else {
+                                    app.status_message = format!("Configuration saved. Bucket: {}", cfg.s3_bucket.as_deref().unwrap_or("None"));
+                                }
+                            }
+                            KeyCode::Char('w') if !app.settings.editing => {
+                                // Launch setup wizard
+                                app.wizard = WizardState::new();
+                                app.show_wizard = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+
+impl SettingsState {
+    fn from_config(cfg: &Config) -> Self {
+        Self {
+            endpoint: cfg.s3_endpoint.clone().unwrap_or_default(),
+            bucket: cfg.s3_bucket.clone().unwrap_or_default(),
+            region: cfg.s3_region.clone().unwrap_or_default(),
+            prefix: cfg.s3_prefix.clone().unwrap_or_default(),
+            access_key: cfg.s3_access_key.clone().unwrap_or_default(),
+            secret_key: cfg.s3_secret_key.clone().unwrap_or_default(),
+            clamd_host: cfg.clamd_host.clone(),
+            clamd_port: cfg.clamd_port.to_string(),
+            scan_chunk_size: cfg.scan_chunk_size_mb.to_string(),
+            part_size: cfg.part_size_mb.to_string(),
+            concurrency_global: cfg.concurrency_upload_global.to_string(),
+            active_category: SettingsCategory::S3,
+            selected_field: 0,
+            editing: false,
+            theme: cfg.theme.clone(),
+            original_theme: None,
+        }
+    }
+
+    fn apply_to_config(&self, cfg: &mut Config) {
+        cfg.s3_endpoint = if self.endpoint.trim().is_empty() { None } else { Some(self.endpoint.trim().to_string()) };
+        cfg.s3_bucket = if self.bucket.trim().is_empty() { None } else { Some(self.bucket.trim().to_string()) };
+        cfg.s3_region = if self.region.trim().is_empty() { None } else { Some(self.region.trim().to_string()) };
+        cfg.s3_prefix = if self.prefix.trim().is_empty() { None } else { Some(self.prefix.trim().to_string()) };
+        cfg.s3_access_key = if self.access_key.trim().is_empty() { None } else { Some(self.access_key.trim().to_string()) };
+        cfg.s3_secret_key = if self.secret_key.trim().is_empty() { None } else { Some(self.secret_key.trim().to_string()) };
+        cfg.clamd_host = self.clamd_host.trim().to_string();
+        if let Ok(p) = self.clamd_port.trim().parse() { cfg.clamd_port = p; }
+        if let Ok(v) = self.scan_chunk_size.trim().parse() { cfg.scan_chunk_size_mb = v; }
+        if let Ok(v) = self.part_size.trim().parse() { cfg.part_size_mb = v; }
+        if let Ok(v) = self.concurrency_global.trim().parse() { cfg.concurrency_upload_global = v; }
+        cfg.theme = self.theme.clone();
+    }
+}
+
+fn draw_rail(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let focus_style = if app.focus == AppFocus::Rail {
+        app.theme.border_active_style()
+    } else {
+        app.theme.border_style()
+    };
+
+    let items = vec![" Transfers ", " Quarantine ", " Settings  "];
+    let rows: Vec<Row> = items.iter().enumerate().map(|(id, name)| {
+        let style = if app.current_tab as usize == id {
+            app.theme.selection_style()
+        } else {
+            app.theme.text_style()
+        };
+        Row::new(vec![Cell::from(name.to_string())]).style(style)
+    }).collect();
+
+    let table = Table::new(rows, [Constraint::Length(12)])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(app.theme.border_type)
+                .title("Nav")
+                .border_style(focus_style)
+                .style(app.theme.panel_style()),
+        );
+    f.render_widget(table, area);
+}
+
+fn draw_job_details(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let job = match app.jobs.get(app.selected) {
+        Some(j) => j,
+        None => return,
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(app.theme.border_type)
+        .title(format!(" Job #{} Details ", job.id))
+        .border_style(app.theme.border_style())
+        .style(app.theme.panel_style());
+
+    let scan_status = job.scan_status.as_deref().unwrap_or("none");
+    let error = job.error.as_deref().unwrap_or("none");
+
+    let text = vec![
+        Line::from(vec![
+            Span::styled("Status: ", app.theme.highlight_style()),
+            Span::styled(job.status.clone(), app.theme.status_style(status_kind(job.status.as_str()))),
+        ]),
+        Line::from(vec![
+            Span::styled("Path:   ", app.theme.highlight_style()),
+            Span::styled(job.source_path.clone(), app.theme.text_style()),
+        ]),
+        Line::from(vec![
+            Span::styled("Size:   ", app.theme.highlight_style()),
+            Span::styled(format_bytes(job.size_bytes as u64), app.theme.text_style()),
+        ]),
+        Line::from(vec![
+            Span::styled("Scan:   ", app.theme.highlight_style()),
+            Span::styled(scan_status, app.theme.text_style()),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "DETAILS / ERRORS:",
+            app.theme.highlight_style().add_modifier(Modifier::UNDERLINED),
+        )),
+        Line::from(Span::styled(
+            error,
+            if error != "none" {
+                app.theme.status_style(StatusKind::Error)
+            } else {
+                app.theme.text_style()
+            },
+        )),
+    ];
+
+    let p = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
+    f.render_widget(p, area);
+}
+
+fn draw_transfers(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(50), // Browser (Hopper)
+            Constraint::Percentage(50), // Jobs (Queue)
+        ])
+        .split(area);
+    
+    draw_browser(f, app, chunks[0]);
+    draw_jobs(f, app, chunks[1]);
+}
+
+fn draw_history(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let focus_style = if app.focus == AppFocus::History {
+        app.theme.border_active_style()
+    } else {
+        app.theme.border_style()
+    };
+
+    let total_items = app.history.len();
+    let display_height = area.height.saturating_sub(2) as usize; 
+    let items_per_page = display_height / 2; // Each item is 2 lines
+    let mut offset = 0;
+    
+    if total_items > items_per_page {
+        if app.selected_history >= items_per_page / 2 {
+            offset = (app.selected_history + 1).saturating_sub(items_per_page / 2);
+        }
+        if offset + items_per_page > total_items {
+            offset = total_items.saturating_sub(items_per_page);
+        }
+    }
+
+    let items: Vec<ListItem> = app.history.iter().enumerate()
+        .skip(offset)
+        .take(items_per_page)
+        .map(|(i, job)| {
+        let style = if i == app.selected_history && app.focus == AppFocus::History {
+            app.theme.selection_style()
+        } else {
+            app.theme.text_style()
+        };
+        
+        let file_name = job.source_path.split('/').last().unwrap_or("unknown");
+        let (status_text, status_style) = match job.status.as_str() {
+            "quarantined" => ("Quarantined ", app.theme.status_style(StatusKind::Error)),
+            "quarantined_removed" => ("Quarantined (Cleared) ", app.theme.status_style(StatusKind::Info)),
+            _ => ("Done ", app.theme.status_style(StatusKind::Success)),
+        };
+
+        ListItem::new(vec![
+            Line::from(vec![
+                Span::styled(format!("#{:<3} ", job.id), app.theme.info_style()),
+                Span::styled(file_name, style),
+            ]),
+            Line::from(vec![
+                Span::from("      "),
+                Span::styled(status_text, status_style),
+                Span::styled(format_bytes(job.size_bytes as u64), app.theme.info_style()),
+            ]),
+        ])
+    }).collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(app.theme.border_type)
+                .title(" History ")
+                .border_style(focus_style)
+                .style(app.theme.panel_style()),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::ITALIC));
+    
+    f.render_widget(list, area);
+}
+
+fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let footer_text = match app.input_mode {
+        InputMode::Picker => {
+            "Picker: ↑/↓ move, Enter open/select, Left/Right nav, o open, t tree, space select, s add, Esc cancel"
+        }
+        InputMode::Normal => match app.focus {
+            AppFocus::Rail => "Tab/Right: Content | ↑/↓: Switch Tab | q: Quit",
+            AppFocus::Browser => "Tab: Queue | Left: Rail | a: Open | space: Select | s: Stage",
+            AppFocus::Queue => "Tab: History | Left: Browser | r: Retry | d: Delete",
+            AppFocus::History => "Tab: Rail | Left: Queue",
+            AppFocus::Quarantine => "Tab: Rail | Left: Rail | d: Clear | R: Refresh",
+            AppFocus::SettingsCategory => "Tab/Right: Fields | Left: Rail | ↑/↓: Category",
+            AppFocus::SettingsFields => "Tab: Rail | Left: Category | Enter: Edit | s: Save",
+        },
+    };
+    let status_line = format!("{} | {}", footer_text, app.status_message);
+    let footer = Paragraph::new(status_line).style(app.theme.muted_style());
+    f.render_widget(footer, area);
+}
+
+fn draw_system_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let av_status = app.clamav_status.lock().unwrap().clone();
+    let s3_status = if app.settings.bucket.is_empty() { "Not Configured" } else { "Ready" };
+    
+    let content = vec![
+        Line::from(vec![
+            Span::styled(" CLAMAV ", app.theme.button_style(true)),
+            Span::from(" "),
+            Span::styled(
+                av_status,
+                if app.clamav_status.lock().unwrap().contains("Ready") {
+                    app.theme.status_style(StatusKind::Success)
+                } else {
+                    app.theme.status_style(StatusKind::Warning)
+                },
+            ),
+            Span::from("  │  "),
+            Span::styled(" S3 STORAGE ", app.theme.button_style(true)),
+            Span::from(" "),
+            Span::styled(
+                s3_status,
+                if app.settings.bucket.is_empty() {
+                    app.theme.status_style(StatusKind::Error)
+                } else {
+                    app.theme.status_style(StatusKind::Success)
+                },
+            ),
+            Span::from(format!(" (Bucket: {})", if app.settings.bucket.is_empty() { "-" } else { &app.settings.bucket })),
+            Span::from("  │  "),
+            Span::styled(" QUEUE ", app.theme.button_style(true)),
+            Span::from(format!(" {} Jobs", app.jobs.len())),
+            Span::from("  │  "),
+            Span::styled(" QUARANTINE ", app.theme.status_badge_style(StatusKind::Error)),
+            Span::from(format!(" {} Threats", app.quarantine.len())),
+        ]),
+    ];
+
+    let p = Paragraph::new(content)
+        .block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_type(app.theme.border_type)
+                .border_style(app.theme.border_style())
+                .style(app.theme.panel_style()),
+        );
+    f.render_widget(p, area);
+}
+
+fn ui(f: &mut ratatui::Frame, app: &App) {
+    // If wizard is active, render wizard overlay instead
+    if app.show_wizard {
+        draw_wizard(f, app);
+        return;
+    }
+
+    f.render_widget(Block::default().style(app.theme.base_style()), f.size());
+    
+    let root = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(2), // System Status
+            Constraint::Length(1), // Footer
+        ])
+        .split(f.size());
+
+    let main_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(14), // Rail
+            Constraint::Min(0),     // Content Area (Hopper + Queue)
+            Constraint::Length(60), // History / Details
+        ])
+        .split(root[0]);
+
+    draw_rail(f, app, main_layout[0]);
+
+    match app.current_tab {
+        AppTab::Transfers => draw_transfers(f, app, main_layout[1]),
+        AppTab::Quarantine => draw_quarantine(f, app, main_layout[1]),
+        AppTab::Settings => draw_settings(f, app, main_layout[1]),
+    }
+
+    if app.focus == AppFocus::Queue && !app.jobs.is_empty() {
+        draw_job_details(f, app, main_layout[2]);
+    } else {
+        draw_history(f, app, main_layout[2]);
+    }
+    draw_system_status(f, app, root[1]);
+    draw_footer(f, app, root[2]);
+}
+
+fn draw_wizard(f: &mut ratatui::Frame, app: &App) {
+    let area = f.size();
+    
+    // Center the wizard
+    let wizard_area = centered_rect(area, 60, 70);
+    
+    // Clear background
+    f.render_widget(Block::default().style(app.theme.base_style()), area);
+    
+    let step_title = match app.wizard.step {
+        WizardStep::Paths => "Step 1/4: Directory Paths",
+        WizardStep::Scanner => "Step 2/4: ClamAV Scanner",
+        WizardStep::S3 => "Step 3/4: S3 Storage",
+        WizardStep::Performance => "Step 4/4: Performance",
+        WizardStep::Done => "Setup Complete!",
+    };
+    
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(app.theme.border_type)
+        .title(format!(" {} Setup Wizard ", "🚀"))
+        .border_style(app.theme.border_active_style());
+    
+    let inner = block.inner(wizard_area);
+    f.render_widget(block, wizard_area);
+    
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // Title
+            Constraint::Min(0),    // Fields
+            Constraint::Length(2), // Navigation
+        ])
+        .split(inner);
+    
+    // Step title
+    let title = Paragraph::new(step_title)
+        .style(app.theme.highlight_style())
+        .alignment(ratatui::layout::Alignment::Center);
+    f.render_widget(title, chunks[0]);
+    
+    // Fields based on step
+    let fields: Vec<(&str, &str)> = match app.wizard.step {
+        WizardStep::Paths => vec![
+            ("Staging Directory", &app.wizard.staging_dir),
+            ("Quarantine Directory", &app.wizard.quarantine_dir),
+        ],
+        WizardStep::Scanner => vec![
+            ("ClamAV Host", &app.wizard.clamd_host),
+            ("ClamAV Port", &app.wizard.clamd_port),
+        ],
+        WizardStep::S3 => vec![
+            ("Bucket Name", &app.wizard.bucket),
+            ("Region", &app.wizard.region),
+            ("Endpoint (optional)", &app.wizard.endpoint),
+            ("Access Key", &app.wizard.access_key),
+            ("Secret Key", &app.wizard.secret_key),
+        ],
+        WizardStep::Performance => vec![
+            ("Part Size (MB)", &app.wizard.part_size),
+            ("Concurrency", &app.wizard.concurrency),
+        ],
+        WizardStep::Done => vec![],
+    };
+    
+    if app.wizard.step == WizardStep::Done {
+        let done_text = Paragraph::new("Configuration saved! Press Enter to continue.")
+            .style(app.theme.status_style(StatusKind::Success))
+            .alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(done_text, chunks[1]);
+    } else {
+        let field_items: Vec<Line> = fields.iter().enumerate().flat_map(|(i, (label, value))| {
+            let is_selected = i == app.wizard.field;
+            let is_editing = is_selected && app.wizard.editing;
+            
+            let label_style = if is_selected {
+                app.theme.highlight_style()
+            } else {
+                app.theme.muted_style()
+            };
+            
+            let value_display = if is_editing {
+                format!("{}█", value)
+            } else {
+                value.to_string()
+            };
+            
+            let value_style = if is_editing {
+                app.theme.input_style(true)
+            } else if is_selected {
+                app.theme.selection_soft_style()
+            } else {
+                app.theme.dim_style()
+            };
+            
+            vec![
+                Line::from(Span::styled(format!("  {}", label), label_style)),
+                Line::from(Span::styled(format!("  > {}", value_display), value_style)),
+                Line::from(""),
+            ]
+        }).collect();
+        
+        let fields_widget = Paragraph::new(field_items);
+        f.render_widget(fields_widget, chunks[1]);
+    }
+    
+    // Navigation hints
+    let nav_text = if app.wizard.step == WizardStep::Done {
+        "Enter: Continue"
+    } else if app.wizard.editing {
+        "Enter: Confirm | Esc: Cancel"
+    } else {
+        "↑/↓: Select | Enter: Edit | Tab: Next Step | Shift+Tab: Back | q: Quit"
+    };
+    
+    let nav = Paragraph::new(nav_text)
+        .style(app.theme.dim_style())
+        .alignment(ratatui::layout::Alignment::Center);
+    f.render_widget(nav, chunks[2]);
+}
+
+
+
+fn draw_jobs(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let focus_style = if app.focus == AppFocus::Queue {
+        app.theme.border_active_style()
+    } else {
+        app.theme.border_style()
+    };
+
+    let header_cells = ["ID", "Status", "Size", "Progress", "Details"]
+        .iter()
+        .map(|h| Cell::from(*h).style(app.theme.header_style()));
+    let header = Row::new(header_cells)
+        .style(app.theme.header_style())
+        .height(1);
+
+    let total_rows = app.jobs.len();
+    let display_height = area.height.saturating_sub(4) as usize; // Border + Header
+    let mut offset = 0;
+    
+    if total_rows > display_height {
+        if app.selected >= display_height / 2 {
+            offset = (app.selected + 1).saturating_sub(display_height / 2);
+        }
+        if offset + display_height > total_rows {
+            offset = total_rows.saturating_sub(display_height);
+        }
+    }
+
+    let rows = app.jobs.iter().enumerate()
+        .skip(offset)
+        .take(display_height)
+        .map(|(idx, job)| {
+        let is_selected = (idx == app.selected) && (app.focus == AppFocus::Queue);
+        let row_style = if is_selected {
+            app.theme.selection_style()
+        } else {
+            app.theme.row_style(idx % 2 != 0)
+        };
+        
+        let (p_str, d_str) = {
+            if job.status == "uploading" {
+                let p_map = app.progress.lock().unwrap();
+                let entry = p_map.get(&job.id).cloned();
+                drop(p_map);
+                if let Some(info) = entry {
+                    let bar_width = 10;
+                    let filled = (info.percent.clamp(0.0, 100.0) / 100.0 * (bar_width as f64)) as usize;
+                    let bar = format!("{}{} {:.0}%", "█".repeat(filled), "░".repeat(bar_width - filled), info.percent);
+                    (bar, info.details.clone())
+                } else {
+                    ("░░░░░░░░░░ 0%".to_string(), "Pending...".to_string())
+                }
+            } else if job.status == "complete" {
+                ("██████████ 100%".to_string(), "Done".to_string())
+            } else if job.status == "quarantined" || job.status == "quarantined_removed" {
+                ("XXXXXXXXXX ERR ".to_string(), format!("Threat Detected: {}", job.scan_status.clone().unwrap_or_default()))
+            } else {
+                ("----------".to_string(), job.error.clone().unwrap_or_default())
+            }
+        };
+
+        let status_style = if is_selected {
+            app.theme.selection_style()
+        } else {
+            app.theme.status_style(status_kind(job.status.as_str()))
+        };
+        let progress_style = if is_selected {
+            app.theme.selection_style()
+        } else {
+            app.theme.progress_style()
+        };
+
+        Row::new(vec![
+            Cell::from(job.id.to_string()),
+            Cell::from(job.status.clone()).style(status_style),
+            Cell::from(format_bytes(job.size_bytes as u64)),
+            Cell::from(p_str).style(progress_style),
+            Cell::from(d_str),
+        ])
+        .style(row_style)
+    });
+
+    let table = Table::new(rows, [
+        Constraint::Length(5),
+        Constraint::Length(12),
+        Constraint::Length(10),
+        Constraint::Length(15),
+        Constraint::Min(20),
+    ])
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(app.theme.border_type)
+            .title(" Queue (Jobs) ")
+            .border_style(focus_style)
+            .style(app.theme.panel_style()),
+    );
+
+    f.render_widget(table, area);
+}
+
+fn draw_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let is_focused = app.focus == AppFocus::Browser;
+    let focus_style = if is_focused {
+        app.theme.border_active_style()
+    } else {
+        app.theme.border_style()
+    };
+
+    let title = if is_focused {
+        format!(" Hopper (Browser): {} ", app.picker.cwd.to_string_lossy())
+    } else {
+        " Hopper (Press 'a' to explore files) ".to_string()
+    };
+
+    let total_rows = app.picker.entries.len();
+    let display_height = area.height.saturating_sub(2) as usize; 
+    let mut offset = 0;
+    
+    if total_rows > display_height {
+        if app.picker.selected >= display_height / 2 {
+            offset = (app.picker.selected + 1).saturating_sub(display_height / 2);
+        }
+        if offset + display_height > total_rows {
+            offset = total_rows.saturating_sub(display_height);
+        }
+    }
+
+    let items: Vec<Row> = app
+        .picker
+        .entries
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(display_height)
+        .map(|(i, entry)| {
+            let prefix = if entry.is_dir { "📁 " } else { "📄 " };
+            let expand = if entry.is_dir && !entry.is_parent {
+                 if app.picker.expanded.contains(&entry.path) { "[-] " } else { "[+] " }
+            } else { "" };
+            
+            let name_styled = format!("{}{}{}", "  ".repeat(entry.depth), expand, prefix) + &entry.name;
+            
+            let style = if (i == app.picker.selected) && (app.focus == AppFocus::Browser) {
+                app.theme.selection_style()
+            } else if app.picker.selected_paths.contains(&entry.path) {
+                app.theme.status_style(StatusKind::Success)
+            } else if i % 2 == 0 {
+                app.theme.row_style(false)
+            } else {
+                 app.theme.row_style(true)
+            };
+
+            Row::new(vec![Cell::from(name_styled)]).style(style)
+        })
+        .collect();
+
+    let table = Table::new(items, [Constraint::Min(0)])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(app.theme.border_type)
+                .title(title)
+                .border_style(focus_style)
+                .style(app.theme.panel_style()),
+        );
+
+    f.render_widget(table, area);
+}
+
+fn draw_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let has_focus = app.focus == AppFocus::SettingsCategory || app.focus == AppFocus::SettingsFields;
+    let focus_style = if has_focus {
+        app.theme.border_active_style()
+    } else {
+        app.theme.border_style()
+    };
+
+    let title = " Configuration (S: Save Changes) ";
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(app.theme.border_type)
+        .title(title)
+        .border_style(focus_style)
+        .style(app.theme.panel_style());
+    
+    let inner_area = outer_block.inner(area);
+    f.render_widget(outer_block, area);
+
+    let main_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(16),
+            Constraint::Min(0),
+        ])
+        .split(inner_area);
+
+    // Sidebar Categories
+    let categories = vec!["S3 Storage", "Scanner", "Performance", "Theme"];
+    let cat_items: Vec<ListItem> = categories.iter().enumerate().map(|(id, name)| {
+        let is_active = app.settings.active_category as usize == id;
+        let style = if is_active {
+            if app.focus == AppFocus::SettingsCategory {
+                app.theme.selection_style()
+            } else {
+                app.theme.accent_style().add_modifier(Modifier::BOLD)
+            }
+        } else {
+            app.theme.text_style()
+        };
+        ListItem::new(format!(" {} ", name)).style(style)
+    }).collect();
+
+    let sidebar_block = Block::default()
+        .borders(Borders::RIGHT)
+        .border_type(app.theme.border_type)
+        .border_style(app.theme.border_style())
+        .style(app.theme.panel_style());
+    let sidebar = List::new(cat_items).block(sidebar_block);
+    f.render_widget(sidebar, main_layout[0]);
+
+    // Fields area
+    let fields_area = main_layout[1];
+    let display_height = fields_area.height as usize;
+    let fields_per_view = display_height / 3;
+    
+    let fields = match app.settings.active_category {
+        SettingsCategory::S3 => vec![
+            ("S3 Endpoint", app.settings.endpoint.as_str()),
+            ("S3 Bucket", app.settings.bucket.as_str()),
+            ("S3 Region", app.settings.region.as_str()),
+            ("S3 Prefix", app.settings.prefix.as_str()),
+            ("S3 Access Key", app.settings.access_key.as_str()),
+            ("S3 Secret Key", if app.settings.editing && app.settings.selected_field == 5 { app.settings.secret_key.as_str() } else { "*******" }),
+        ],
+        SettingsCategory::Scanner => vec![
+            ("ClamAV Host", app.settings.clamd_host.as_str()),
+            ("ClamAV Port", app.settings.clamd_port.as_str()),
+            ("Scan Chunk Size (MB)", app.settings.scan_chunk_size.as_str()),
+        ],
+        SettingsCategory::Performance => vec![
+            ("Part Size (MB)", app.settings.part_size.as_str()),
+            ("Global Concurrency", app.settings.concurrency_global.as_str()),
+        ],
+        SettingsCategory::Theme => vec![
+            ("Theme", app.settings.theme.as_str()),
+        ],
+    };
+
+    if fields_per_view == 0 { return; }
+
+    let field_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Length(3); fields_per_view])
+        .split(fields_area);
+
+    let mut offset = 0;
+    if app.settings.selected_field >= fields_per_view {
+        offset = app.settings.selected_field.saturating_sub(fields_per_view / 2);
+    }
+    
+    // Safety check for offset
+    if fields.len() > fields_per_view && offset + fields_per_view > fields.len() {
+        offset = fields.len() - fields_per_view;
+    }
+
+    for (i, (title, value)) in fields.iter().enumerate().skip(offset).take(fields_per_view) {
+        let chunk_idx = i - offset;
+        if chunk_idx >= field_chunks.len() { break; }
+
+        let is_selected = (app.settings.selected_field == i) && (app.focus == AppFocus::SettingsFields);
+        let border_style = if is_selected {
+            if app.settings.editing {
+                app.theme.input_border_style(true)
+            } else {
+                app.theme.border_active_style()
+            }
+        } else {
+            app.theme.border_style()
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(app.theme.border_type)
+            .title(*title)
+            .border_style(border_style)
+            .style(app.theme.panel_style());
+
+        let value_style = if is_selected && app.settings.editing && app.settings.active_category != SettingsCategory::Theme {
+            app.theme.input_style(true)
+        } else if is_selected {
+            app.theme.text_style().add_modifier(Modifier::BOLD)
+        } else {
+            app.theme.text_style()
+        };
+
+        let p = Paragraph::new(*value).block(block).style(value_style);
+        f.render_widget(p, field_chunks[chunk_idx]);
+
+        // Draw cursor if editing non-theme fields
+        if is_selected && app.settings.editing && app.settings.active_category != SettingsCategory::Theme {
+            f.set_cursor(
+                field_chunks[chunk_idx].x + 1 + value.len() as u16,
+                field_chunks[chunk_idx].y + 1,
+            );
+        }
+    }
+
+    // Special rendering for Theme Selection List
+    if app.settings.editing && app.settings.active_category == SettingsCategory::Theme {
+        let max_width = fields_area.width.saturating_sub(2);
+        let max_height = fields_area.height.saturating_sub(2);
+        if max_width < 22 || max_height < 8 {
+            return;
+        }
+
+        let width = max_width.min(62);
+        let height = max_height.min(14).max(8);
+        let theme_area = Rect {
+            x: fields_area.x + 1,
+            y: fields_area.y + 1,
+            width,
+            height,
+        };
+
+        let theme_area = theme_area.intersection(fields_area);
+        f.render_widget(ratatui::widgets::Clear, theme_area);
+
+        let show_preview = theme_area.width >= 54;
+        let gap = if show_preview { 1 } else { 0 };
+        let list_width = if show_preview { 24 } else { theme_area.width };
+        let preview_width = theme_area.width.saturating_sub(list_width + gap);
+
+        let list_area = Rect {
+            x: theme_area.x,
+            y: theme_area.y,
+            width: list_width,
+            height: theme_area.height,
+        };
+
+        let preview_area = Rect {
+            x: theme_area.x + list_width + gap,
+            y: theme_area.y,
+            width: preview_width,
+            height: theme_area.height,
+        };
+
+        let current_theme = app.settings.theme.as_str();
+        let items: Vec<ListItem> = app
+            .theme_names
+            .iter()
+            .map(|&name| {
+                let is_selected = name == current_theme;
+                let style = if is_selected {
+                    app.theme.selection_style()
+                } else {
+                    app.theme.text_style()
+                };
+                ListItem::new(format!(" {} ", name)).style(style)
+            })
+            .collect();
+
+        let list_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(app.theme.border_type)
+            .title(" Select Theme ")
+            .border_style(app.theme.border_active_style())
+            .style(app.theme.panel_style());
+
+        let max_visible = list_area.height.saturating_sub(2) as usize;
+        let total = app.theme_names.len();
+        let mut list_state = ratatui::widgets::ListState::default();
+        let mut visible_items = items;
+        if max_visible > 0 && total > max_visible {
+            if let Some(idx) = app.theme_names.iter().position(|&n| n == current_theme) {
+                let mut start = idx.saturating_sub(max_visible / 2);
+                if start + max_visible > total {
+                    start = total.saturating_sub(max_visible);
+                }
+                let end = (start + max_visible).min(total);
+                visible_items = app
+                    .theme_names
+                    .iter()
+                    .skip(start)
+                    .take(end - start)
+                    .map(|&name| {
+                        let is_selected = name == current_theme;
+                        let style = if is_selected {
+                            app.theme.selection_style()
+                        } else {
+                            app.theme.text_style()
+                        };
+                        ListItem::new(format!(" {} ", name)).style(style)
+                    })
+                    .collect();
+                list_state.select(Some(idx.saturating_sub(start)));
+            }
+        } else if let Some(idx) = app.theme_names.iter().position(|&n| n == current_theme) {
+            list_state.select(Some(idx));
+        }
+
+        let list = List::new(visible_items).block(list_block);
+        f.render_stateful_widget(list, list_area, &mut list_state);
+
+        if show_preview && preview_area.width > 0 {
+            let preview_theme = Theme::from_name(current_theme);
+            render_theme_preview(f, &preview_theme, preview_area);
+        }
+    }
+}
+
+fn render_theme_preview(f: &mut ratatui::Frame, theme: &Theme, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(theme.border_type)
+        .title(format!(" Preview: {} ", theme.name))
+        .border_style(theme.border_style())
+        .style(theme.panel_style());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.height < 6 || inner.width < 16 {
+        return;
+    }
+
+    let progress_bar = "██████░░ 60%";
+    let lines = vec![
+        Line::from(Span::styled(" Header / Title ", theme.header_style())),
+        Line::from(""),
+        Line::from(Span::styled(" Selected Row ", theme.selection_style())),
+        Line::from(vec![
+            Span::styled(" Progress ", theme.text_style()),
+            Span::styled(progress_bar, theme.progress_style()),
+        ]),
+        Line::from(vec![
+            Span::styled(" OK ", theme.status_badge_style(StatusKind::Success)),
+            Span::from(" "),
+            Span::styled(" WARN ", theme.status_badge_style(StatusKind::Warning)),
+            Span::from(" "),
+            Span::styled(" ERR ", theme.status_badge_style(StatusKind::Error)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Input ", theme.input_style(false)),
+            Span::from(" "),
+            Span::styled("Accent", theme.accent_style().add_modifier(Modifier::BOLD)),
+            Span::from(" "),
+            Span::styled("Alt", theme.accent_alt_style().add_modifier(Modifier::BOLD)),
+        ]),
+    ];
+
+    let preview = Paragraph::new(lines)
+        .style(theme.text_style())
+        .wrap(Wrap { trim: true });
+    f.render_widget(preview, inner);
+}
+
+
+fn format_bytes(value: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const TB: f64 = 1024.0 * 1024.0 * 1024.0 * 1024.0;
+    let v = value as f64;
+    if v >= TB {
+        format!("{:.2} TB", v / TB)
+    } else if v >= GB {
+        format!("{:.2} GB", v / GB)
+    } else if v >= MB {
+        format!("{:.2} MB", v / MB)
+    } else if v >= KB {
+        format!("{:.2} KB", v / KB)
+    } else {
+        format!("{} B", value)
+    }
+}
+
+fn status_kind(status: &str) -> StatusKind {
+    match status {
+        "complete" => StatusKind::Success,
+        "quarantined" | "failed" => StatusKind::Error,
+        "quarantined_removed" => StatusKind::Info,
+        "uploading" | "scanning" => StatusKind::Info,
+        _ => StatusKind::Warning,
+    }
+}
+
+fn draw_quarantine(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let focus_style = if app.focus == AppFocus::Quarantine {
+        app.theme.border_active_style()
+    } else {
+        app.theme.border_style()
+    };
+    
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(app.theme.border_type)
+        .title(" Quarantine Zone ")
+        .border_style(focus_style)
+        .style(app.theme.panel_style());
+    
+    let inner_area = outer_block.inner(area);
+    f.render_widget(outer_block, area);
+
+    if app.quarantine.is_empty() {
+         let p = Paragraph::new("No threats detected.")
+            .block(Block::default().borders(Borders::NONE))
+            .style(app.theme.status_style(StatusKind::Success));
+         f.render_widget(p, inner_area);
+         return;
+    }
+
+    let total_items = app.quarantine.len();
+    let display_height = inner_area.height as usize; 
+    let items_per_page = display_height / 3; // Each item is 3 lines
+    let mut offset = 0;
+    
+    if total_items > items_per_page {
+        if app.selected_quarantine >= items_per_page / 2 {
+            offset = (app.selected_quarantine + 1).saturating_sub(items_per_page / 2);
+        }
+        if offset + items_per_page > total_items {
+            offset = total_items.saturating_sub(items_per_page);
+        }
+    }
+
+    let items: Vec<ListItem> = app.quarantine.iter().enumerate()
+        .skip(offset)
+        .take(items_per_page)
+        .map(|(i, job)| {
+        let is_selected = i == app.selected_quarantine && app.focus == AppFocus::Quarantine;
+        let base_style = if is_selected {
+            app.theme.selection_style()
+        } else {
+            app.theme.text_style()
+        };
+        let danger_style = app.theme.status_style(StatusKind::Error);
+        
+        ListItem::new(vec![
+            Line::from(vec![
+                Span::styled(format!("ID: {}", job.id), base_style),
+                Span::from(" | "),
+                Span::styled(job.source_path.clone(), base_style),
+            ]),
+            Line::from(vec![
+                Span::from("Status: "),
+                Span::styled(job.status.clone(), danger_style),
+                Span::from(" | Details: "),
+                Span::from(job.scan_status.clone().unwrap_or_default()),
+            ]),
+            Line::from(""),
+        ])
+    }).collect();
+
+    let list = List::new(items)
+        .highlight_style(Style::default().add_modifier(Modifier::ITALIC));
+    
+    f.render_widget(list, inner_area);
+}

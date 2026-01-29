@@ -1,0 +1,22 @@
+[package]
+name = "drifter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+aws-config = "1.1.10"
+aws-sdk-s3 = "1.16.0"
+bytes = "1.6"
+chrono = "0.4"
+clamav-client = "2.2.0"
+crossterm = "0.27"
+directories = "5.0"
+hex = "0.4"
+notify = "8.2.0"
+ratatui = "0.26"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.38", features = ["full"] }
+toml = "0.8"
