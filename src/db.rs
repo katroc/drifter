@@ -21,6 +21,7 @@ pub struct JobRow {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct UploadPart {
     pub part_number: i64,
     pub size_bytes: i64,
@@ -182,6 +183,7 @@ pub fn update_job_upload_id(conn: &Connection, job_id: i64, upload_id: &str) -> 
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn get_job_parts(conn: &Connection, job_id: i64) -> Result<Vec<UploadPart>> {
     let mut stmt = conn.prepare(
         "SELECT p.part_number, p.size_bytes, p.status, p.etag 
