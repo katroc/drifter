@@ -287,6 +287,9 @@ impl FilePicker {
         }
         if self.entries.is_empty() {
             self.selected = 0;
+        } else if self.selected == 0 && self.entries.len() > 1 && self.entries[0].is_parent {
+            // Skip '..' parent on initial load
+            self.selected = 1;
         }
     }
 
@@ -295,7 +298,8 @@ impl FilePicker {
             Ok(entries) => {
                 self.cwd = path;
                 self.entries = entries;
-                self.selected = 0;
+                // Start on first real entry (skip '..') if possible
+                self.selected = if self.entries.len() > 1 { 1 } else { 0 };
                 self.last_error = None;
                 self.expanded.insert(self.cwd.clone());
                 if self.view == PickerView::Tree {
@@ -931,7 +935,6 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                     AppTab::Settings => AppTab::Transfers,
                                 };
                             }
-                            KeyCode::Char('a') => app.focus = AppFocus::Browser,
                             _ => {}
                          }
                     }
@@ -1054,7 +1057,6 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                     if app.selected >= app.jobs.len() && app.selected > 0 { app.selected -= 1; }
                                 }
                             }
-                             KeyCode::Char('a') => app.focus = AppFocus::Browser,
                              _ => {}
                          }
                     }
@@ -1062,7 +1064,6 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                          match key.code {
                             KeyCode::Up | KeyCode::Char('k') => if app.selected_history > 0 { app.selected_history -= 1; },
                             KeyCode::Down | KeyCode::Char('j') => if app.selected_history + 1 < app.history.len() { app.selected_history += 1; },
-                            KeyCode::Char('a') => app.focus = AppFocus::Browser,
                             _ => {}
                          }
                     }
@@ -1092,7 +1093,6 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                 let conn = conn_mutex.lock().unwrap();
                                 let _ = app.refresh_jobs(&conn);
                             }
-                            KeyCode::Char('a') => app.focus = AppFocus::Browser,
                             _ => {}
                          }
                     }
@@ -1119,7 +1119,6 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                             KeyCode::Right | KeyCode::Enter => {
                                 app.focus = AppFocus::SettingsFields;
                             }
-                            KeyCode::Char('a') => app.focus = AppFocus::Browser,
                             _ => {}
                          }
                     }
@@ -1283,9 +1282,6 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                 // Launch setup wizard
                                 app.wizard = WizardState::new();
                                 app.show_wizard = true;
-                            }
-                            KeyCode::Char('a') if !app.settings.editing => {
-                                app.focus = AppFocus::Browser;
                             }
                             _ => {}
                         }
