@@ -1,1 +1,6 @@
 /target
+/quarantine
+/staging
+/state
+/test_uploads
+*.log

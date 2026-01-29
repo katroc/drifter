@@ -2,7 +2,7 @@
 
 **Drifter** is a secure, TUI-based S3 multipart uploader designed for high-assurance environments. It acts as a "tiered storage" airlock, allowing you to stage files, scan them for malware using ClamAV, and upload them to S3-compatible storage only after they are proven clean.
 
-![Drifter TUI](assets/screenshot.png)
+![Drifter TUI](assets/drifter.png)
 
 ## Key Features
 
