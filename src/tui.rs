@@ -203,6 +203,7 @@ struct SettingsState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputMode {
     Normal,
+    Browsing,  // Actively navigating in Hopper
     Filter,
 }
 
@@ -854,10 +855,10 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                     continue;
                 }
                 
-                // Determine if we are capturing input (e.g. editing settings or in search)
+                // Determine if we are capturing input (e.g. editing settings, browsing, or in search)
                 let capturing_input = match app.focus {
                     AppFocus::SettingsFields => app.settings.editing,
-                    AppFocus::Browser => app.input_mode == InputMode::Filter,
+                    AppFocus::Browser => app.input_mode == InputMode::Filter || app.input_mode == InputMode::Browsing,
                     _ => false,
                 };
 
@@ -946,7 +947,24 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                     AppFocus::Browser => {
                         match app.input_mode {
                             InputMode::Normal => {
+                                // Browser is focused but not actively navigating
                                 match key.code {
+                                    KeyCode::Char('a') | KeyCode::Enter => {
+                                        app.input_mode = InputMode::Browsing;
+                                        app.status_message = "Browsing files...".to_string();
+                                    }
+                                    KeyCode::Up | KeyCode::Char('k') => app.browser_move_up(),
+                                    KeyCode::Down | KeyCode::Char('j') => app.browser_move_down(),
+                                    _ => {}
+                                }
+                            }
+                            InputMode::Browsing => {
+                                // Actively navigating directories
+                                match key.code {
+                                    KeyCode::Esc | KeyCode::Char('q') => {
+                                        app.input_mode = InputMode::Normal;
+                                        app.status_message = "Ready".to_string();
+                                    }
                                     KeyCode::Up | KeyCode::Char('k') => app.browser_move_up(),
                                     KeyCode::Down | KeyCode::Char('j') => app.browser_move_down(),
                                     KeyCode::PageUp => app.picker.page_up(),
@@ -1006,13 +1024,13 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                             InputMode::Filter => {
                                 match key.code {
                                     KeyCode::Esc => {
-                                        app.input_mode = InputMode::Normal;
+                                        app.input_mode = InputMode::Browsing;
                                         app.input_buffer.clear();
                                         app.picker.is_searching = false;
                                         app.picker.refresh();
                                     }
                                     KeyCode::Enter => {
-                                        app.input_mode = InputMode::Normal;
+                                        app.input_mode = InputMode::Browsing;
                                     }
                                     KeyCode::Up => app.browser_move_up(),
                                     KeyCode::Down => app.browser_move_down(),
@@ -1505,9 +1523,12 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
         InputMode::Filter => {
             "Filter: Type to search fuzzy | ↑/↓: Select | Enter: Confirm | Esc: Back"
         }
+        InputMode::Browsing => {
+            "Hopper: ←/→ dirs | ↑/↓ select | /: Filter | t: Tree | space: Select | s: Stage | Esc: Exit"
+        }
         InputMode::Normal => match app.focus {
             AppFocus::Rail => "Tab/Right: Content | ↑/↓: Switch Tab | q: Quit",
-            AppFocus::Browser => "Navigation: Arrows/jklh | /: Filter | f: Recursive | t: Tree | space: Select | s: Stage",
+            AppFocus::Browser => "↑/↓: Select | a/Enter: Browse | Tab: Next Panel",
             AppFocus::Queue => "Tab: History | Left: Browser | r: Retry | d: Delete",
             AppFocus::History => "Tab: Rail | Left: Queue",
             AppFocus::Quarantine => "Tab: Rail | Left: Rail | d: Clear | R: Refresh",
@@ -1885,7 +1906,12 @@ fn draw_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
         app.theme.border_style()
     };
 
-    let title = " Hopper (Browser) ".to_string();
+    let title = match app.input_mode {
+        InputMode::Browsing => " Hopper (Browsing) ",
+        InputMode::Filter => " Hopper (Filter) ",
+        InputMode::Normal if is_focused => " Hopper (Press 'a' to browse) ",
+        InputMode::Normal => " Hopper ",
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
