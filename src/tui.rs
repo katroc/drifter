@@ -2316,7 +2316,10 @@ fn draw_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
         app.theme.border_style()
     };
 
-    let title = " Configuration (S: Save Changes) ";
+    let title = match app.settings.active_category {
+        SettingsCategory::S3 | SettingsCategory::Scanner => " Configuration (S: Save | t: Test) ",
+        _ => " Configuration (S: Save) ",
+    };
     let outer_block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
