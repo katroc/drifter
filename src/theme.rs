@@ -54,6 +54,10 @@ const THEME_PRESETS: &[ThemePreset] = &[
         make: Theme::transparent,
     },
     ThemePreset {
+        name: "Antigravity",
+        make: Theme::antigravity,
+    },
+    ThemePreset {
         name: "Nord",
         make: Theme::nord,
     },
@@ -882,6 +886,40 @@ impl Theme {
             input_border: Color::Rgb(130, 170, 255),
             dim: Color::Rgb(68, 89, 107),
             highlight: Color::Rgb(255, 203, 139),
+        }
+    }
+
+    pub fn antigravity() -> Self {
+        Self {
+            name: "Antigravity",
+            bg: Color::Rgb(26, 27, 38),
+            fg: Color::Rgb(192, 202, 245),
+            muted_fg: Color::Rgb(154, 165, 206),
+            panel_bg: Color::Rgb(31, 35, 53),
+            panel_border: Color::Rgb(59, 66, 97),
+            border_type: BorderType::Rounded,
+            accent: Color::Rgb(255, 158, 100),
+            accent_alt: Color::Rgb(187, 154, 247),
+            success: Color::Rgb(158, 206, 106),
+            warning: Color::Rgb(224, 175, 104),
+            error: Color::Rgb(247, 118, 142),
+            info: Color::Rgb(122, 162, 247),
+            selection_bg: Color::Rgb(47, 53, 85),
+            selection_fg: Color::Rgb(192, 202, 245),
+            progress_bg: Color::Rgb(31, 35, 53),
+            progress_fg: Color::Rgb(255, 158, 100),
+            table_header_fg: Color::Rgb(187, 154, 247),
+            table_header_bg: Color::Rgb(26, 27, 38),
+            table_row_alt_bg: Color::Rgb(31, 35, 53),
+            button_fg: Color::Rgb(192, 202, 245),
+            button_bg: Color::Rgb(59, 66, 97),
+            button_active_fg: Color::Rgb(26, 27, 38),
+            button_active_bg: Color::Rgb(255, 158, 100),
+            input_fg: Color::Rgb(192, 202, 245),
+            input_bg: Color::Rgb(31, 35, 53),
+            input_border: Color::Rgb(255, 158, 100),
+            dim: Color::Rgb(86, 95, 137),
+            highlight: Color::Rgb(122, 162, 247),
         }
     }
 }
