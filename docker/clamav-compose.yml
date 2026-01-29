@@ -1,0 +1,16 @@
+services:
+  clamav:
+    image: clamav/clamav:latest
+    container_name: drifter-clamav
+    ports:
+      - "3310:3310"
+    environment:
+      # Ensure ClamAV listens on TCP
+      - CLAMD_CONF_TCPSocket=3310
+      - CLAMD_CONF_TCPAddr=0.0.0.0
+    volumes:
+      # Optional: Persist virus definitions
+      - clamav_db:/var/lib/clamav
+
+volumes:
+  clamav_db:

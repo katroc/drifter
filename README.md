@@ -1,45 +1,97 @@
 # Drifter
 
-Terminal UI for staging, scanning, and transferring data with live progress and quarantine handling.
+**Drifter** is a secure, TUI-based S3 multipart uploader designed for high-assurance environments. It acts as a "tiered storage" airlock, allowing you to stage files, scan them for malware using ClamAV, and upload them to S3-compatible storage only after they are proven clean.
 
-## Themes
+![Drifter TUI](https://via.placeholder.com/800x400?text=Drifter+TUI+Screenshot)
 
-Built-in themes (case-insensitive):
+## Key Features
 
-- Nord
-- Gruvbox Dark
-- Catppuccin Mocha
-- Tokyo Night
-- Dracula
-- Solarized Dark
-- Solarized Light
-- Monochrome
-- High Contrast
-- One Dark
-- One Light
-- Ayu Dark
-- Everforest Dark
-- Rose Pine
-- Rose Pine Dawn
-- Night Owl
+- **🛡️ Secure Pipeline**: File -> Staging -> ClamAV Scan -> S3 Upload. Threats are automatically quarantined.
+- **🚀 Multipart Uploads**: Efficiently handles large files (GBs/TBs) with concurrent chunk uploads.
+- **👁️ Live TUI**: Real-time progress bars, status indicators, and file browsing in a terminal interface.
+- **🧹 Auto-Cleanup**: Successfully uploaded files are automatically removed from local staging to save space.
+- **🎨 Theming**: 10+ built-in themes (Nord, Tokyo Night, High Contrast, Transparent) with configurable border styles.
+- **⚙️ Config Wizard**: Built-in first-run wizard to guide you through setup.
 
-### Select a theme
+## Installation
 
-- In-app: press `t` to open the theme picker, or go to Settings → Theme and press Enter.
+### Prerequisites
 
-Theme choice is stored in the DB-backed config (`theme` setting) when you save settings.
+- **Rust**: `cargo` (for building the app)
+- **Docker**: (for running the ClamAV scanner)
 
-### Screenshot tips (optional)
+### 1. Start ClamAV Scanner
 
-- Use a truecolor-capable terminal.
-- Use `t` to preview themes before saving.
+Drifter requires a ClamAV instance reachable via TCP. We've provided a Docker Compose file for quick setup:
 
-## Developer notes
+```bash
+cd docker
+docker compose up -d
+```
 
-### Add a new theme
+This starts ClamAV on `localhost:3310`.
 
-1. Add a new preset in `src/theme.rs` by defining a `Theme::your_theme_name()` constructor.
-2. Register it in `THEME_PRESETS` with a user-facing name.
-3. (Optional) Add a legacy alias in `LEGACY_ALIASES` if you are replacing an old theme name.
+### 2. Build and Run Drifter
 
-The theme tokens are semantic (bg/fg, selection, status, table, input, button, etc.), so components automatically pick up new colors.
+```bash
+# Return to root directory
+cd ..
+
+# Build release binary
+cargo build --release
+
+# Run
+./target/release/drifter
+```
+
+## Setup & Configuration
+
+On first run, Drifter will detect a missing configuration and launch the **Setup Wizard**.
+
+You will be prompted to configure:
+1.  **Directories**: Staging (temp storage) and Quarantine locations.
+2.  **Scanner**: Host/Port for ClamAV (default: `127.0.0.1:3310`).
+3.  **S3**: Bucket name, Region, Endpoint, and Credentials.
+4.  **Performance**: Chunk sizes and concurrency levels.
+
+_Settings are stored securely in a local SQLite database (`state/drifter.db`)._
+
+## Usage Workflow
+
+Drifter is designed for keyboard-driven efficiency.
+
+### 1. The Rail (Left Sidebar)
+Navigate between tabs using `Tab` or `Up/Down`.
+- **Transfers**: Main view. Browser on left, Transfer Queue on right.
+- **Quarantine**: View files flagged as threats.
+- **Settings**: Configure S3, Scanner, and UI preferences.
+
+### 2. File Browser (Hopper)
+- `Up/Down`: Navigate files.
+- `Right` / `Enter`: Enter directory.
+- `Left`: Go up a directory.
+- `Space`: **Select/Deselect** file for staging.
+- `s`: **Stage** selected files (Adds to Queue).
+
+### 3. Queue Management
+- **Pending**: Files waiting to be processed.
+- **Scanning**: Currently being checked by ClamAV.
+- **Uploading**: Secure transfer to S3.
+- **Done**: Upload complete (removed from list).
+- **Quarantined**: Threat found (moved to Quarantine tab).
+
+### Controls summary
+- `Tab`: Switch focus between panels (Rail <-> Browser <-> Queue).
+- `q`: Quit application.
+- `?`: Toggle help (if implemented).
+
+## Theming
+
+Drifter looks great in any terminal. Go to **Settings > Theme** to change the look.
+- **Presets**: Nord, Drifter, Tokyo Night, High Contrast, Transparent, etc.
+- **Transparent Mode**: Support for terminals with background images/blur.
+- **Borders**: Configurable styles (Rounded, Double, Plain).
+
+## License
+
+MIT
