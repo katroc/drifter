@@ -145,11 +145,11 @@ fn normalize_name(name: &str) -> String {
 
 impl Theme {
     pub fn default_name() -> &'static str {
-        "Nord"
+        "Antigravity"
     }
 
     pub fn default_theme() -> Self {
-        Self::nord()
+        Self::antigravity()
     }
 
     pub fn resolve_name(name: &str) -> Option<&'static str> {
