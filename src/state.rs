@@ -15,6 +15,8 @@ use std::collections::HashMap;
 pub struct ProgressInfo {
     pub percent: f64, // < 0.0 means "Calculating/Indeterminate"
     pub details: String,
+    pub parts_done: usize,
+    pub parts_total: usize,
 }
 
 pub struct Coordinator {

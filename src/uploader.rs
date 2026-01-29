@@ -45,6 +45,8 @@ impl Uploader {
             p.insert(job_id, ProgressInfo { 
                 percent: -1.0, 
                 details: "Connecting to S3...".to_string(),
+                parts_done: 0,
+                parts_total: 0,
             });
         }
 
@@ -122,6 +124,8 @@ impl Uploader {
                p.insert(job_id, ProgressInfo { 
                    percent: -1.0, 
                    details: "Resuming: Listing parts...".to_string(),
+                   parts_done: 0,
+                   parts_total: 0,
                });
             }
 
@@ -266,6 +270,8 @@ impl Uploader {
                     p.insert(m_job_id, ProgressInfo { 
                         percent: pct, 
                         details, 
+                        parts_done: parts_done as usize,
+                        parts_total: m_total_parts,
                     });
                 }
 

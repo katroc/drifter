@@ -12,7 +12,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap};
 // #[allow(unused_imports)]
@@ -585,7 +585,6 @@ pub struct App {
     wizard: WizardState,
     theme: Theme,
     theme_names: Vec<&'static str>,
-    show_job_detail: bool,
 }
 
 impl App {
@@ -623,7 +622,6 @@ impl App {
             wizard: WizardState::new(),
             theme,
             theme_names: Theme::list_names(),
-            show_job_detail: false,
         };
 
         let status_clone = app.clamav_status.clone();
@@ -1063,62 +1061,47 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                         }
                     }
                     AppFocus::Queue => {
-                         // Handle popup first
-                         if app.show_job_detail {
-                             match key.code {
-                                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
-                                     app.show_job_detail = false;
-                                 }
-                                 _ => {}
-                             }
-                         } else {
-                             match key.code {
-                                KeyCode::Up | KeyCode::Char('k') => if app.selected > 0 { app.selected -= 1; },
-                                KeyCode::Down | KeyCode::Char('j') => if app.selected + 1 < app.jobs.len() { app.selected += 1; },
-                                KeyCode::Enter => {
-                                    if !app.jobs.is_empty() && app.selected < app.jobs.len() {
-                                        app.show_job_detail = true;
-                                    }
-                                }
-                                KeyCode::Char('R') => {
+                         match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => if app.selected > 0 { app.selected -= 1; },
+                            KeyCode::Down | KeyCode::Char('j') => if app.selected + 1 < app.jobs.len() { app.selected += 1; },
+                            KeyCode::Char('R') => {
+                                let conn = conn_mutex.lock().unwrap();
+                                let _ = app.refresh_jobs(&conn);
+                            }
+                            KeyCode::Char('r') => {
+                                if !app.jobs.is_empty() && app.selected < app.jobs.len() {
+                                    let id = app.jobs[app.selected].id;
                                     let conn = conn_mutex.lock().unwrap();
+                                    let _ = crate::db::retry_job(&conn, id);
+                                    app.status_message = format!("Retried job {}", id);
+                                }
+                            }
+                            KeyCode::Char('d') | KeyCode::Delete => {
+                                if !app.jobs.is_empty() && app.selected < app.jobs.len() {
+                                    let id = app.jobs[app.selected].id;
+                                    let conn = conn_mutex.lock().unwrap();
+                                    let _ = crate::db::delete_job(&conn, id);
+                                    app.status_message = format!("Deleted job {}", id);
+                                    if app.selected >= app.jobs.len() && app.selected > 0 { app.selected -= 1; }
+                                }
+                            }
+                            KeyCode::Char('c') => {
+                                // Clear all completed jobs
+                                let conn = conn_mutex.lock().unwrap();
+                                let ids_to_delete: Vec<i64> = app.jobs.iter()
+                                    .filter(|j| j.status == "complete")
+                                    .map(|j| j.id)
+                                    .collect();
+                                let count = ids_to_delete.len();
+                                for id in ids_to_delete {
+                                    let _ = crate::db::delete_job(&conn, id);
+                                }
+                                if count > 0 {
+                                    app.status_message = format!("Cleared {} completed jobs", count);
                                     let _ = app.refresh_jobs(&conn);
                                 }
-                                KeyCode::Char('r') => {
-                                    if !app.jobs.is_empty() && app.selected < app.jobs.len() {
-                                        let id = app.jobs[app.selected].id;
-                                        let conn = conn_mutex.lock().unwrap();
-                                        let _ = crate::db::retry_job(&conn, id);
-                                        app.status_message = format!("Retried job {}", id);
-                                    }
-                                }
-                                KeyCode::Char('d') | KeyCode::Delete => {
-                                    if !app.jobs.is_empty() && app.selected < app.jobs.len() {
-                                        let id = app.jobs[app.selected].id;
-                                        let conn = conn_mutex.lock().unwrap();
-                                        let _ = crate::db::delete_job(&conn, id);
-                                        app.status_message = format!("Deleted job {}", id);
-                                        if app.selected >= app.jobs.len() && app.selected > 0 { app.selected -= 1; }
-                                    }
-                                }
-                                KeyCode::Char('c') => {
-                                    // Clear all completed jobs
-                                    let conn = conn_mutex.lock().unwrap();
-                                    let ids_to_delete: Vec<i64> = app.jobs.iter()
-                                        .filter(|j| j.status == "complete")
-                                        .map(|j| j.id)
-                                        .collect();
-                                    let count = ids_to_delete.len();
-                                    for id in ids_to_delete {
-                                        let _ = crate::db::delete_job(&conn, id);
-                                    }
-                                    if count > 0 {
-                                        app.status_message = format!("Cleared {} completed jobs", count);
-                                        let _ = app.refresh_jobs(&conn);
-                                    }
-                                }
-                                _ => {}
-                             }
+                            }
+                            _ => {}
                          }
                     }
                     AppFocus::History => {
@@ -1442,7 +1425,7 @@ fn draw_job_details(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let scan_status = job.scan_status.as_deref().unwrap_or("none");
     let error = job.error.as_deref().unwrap_or("none");
 
-    let text = vec![
+    let mut text = vec![
         Line::from(vec![
             Span::styled("Status: ", app.theme.highlight_style()),
             Span::styled(job.status.clone(), app.theme.status_style(status_kind(job.status.as_str()))),
@@ -1459,20 +1442,59 @@ fn draw_job_details(f: &mut ratatui::Frame, app: &App, area: Rect) {
             Span::styled("Scan:   ", app.theme.highlight_style()),
             Span::styled(scan_status, app.theme.text_style()),
         ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "DETAILS / ERRORS:",
-            app.theme.highlight_style().add_modifier(Modifier::UNDERLINED),
-        )),
-        Line::from(Span::styled(
-            error,
-            if error != "none" {
-                app.theme.status_style(StatusKind::Error)
-            } else {
-                app.theme.text_style()
-            },
-        )),
     ];
+
+    // Show multipart upload progress if job is uploading
+    if job.status == "uploading" {
+        let progress_map = app.progress.lock().unwrap();
+        if let Some(info) = progress_map.get(&job.id) {
+            if info.parts_total > 0 {
+                // Clone values to avoid borrow issues
+                let parts_done = info.parts_done;
+                let parts_total = info.parts_total;
+                let details = info.details.clone();
+                drop(progress_map);
+
+                text.push(Line::from(""));
+                text.push(Line::from(Span::styled(
+                    "MULTIPART UPLOAD:",
+                    app.theme.highlight_style().add_modifier(Modifier::UNDERLINED),
+                )));
+                
+                // Show parts progress bar
+                let bar_width = 20;
+                let filled = (parts_done * bar_width) / parts_total.max(1);
+                let bar = format!("[{}{}] {}/{}",
+                    "█".repeat(filled),
+                    "░".repeat(bar_width - filled),
+                    parts_done,
+                    parts_total
+                );
+                text.push(Line::from(vec![
+                    Span::styled("Parts:  ", app.theme.highlight_style()),
+                    Span::styled(bar, app.theme.progress_style()),
+                ]));
+                text.push(Line::from(vec![
+                    Span::styled("Detail: ", app.theme.highlight_style()),
+                    Span::styled(details, app.theme.text_style()),
+                ]));
+            }
+        }
+    }
+
+    text.push(Line::from(""));
+    text.push(Line::from(Span::styled(
+        "DETAILS / ERRORS:",
+        app.theme.highlight_style().add_modifier(Modifier::UNDERLINED),
+    )));
+    text.push(Line::from(Span::styled(
+        error,
+        if error != "none" {
+            app.theme.status_style(StatusKind::Error)
+        } else {
+            app.theme.text_style()
+        },
+    )));
 
     let p = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
     f.render_widget(p, area);
@@ -1669,87 +1691,8 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
     }
     draw_system_status(f, app, root[1]);
     draw_footer(f, app, root[2]);
-
-    // Render job detail popup if active
-    if app.show_job_detail && !app.jobs.is_empty() && app.selected < app.jobs.len() {
-        draw_job_detail_popup(f, app, &app.jobs[app.selected]);
-    }
 }
 
-fn draw_job_detail_popup(f: &mut ratatui::Frame, app: &App, job: &crate::db::JobRow) {
-    let area = f.size();
-    let popup_area = centered_rect(area, 70, 60);
-    
-    // Dim background
-    f.render_widget(
-        Block::default().style(Style::default().bg(Color::Black)),
-        area
-    );
-
-    let filename = std::path::Path::new(&job.source_path)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Unknown".to_string());
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(app.theme.border_type)
-        .title(format!(" Job #{}: {} ", job.id, filename))
-        .border_style(app.theme.border_active_style())
-        .style(app.theme.panel_style());
-
-    let inner = block.inner(popup_area);
-    f.render_widget(block, popup_area);
-
-    let details = vec![
-        Line::from(vec![
-            Span::styled("Status: ", app.theme.muted_style()),
-            Span::styled(&job.status, app.theme.status_style(status_kind(&job.status))),
-        ]),
-        Line::from(vec![
-            Span::styled("Size: ", app.theme.muted_style()),
-            Span::raw(format_bytes(job.size_bytes as u64)),
-        ]),
-        Line::from(vec![
-            Span::styled("Created: ", app.theme.muted_style()),
-            Span::raw(&job.created_at),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Source: ", app.theme.muted_style()),
-        ]),
-        Line::from(Span::raw(&job.source_path)),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Staged: ", app.theme.muted_style()),
-            Span::raw(job.staged_path.as_deref().unwrap_or("-")),
-        ]),
-        Line::from(vec![
-            Span::styled("S3 Key: ", app.theme.muted_style()),
-            Span::raw(job.s3_key.as_deref().unwrap_or("-")),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Scan: ", app.theme.muted_style()),
-            Span::raw(job.scan_status.as_deref().unwrap_or("-")),
-        ]),
-        if let Some(ref err) = job.error {
-            Line::from(vec![
-                Span::styled("Error: ", Style::default().fg(Color::Red)),
-                Span::raw(err.as_str()),
-            ])
-        } else {
-            Line::from("")
-        },
-        Line::from(""),
-        Line::from(Span::styled("Press Esc/Enter to close", app.theme.muted_style())),
-    ];
-
-    let paragraph = Paragraph::new(details)
-        .style(app.theme.text_style())
-        .wrap(ratatui::widgets::Wrap { trim: false });
-    f.render_widget(paragraph, inner);
-}
 
 fn draw_wizard(f: &mut ratatui::Frame, app: &App) {
     let area = f.size();
