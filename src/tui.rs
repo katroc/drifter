@@ -954,7 +954,10 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                          app.input_buffer.pop();
                                      }
                                 }
-                                KeyCode::Char(c) => app.input_buffer.push(c),
+                                KeyCode::Char(c) => {
+                                    app.input_buffer.push(c);
+                                    app.recalibrate_picker_selection();
+                                }
                                 _ => {}
                             }
                         }
