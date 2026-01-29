@@ -22,6 +22,47 @@ impl Uploader {
         Self {}
     }
 
+    pub async fn check_connection(config: &Config) -> Result<String> {
+        let region = config.s3_region.as_deref().unwrap_or("us-east-1").trim();
+        let endpoint = config.s3_endpoint.as_deref();
+        let access_key = config.s3_access_key.as_deref().map(|s| s.trim());
+        let secret_key = config.s3_secret_key.as_deref().map(|s| s.trim());
+
+        #[allow(deprecated)]
+        let mut config_loader = aws_config::from_env().region(aws_config::Region::new(region.to_string()));
+        
+        if let (Some(ak), Some(sk)) = (access_key, secret_key) {
+             let creds = Credentials::new(ak.to_string(), sk.to_string(), None, None, "static");
+             config_loader = config_loader.credentials_provider(SharedCredentialsProvider::new(creds));
+        } else if access_key.is_some() || secret_key.is_some() {
+             return Err(anyhow::anyhow!("Credentials incomplete"));
+        }
+
+        let sdk_config = config_loader.load().await;
+        
+        let mut client_builder = aws_sdk_s3::config::Builder::from(&sdk_config);
+        if let Some(endpoint) = endpoint {
+             client_builder = client_builder.endpoint_url(endpoint).force_path_style(true);
+        }
+        let client = Client::from_conf(client_builder.build());
+
+        // Try ListBuckets first
+        match client.list_buckets().send().await {
+            Ok(_) => Ok("Connected to S3 successfully (ListBuckets OK)".to_string()),
+            Err(e) => {
+                // If ListBuckets fails (e.g. permission), try HeadBucket if we have a bucket name
+                if let Some(bucket) = config.s3_bucket.as_deref() {
+                     match client.head_bucket().bucket(bucket).send().await {
+                         Ok(_) => Ok(format!("Connected to S3 successfully (Access to '{}' confirmed)", bucket)),
+                         Err(_) => Err(anyhow::anyhow!("S3 Connection Failed: {}", e))
+                     }
+                } else {
+                    Err(anyhow::anyhow!("S3 Connection Failed: {}", e))
+                }
+            }
+        }
+    }
+
     pub async fn upload_file(
         &self,
         config: &Config,

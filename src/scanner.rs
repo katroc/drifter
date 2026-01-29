@@ -106,4 +106,21 @@ impl Scanner {
              Err(anyhow::anyhow!("ClamAV Error: {}", response_str.trim()))
         }
     }
+    pub async fn check_connection(&self) -> Result<String> {
+        let address = format!("{}:{}", self.clamd_host, self.clamd_port);
+        let addr: SocketAddr = address.parse().context("Invalid clamd address")?;
+        
+        let mut stream = TcpStream::connect(addr).await.context("Failed to connect to clamd")?;
+        stream.write_all(b"PING").await.context("Failed to send PING")?;
+        
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.context("Failed to read response")?;
+        let response_str = String::from_utf8_lossy(&response);
+        
+        if response_str.trim() == "PONG" {
+            Ok("Connected to ClamAV successfully".to_string())
+        } else {
+             Err(anyhow::anyhow!("Unexpected response from ClamAV: '{}'", response_str.trim()))
+        }
+    }
 }

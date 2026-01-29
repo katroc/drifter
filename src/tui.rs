@@ -5,6 +5,7 @@ use crate::state::ProgressInfo;
 use crate::theme::{StatusKind, Theme};
 use crate::watch::Watcher;
 use anyhow::Result;
+use std::sync::mpsc;
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -606,6 +607,9 @@ pub struct App {
     config: Arc<Mutex<Config>>,
     clamav_status: Arc<Mutex<String>>,
     progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
+    // Async feedback channel
+    pub async_rx: mpsc::Receiver<String>,
+    pub async_tx: mpsc::Sender<String>,
     // Wizard
     show_wizard: bool,
     wizard: WizardState,
@@ -620,6 +624,8 @@ impl App {
         let settings = SettingsState::from_config(&cfg_guard);
         let theme = Theme::from_name(&cfg_guard.theme);
         drop(cfg_guard);
+
+        let (tx, rx) = mpsc::channel();
 
         let mut app = Self {
             jobs: Vec::new(),
@@ -645,6 +651,8 @@ impl App {
             config: config.clone(),
             clamav_status: Arc::new(Mutex::new("Checking...".to_string())),
             progress: progress.clone(),
+            async_rx: rx,
+            async_tx: tx,
             show_wizard: false,
             wizard: WizardState::new(),
             theme,
@@ -798,6 +806,11 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
         if app.last_refresh.elapsed() > Duration::from_secs(1) {
             let conn = conn_mutex.lock().unwrap();
             app.refresh_jobs(&conn)?;
+        }
+
+        // Check for async messages (e.g. connection tests)
+        if let Ok(msg) = app.async_rx.try_recv() {
+            app.status_message = msg;
         }
 
         if app.watch_enabled && app.last_watch_scan.elapsed() > Duration::from_secs(2) {
@@ -1410,6 +1423,31 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                 // Launch setup wizard
                                 app.wizard = WizardState::new();
                                 app.show_wizard = true;
+                            }
+                            KeyCode::Char('t') if !app.settings.editing => {
+                                let cat = app.settings.active_category;
+                                if cat == SettingsCategory::S3 || cat == SettingsCategory::Scanner {
+                                    app.status_message = "Testing connection...".to_string();
+                                    let tx = app.async_tx.clone();
+                                    let config_clone = app.config.lock().unwrap().clone();
+                                    
+                                    std::thread::spawn(move || {
+                                        let rt = tokio::runtime::Runtime::new().unwrap();
+                                        let res = rt.block_on(async {
+                                            if cat == SettingsCategory::S3 {
+                                                 crate::uploader::Uploader::check_connection(&config_clone).await
+                                            } else {
+                                                 crate::scanner::Scanner::new(&config_clone).check_connection().await
+                                            }
+                                        });
+                                        
+                                        let msg = match res {
+                                            Ok(s) => s,
+                                            Err(e) => format!("Connection Failed: {}", e),
+                                        };
+                                        let _ = tx.send(msg);
+                                    });
+                                }
                             }
                             _ => {}
                         }
