@@ -203,7 +203,7 @@ struct SettingsState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputMode {
     Normal,
-    Picker,
+    Filter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -667,7 +667,7 @@ impl App {
     }
 
     fn browser_move_down(&mut self) {
-        let filter = if self.input_mode == InputMode::Picker { 
+        let filter = if self.input_mode == InputMode::Filter { 
             self.input_buffer.to_lowercase() 
         } else { 
             String::new() 
@@ -692,7 +692,7 @@ impl App {
     }
 
     fn browser_move_up(&mut self) {
-        let filter = if self.input_mode == InputMode::Picker { 
+        let filter = if self.input_mode == InputMode::Filter { 
             self.input_buffer.to_lowercase() 
         } else { 
             String::new() 
@@ -719,7 +719,7 @@ impl App {
     }
 
     fn recalibrate_picker_selection(&mut self) {
-        let filter = if self.input_mode == InputMode::Picker { 
+        let filter = if self.input_mode == InputMode::Filter { 
             self.input_buffer.to_lowercase() 
         } else { 
             return; 
@@ -848,10 +848,10 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                     continue;
                 }
                 
-                // Determine if we are capturing input (e.g. editing settings or in picker typing)
+                // Determine if we are capturing input (e.g. editing settings or in search)
                 let capturing_input = match app.focus {
                     AppFocus::SettingsFields => app.settings.editing,
-                    AppFocus::Browser => app.input_mode == InputMode::Picker,
+                    AppFocus::Browser => app.input_mode == InputMode::Filter,
                     _ => false,
                 };
 
@@ -934,106 +934,95 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                     }
                     AppFocus::Browser => {
                         match app.input_mode {
-                            InputMode::Normal => match key.code {
-                                KeyCode::Char('a') | KeyCode::Enter => {
-                                    app.input_mode = InputMode::Picker;
-                                    app.picker.refresh();
-                                    app.input_buffer.clear();
-                                    app.status_message = "Exploring files...".to_string();
-                                }
-                                _ => {}
-                            },
-                            InputMode::Picker => match key.code {
-                                KeyCode::Esc => app.input_mode = InputMode::Normal,
-                                KeyCode::Up => app.browser_move_up(),
-                                KeyCode::Down => app.browser_move_down(),
-                                KeyCode::PageUp => app.picker.page_up(),
-                                KeyCode::PageDown => app.picker.page_down(),
-                                KeyCode::Left => app.picker.go_parent(),
-                                KeyCode::Right => {
-                                    if let Some(entry) = app.picker.selected_entry() {
-                                        if entry.is_dir { 
-                                            if app.picker.view == PickerView::Tree {
-                                                app.picker.toggle_expand();
+                            InputMode::Normal => {
+                                match key.code {
+                                    KeyCode::Up | KeyCode::Char('k') => app.browser_move_up(),
+                                    KeyCode::Down | KeyCode::Char('j') => app.browser_move_down(),
+                                    KeyCode::PageUp => app.picker.page_up(),
+                                    KeyCode::PageDown => app.picker.page_down(),
+                                    KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => app.picker.go_parent(),
+                                    KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                                        if let Some(entry) = app.picker.selected_entry() {
+                                            if entry.is_dir {
+                                                if app.picker.view == PickerView::Tree && key.code == KeyCode::Right {
+                                                    app.picker.toggle_expand();
+                                                } else {
+                                                    app.picker.try_set_cwd(entry.path.clone());
+                                                    app.input_buffer.clear();
+                                                    app.picker.is_searching = false;
+                                                }
                                             } else {
-                                                app.picker.try_set_cwd(entry.path.clone()); 
-                                                app.input_buffer.clear();
+                                                let conn = conn_mutex.lock().unwrap();
+                                                let cfg_guard = cfg.lock().unwrap();
+                                                let staging = cfg_guard.staging_dir.clone();
+                                                drop(cfg_guard);
+                                                let _ = ingest_path(&conn, &staging, &entry.path.to_string_lossy());
+                                                app.status_message = "File added to queue".to_string();
                                             }
                                         }
                                     }
-                                }
-                                KeyCode::Char(' ') => app.picker.toggle_select(),
-                                KeyCode::Char('t') => app.picker.toggle_view(),
-                                KeyCode::Char('f') => {
-                                    app.picker.search_recursive = !app.picker.search_recursive;
-                                    app.picker.is_searching = !app.input_buffer.is_empty();
-                                    app.picker.refresh();
-                                    app.recalibrate_picker_selection();
-                                }
-                                KeyCode::Char('c') => app.picker.clear_selected(),
-                                KeyCode::Char('o') => {
-                                     if let Some(entry) = app.picker.selected_entry() {
-                                        if entry.is_dir { 
-                                            app.picker.try_set_cwd(entry.path.clone());
-                                            app.input_buffer.clear();
-                                        }
-                                     }
-                                }
-                                KeyCode::Char('s') => {
-                                    let paths: Vec<PathBuf> = app.picker.selected_paths.iter().cloned().collect();
-                                    if !paths.is_empty() {
-                                        let conn = conn_mutex.lock().unwrap();
-                                        let cfg_guard = cfg.lock().unwrap();
-                                        let staging = cfg_guard.staging_dir.clone();
-                                        drop(cfg_guard);
-                                        let mut total = 0;
-                                        for path in paths {
-                                            if let Ok(count) = ingest_path(&conn, &staging, &path.to_string_lossy()) {
-                                                total += count;
-                                            }
-                                        }
-                                        app.status_message = format!("Ingested {} items", total);
-                                        app.picker.clear_selected();
-                                        app.input_mode = InputMode::Normal;
+                                    KeyCode::Char('/') => {
+                                        app.input_mode = InputMode::Filter;
                                     }
-                                }
-                                KeyCode::Enter => {
-                                     if let Some(entry) = app.picker.selected_entry() {
-                                        if entry.is_dir { 
-                                            app.picker.try_set_cwd(entry.path.clone());
-                                            app.input_buffer.clear();
-                                        } else {
+                                    KeyCode::Char(' ') => app.picker.toggle_select(),
+                                    KeyCode::Char('t') => app.picker.toggle_view(),
+                                    KeyCode::Char('f') => {
+                                        app.picker.search_recursive = !app.picker.search_recursive;
+                                        app.picker.refresh();
+                                        app.status_message = if app.picker.search_recursive { "Recursive search enabled" } else { "Recursive search disabled" }.to_string();
+                                    }
+                                    KeyCode::Char('c') => app.picker.clear_selected(),
+                                    KeyCode::Char('s') => {
+                                        let paths: Vec<PathBuf> = app.picker.selected_paths.iter().cloned().collect();
+                                        if !paths.is_empty() {
                                             let conn = conn_mutex.lock().unwrap();
                                             let cfg_guard = cfg.lock().unwrap();
                                             let staging = cfg_guard.staging_dir.clone();
                                             drop(cfg_guard);
-                                            let _ = ingest_path(&conn, &staging, &entry.path.to_string_lossy());
-                                            app.status_message = "File added to queue".to_string();
-                                            app.input_mode = InputMode::Normal;
+                                            let mut total = 0;
+                                            for path in paths {
+                                                if let Ok(count) = ingest_path(&conn, &staging, &path.to_string_lossy()) {
+                                                    total += count;
+                                                }
+                                            }
+                                            app.status_message = format!("Ingested {} items", total);
+                                            app.picker.clear_selected();
                                         }
-                                     }
+                                    }
+                                    _ => {}
                                 }
-                                KeyCode::Backspace => {
-                                     if app.input_buffer.is_empty() {
-                                         app.picker.go_parent();
-                                     } else {
-                                         app.input_buffer.pop();
-                                         app.picker.is_searching = !app.input_buffer.is_empty();
-                                         if app.picker.is_searching && app.picker.search_recursive {
-                                             app.picker.refresh();
-                                         }
-                                         app.recalibrate_picker_selection();
-                                     }
-                                }
-                                KeyCode::Char(c) => {
-                                    app.input_buffer.push(c);
-                                    app.picker.is_searching = true;
-                                    if app.picker.search_recursive {
+                            }
+                            InputMode::Filter => {
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        app.input_mode = InputMode::Normal;
+                                        app.input_buffer.clear();
+                                        app.picker.is_searching = false;
                                         app.picker.refresh();
                                     }
-                                    app.recalibrate_picker_selection();
+                                    KeyCode::Enter => {
+                                        app.input_mode = InputMode::Normal;
+                                    }
+                                    KeyCode::Up => app.browser_move_up(),
+                                    KeyCode::Down => app.browser_move_down(),
+                                    KeyCode::Backspace => {
+                                        app.input_buffer.pop();
+                                        app.picker.is_searching = !app.input_buffer.is_empty();
+                                        if app.picker.search_recursive {
+                                            app.picker.refresh();
+                                        }
+                                        app.recalibrate_picker_selection();
+                                    }
+                                    KeyCode::Char(c) => {
+                                        app.input_buffer.push(c);
+                                        app.picker.is_searching = true;
+                                        if app.picker.search_recursive {
+                                            app.picker.refresh();
+                                        }
+                                        app.recalibrate_picker_selection();
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
                     }
@@ -1502,12 +1491,12 @@ fn draw_history(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
 fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let footer_text = match app.input_mode {
-        InputMode::Picker => {
-            "Picker: ↑/↓ move, Enter open/select, Left/Right nav, o open, t tree, space select, s add, Esc cancel"
+        InputMode::Filter => {
+            "Filter: Type to search fuzzy | ↑/↓: Select | Enter: Confirm | Esc: Back"
         }
         InputMode::Normal => match app.focus {
             AppFocus::Rail => "Tab/Right: Content | ↑/↓: Switch Tab | q: Quit",
-            AppFocus::Browser => "Tab: Queue | Left: Rail | a: Open | space: Select | s: Stage",
+            AppFocus::Browser => "Navigation: Arrows/jklh | /: Filter | f: Recursive | t: Tree | space: Select | s: Stage",
             AppFocus::Queue => "Tab: History | Left: Browser | r: Retry | d: Delete",
             AppFocus::History => "Tab: Rail | Left: Queue",
             AppFocus::Quarantine => "Tab: Rail | Left: Rail | d: Clear | R: Refresh",
@@ -1914,11 +1903,12 @@ fn draw_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(breadcrumbs), breadcrumb_area);
 
     // Filter indicator
-    if !app.input_buffer.is_empty() && app.input_mode == InputMode::Picker {
+    if !app.input_buffer.is_empty() || app.input_mode == InputMode::Filter {
         let filter_line = Line::from(vec![
             Span::styled(" 🔍 ", app.theme.muted_style()),
             Span::styled(if app.picker.search_recursive { "Recursive Filter: " } else { "Filter: " }, app.theme.muted_style()),
             Span::styled(&app.input_buffer, app.theme.accent_style()),
+            Span::styled(if app.input_mode == InputMode::Filter { " █" } else { "" }, app.theme.accent_style()),
         ]);
         let filter_area = Rect::new(inner_area.x, inner_area.y + 1, inner_area.width, 1);
         f.render_widget(Paragraph::new(filter_line), filter_area);
@@ -1932,10 +1922,10 @@ fn draw_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
     );
 
     // Live Filtering
-    let filter = if app.input_mode == InputMode::Picker { 
+    let filter = if app.input_mode == InputMode::Filter { 
         app.input_buffer.clone() 
     } else { 
-        String::new() 
+        app.input_buffer.clone() // Still use it if not empty but in Normal mode
     };
 
     let filtered_entries: Vec<(usize, &FileEntry)> = app.picker.entries.iter().enumerate()
