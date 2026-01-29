@@ -980,7 +980,8 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                                     app.input_buffer.clear();
                                                     app.picker.is_searching = false;
                                                 }
-                                            } else {
+                                            } else if key.code == KeyCode::Enter || key.code == KeyCode::Char('l') {
+                                                // Only queue files on Enter or 'l', not Right arrow
                                                 let conn = conn_mutex.lock().unwrap();
                                                 let cfg_guard = cfg.lock().unwrap();
                                                 let staging = cfg_guard.staging_dir.clone();
@@ -988,6 +989,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                                 let _ = ingest_path(&conn, &staging, &entry.path.to_string_lossy());
                                                 app.status_message = "File added to queue".to_string();
                                             }
+                                            // Right arrow on a file does nothing
                                         }
                                     }
                                     KeyCode::Char('/') => {
