@@ -1018,10 +1018,19 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                          app.picker.go_parent();
                                      } else {
                                          app.input_buffer.pop();
+                                         app.picker.is_searching = !app.input_buffer.is_empty();
+                                         if app.picker.is_searching && app.picker.search_recursive {
+                                             app.picker.refresh();
+                                         }
+                                         app.recalibrate_picker_selection();
                                      }
                                 }
                                 KeyCode::Char(c) => {
                                     app.input_buffer.push(c);
+                                    app.picker.is_searching = true;
+                                    if app.picker.search_recursive {
+                                        app.picker.refresh();
+                                    }
                                     app.recalibrate_picker_selection();
                                 }
                                 _ => {}
