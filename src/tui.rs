@@ -50,7 +50,7 @@ use std::fs;
 use std::io::{self};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsCategory {
@@ -219,6 +219,8 @@ struct FileEntry {
     is_dir: bool,
     is_parent: bool,
     depth: usize,
+    size: u64,
+    modified: Option<SystemTime>,
 }
 
 struct FilePicker {
@@ -304,6 +306,8 @@ impl FilePicker {
                 is_dir: true,
                 is_parent: true,
                 depth: 0,
+                size: 0,
+                modified: None,
             });
         }
         for entry in fs::read_dir(path)? {
@@ -313,13 +317,19 @@ impl FilePicker {
             };
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let metadata = fs::metadata(&path).ok();
+            let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+            let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+            let modified = metadata.and_then(|m| m.modified().ok());
+
             entries.push(FileEntry {
                 name,
                 path,
                 is_dir,
                 is_parent: false,
                 depth: 0,
+                size,
+                modified,
             });
         }
         entries.sort_by(
@@ -343,6 +353,8 @@ impl FilePicker {
                 is_dir: true,
                 is_parent: true,
                 depth: 0,
+                size: 0,
+                modified: None,
             });
         }
         self.build_tree(path, 0, 4, &mut entries)?;
@@ -369,13 +381,19 @@ impl FilePicker {
             };
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let metadata = fs::metadata(&path).ok();
+            let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+            let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+            let modified = metadata.and_then(|m| m.modified().ok());
+
             children.push(FileEntry {
                 name,
                 path,
                 is_dir,
                 is_parent: false,
                 depth,
+                size,
+                modified,
             });
         }
         children.sort_by(|a, b| match (a.is_dir, b.is_dir) {
@@ -587,6 +605,76 @@ impl App {
         self.last_refresh = Instant::now();
         Ok(())
     }
+
+    fn browser_move_down(&mut self) {
+        let filter = if self.input_mode == InputMode::Picker { 
+            self.input_buffer.to_lowercase() 
+        } else { 
+            String::new() 
+        };
+
+        if filter.is_empty() {
+            self.picker.move_down();
+            return;
+        }
+
+        let filtered_indices: Vec<usize> = self.picker.entries.iter().enumerate()
+            .filter(|(_, e)| e.is_parent || e.name.to_lowercase().contains(&filter))
+            .map(|(i, _)| i)
+            .collect();
+
+        if filtered_indices.is_empty() { return; }
+
+        let current_pos = filtered_indices.iter().position(|i| *i == self.picker.selected).unwrap_or(0);
+        if current_pos + 1 < filtered_indices.len() {
+            self.picker.selected = filtered_indices[current_pos + 1];
+        }
+    }
+
+    fn browser_move_up(&mut self) {
+        let filter = if self.input_mode == InputMode::Picker { 
+            self.input_buffer.to_lowercase() 
+        } else { 
+            String::new() 
+        };
+
+        if filter.is_empty() {
+            self.picker.move_up();
+            return;
+        }
+
+        let filtered_indices: Vec<usize> = self.picker.entries.iter().enumerate()
+            .filter(|(_, e)| e.is_parent || e.name.to_lowercase().contains(&filter))
+            .map(|(i, _)| i)
+            .collect();
+
+        if filtered_indices.is_empty() { return; }
+
+        let current_pos = filtered_indices.iter().position(|i| *i == self.picker.selected).unwrap_or(0);
+        if current_pos > 0 {
+            self.picker.selected = filtered_indices[current_pos - 1];
+        } else {
+            self.picker.selected = filtered_indices[0];
+        }
+    }
+
+    fn recalibrate_picker_selection(&mut self) {
+        let filter = if self.input_mode == InputMode::Picker { 
+            self.input_buffer.to_lowercase() 
+        } else { 
+            return; 
+        };
+        if filter.is_empty() { return; }
+
+        let filtered_indices: Vec<usize> = self.picker.entries.iter().enumerate()
+            .filter(|(_, e)| e.is_parent || e.name.to_lowercase().contains(&filter))
+            .map(|(i, _)| i)
+            .collect();
+
+        if !filtered_indices.is_empty() && !filtered_indices.contains(&self.picker.selected) {
+            self.picker.selected = filtered_indices[0];
+        }
+    }
 }
 
 pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>, needs_wizard: bool) -> Result<()> {
@@ -797,8 +885,8 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                             },
                             InputMode::Picker => match key.code {
                                 KeyCode::Esc => app.input_mode = InputMode::Normal,
-                                KeyCode::Up => app.picker.move_up(),
-                                KeyCode::Down => app.picker.move_down(),
+                                KeyCode::Up => app.browser_move_up(),
+                                KeyCode::Down => app.browser_move_down(),
                                 KeyCode::PageUp => app.picker.page_up(),
                                 KeyCode::PageDown => app.picker.page_down(),
                                 KeyCode::Left => app.picker.go_parent(),
@@ -1670,6 +1758,28 @@ fn draw_jobs(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(table, area);
 }
 
+fn format_size(size: u64) -> String {
+    if size == 0 { return "-".to_string(); }
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut s = size as f64;
+    let mut unit = 0;
+    while s >= 1024.0 && unit < UNITS.len() - 1 {
+        s /= 1024.0;
+        unit += 1;
+    }
+    format!("{:.1} {}", s, UNITS[unit])
+}
+
+fn format_modified(time: Option<SystemTime>) -> String {
+    match time {
+        Some(t) => {
+            let datetime: chrono::DateTime<chrono::Local> = t.into();
+            datetime.format("%Y-%m-%d %H:%M").to_string()
+        }
+        None => "-".to_string(),
+    }
+}
+
 fn draw_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let is_focused = app.focus == AppFocus::Browser;
     let focus_style = if is_focused {
@@ -1679,64 +1789,125 @@ fn draw_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
     };
 
     let title = if is_focused {
-        format!(" Hopper (Browser): {} ", app.picker.cwd.to_string_lossy())
+        format!(" Hopper (Browser) ")
     } else {
         " Hopper (Press 'a' to explore files) ".to_string()
     };
 
-    let total_rows = app.picker.entries.len();
-    let display_height = area.height.saturating_sub(2) as usize; 
-    let mut offset = 0;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(app.theme.border_type)
+        .title(title)
+        .border_style(focus_style)
+        .style(app.theme.panel_style());
     
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner_area.height < 3 { return; }
+
+    // Breadcrumbs
+    let path_str = app.picker.cwd.to_string_lossy().to_string();
+    let breadcrumbs = Line::from(vec![
+        Span::styled(" 📂 ", app.theme.accent_style()),
+        Span::styled(path_str, app.theme.text_style().add_modifier(Modifier::BOLD)),
+    ]);
+    
+    let breadcrumb_area = Rect::new(inner_area.x, inner_area.y, inner_area.width, 1);
+    f.render_widget(Paragraph::new(breadcrumbs), breadcrumb_area);
+
+    // Filter indicator
+    if !app.input_buffer.is_empty() && app.input_mode == InputMode::Picker {
+        let filter_line = Line::from(vec![
+            Span::styled(" 🔍 Filter: ", app.theme.muted_style()),
+            Span::styled(&app.input_buffer, app.theme.accent_style()),
+        ]);
+        let filter_area = Rect::new(inner_area.x, inner_area.y + 1, inner_area.width, 1);
+        f.render_widget(Paragraph::new(filter_line), filter_area);
+    }
+
+    let table_area = Rect::new(
+        inner_area.x, 
+        inner_area.y + if app.input_buffer.is_empty() { 1 } else { 2 }, 
+        inner_area.width, 
+        inner_area.height.saturating_sub(if app.input_buffer.is_empty() { 1 } else { 2 })
+    );
+
+    // Live Filtering
+    let filter = if app.input_mode == InputMode::Picker { 
+        app.input_buffer.to_lowercase() 
+    } else { 
+        String::new() 
+    };
+
+    let filtered_entries: Vec<(usize, &FileEntry)> = app.picker.entries.iter().enumerate()
+        .filter(|(_, e)| e.is_parent || filter.is_empty() || e.name.to_lowercase().contains(&filter))
+        .collect();
+
+    let total_rows = filtered_entries.len();
+    let display_height = table_area.height.saturating_sub(1) as usize; // -1 for header
+    
+    // Find current index in filtered list
+    let filtered_selected = filtered_entries.iter().position(|(i, _)| *i == app.picker.selected).unwrap_or(0);
+
+    let mut offset = 0;
     if total_rows > display_height {
-        if app.picker.selected >= display_height / 2 {
-            offset = (app.picker.selected + 1).saturating_sub(display_height / 2);
+        if filtered_selected >= display_height / 2 {
+            offset = (filtered_selected + 1).saturating_sub(display_height / 2);
         }
         if offset + display_height > total_rows {
             offset = total_rows.saturating_sub(display_height);
         }
     }
 
-    let items: Vec<Row> = app
-        .picker
-        .entries
+    let header = Row::new(vec![
+        Cell::from("Name"),
+        Cell::from("Size"),
+        Cell::from("Modified"),
+    ]).style(app.theme.header_style()).height(1);
+
+    let rows: Vec<Row> = filtered_entries
         .iter()
-        .enumerate()
         .skip(offset)
         .take(display_height)
-        .map(|(i, entry)| {
+        .enumerate()
+        .map(|(visible_idx, (orig_idx, entry))| {
             let prefix = if entry.is_dir { "📁 " } else { "📄 " };
             let expand = if entry.is_dir && !entry.is_parent {
                  if app.picker.expanded.contains(&entry.path) { "[-] " } else { "[+] " }
             } else { "" };
             
             let name_styled = format!("{}{}{}", "  ".repeat(entry.depth), expand, prefix) + &entry.name;
-            
-            let style = if (i == app.picker.selected) && (app.focus == AppFocus::Browser) {
+            let size_str = if entry.is_dir { "-".to_string() } else { format_size(entry.size) };
+            let mod_str = format_modified(entry.modified);
+
+            let style = if (*orig_idx == app.picker.selected) && (app.focus == AppFocus::Browser) {
                 app.theme.selection_style()
             } else if app.picker.selected_paths.contains(&entry.path) {
                 app.theme.status_style(StatusKind::Success)
-            } else if i % 2 == 0 {
+            } else if (visible_idx + offset) % 2 == 0 {
                 app.theme.row_style(false)
             } else {
                  app.theme.row_style(true)
             };
 
-            Row::new(vec![Cell::from(name_styled)]).style(style)
+            Row::new(vec![
+                Cell::from(name_styled),
+                Cell::from(size_str),
+                Cell::from(mod_str),
+            ]).style(style)
         })
         .collect();
 
-    let table = Table::new(items, [Constraint::Min(0)])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(app.theme.border_type)
-                .title(title)
-                .border_style(focus_style)
-                .style(app.theme.panel_style()),
-        );
+    let table = Table::new(rows, [
+        Constraint::Fill(1),
+        Constraint::Length(10),
+        Constraint::Length(16),
+    ])
+    .header(header)
+    .style(app.theme.panel_style());
 
-    f.render_widget(table, area);
+    f.render_widget(table, table_area);
 }
 
 fn draw_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
