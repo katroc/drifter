@@ -231,6 +231,8 @@ struct FilePicker {
     view: PickerView,
     expanded: HashSet<PathBuf>,
     selected_paths: HashSet<PathBuf>,
+    search_recursive: bool,
+    is_searching: bool,
 }
 
 impl FilePicker {
@@ -246,30 +248,45 @@ impl FilePicker {
             view: PickerView::List,
             expanded,
             selected_paths: HashSet::new(),
+            search_recursive: false,
+            is_searching: false,
         }
     }
 
     fn refresh(&mut self) {
-        let result = match self.view {
-            PickerView::List => self.load_dir_list(&self.cwd),
-            PickerView::Tree => self.load_dir_tree(&self.cwd),
-        };
-        match result {
-            Ok(entries) => {
-                self.entries = entries;
-                if self.selected >= self.entries.len() {
-                    self.selected = self.entries.len().saturating_sub(1);
+        if self.is_searching && self.search_recursive {
+            match self.load_dir_recursive(&self.cwd) {
+                Ok(entries) => {
+                    self.entries = entries;
+                    self.last_error = None;
                 }
-                if self.entries.is_empty() {
-                    self.selected = 0;
+                Err(err) => {
+                    self.entries.clear();
+                    self.last_error = Some(err.to_string());
                 }
-                self.last_error = None;
             }
-            Err(err) => {
-                self.entries.clear();
-                self.selected = 0;
-                self.last_error = Some(err.to_string());
+        } else {
+            let result = match self.view {
+                PickerView::List => self.load_dir_list(&self.cwd),
+                PickerView::Tree => self.load_dir_tree(&self.cwd),
+            };
+            match result {
+                Ok(entries) => {
+                    self.entries = entries;
+                    self.last_error = None;
+                }
+                Err(err) => {
+                    self.entries.clear();
+                    self.last_error = Some(err.to_string());
+                }
             }
+        }
+
+        if self.selected >= self.entries.len() {
+            self.selected = self.entries.len().saturating_sub(1);
+        }
+        if self.entries.is_empty() {
+            self.selected = 0;
         }
     }
 
@@ -358,6 +375,49 @@ impl FilePicker {
             });
         }
         self.build_tree(path, 0, 4, &mut entries)?;
+        Ok(entries)
+    }
+
+    fn load_dir_recursive(&self, path: &Path) -> Result<Vec<FileEntry>> {
+        let mut entries = Vec::new();
+        let mut stack = vec![(path.to_path_buf(), 0)];
+        let max_files = 5000;
+        let max_depth = 10;
+
+        while let Some((curr_path, depth)) = stack.pop() {
+            if entries.len() >= max_files || depth > max_depth {
+                continue;
+            }
+
+            if let Ok(dir_entries) = fs::read_dir(curr_path) {
+                for entry in dir_entries {
+                    if let Ok(entry) = entry {
+                        let p = entry.path();
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let metadata = fs::metadata(&p).ok();
+                        let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                        let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                        let modified = metadata.and_then(|m| m.modified().ok());
+
+                        entries.push(FileEntry {
+                            name,
+                            path: p.clone(),
+                            is_dir,
+                            is_parent: false,
+                            depth,
+                            size,
+                            modified,
+                        });
+
+                        if is_dir {
+                            stack.push((p, depth + 1));
+                        }
+                    }
+                }
+            }
+        }
+
+        entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         Ok(entries)
     }
 
@@ -904,6 +964,12 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                 }
                                 KeyCode::Char(' ') => app.picker.toggle_select(),
                                 KeyCode::Char('t') => app.picker.toggle_view(),
+                                KeyCode::Char('f') => {
+                                    app.picker.search_recursive = !app.picker.search_recursive;
+                                    app.picker.is_searching = !app.input_buffer.is_empty();
+                                    app.picker.refresh();
+                                    app.recalibrate_picker_selection();
+                                }
                                 KeyCode::Char('c') => app.picker.clear_selected(),
                                 KeyCode::Char('o') => {
                                      if let Some(entry) = app.picker.selected_entry() {
@@ -1783,6 +1849,25 @@ fn format_modified(time: Option<SystemTime>) -> String {
     }
 }
 
+fn fuzzy_match(pattern: &str, text: &str) -> bool {
+    if pattern.is_empty() { return true; }
+    let pattern = pattern.to_lowercase();
+    let text = text.to_lowercase();
+    let mut pattern_chars = pattern.chars();
+    let mut current_char = pattern_chars.next();
+
+    for c in text.chars() {
+        if let Some(p) = current_char {
+            if c == p {
+                current_char = pattern_chars.next();
+            }
+        } else {
+            return true;
+        }
+    }
+    current_char.is_none()
+}
+
 fn draw_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let is_focused = app.focus == AppFocus::Browser;
     let focus_style = if is_focused {
@@ -1822,7 +1907,8 @@ fn draw_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
     // Filter indicator
     if !app.input_buffer.is_empty() && app.input_mode == InputMode::Picker {
         let filter_line = Line::from(vec![
-            Span::styled(" 🔍 Filter: ", app.theme.muted_style()),
+            Span::styled(" 🔍 ", app.theme.muted_style()),
+            Span::styled(if app.picker.search_recursive { "Recursive Filter: " } else { "Filter: " }, app.theme.muted_style()),
             Span::styled(&app.input_buffer, app.theme.accent_style()),
         ]);
         let filter_area = Rect::new(inner_area.x, inner_area.y + 1, inner_area.width, 1);
@@ -1838,13 +1924,13 @@ fn draw_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     // Live Filtering
     let filter = if app.input_mode == InputMode::Picker { 
-        app.input_buffer.to_lowercase() 
+        app.input_buffer.clone() 
     } else { 
         String::new() 
     };
 
     let filtered_entries: Vec<(usize, &FileEntry)> = app.picker.entries.iter().enumerate()
-        .filter(|(_, e)| e.is_parent || filter.is_empty() || e.name.to_lowercase().contains(&filter))
+        .filter(|(_, e)| e.is_parent || filter.is_empty() || fuzzy_match(&filter, &e.name))
         .collect();
 
     let total_rows = filtered_entries.len();
