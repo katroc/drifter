@@ -841,11 +841,13 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                             if app.pending_action == ModalAction::ClearHistory {
                                 let conn = conn_mutex.lock().unwrap();
                                 let filter_str = if app.history_filter == HistoryFilter::All { None } else { Some(app.history_filter.as_str()) };
-                                let _ = crate::db::clear_history(&conn, filter_str);
-                                
-                                app.selected_history = 0;
-                                app.status_message = format!("History cleared ({})", app.history_filter.as_str());
-                                let _ = app.refresh_jobs(&conn);
+                                if let Err(e) = crate::db::clear_history(&conn, filter_str) {
+                                    app.status_message = format!("Error clearing history: {}", e);
+                                } else {
+                                    app.selected_history = 0;
+                                    app.status_message = format!("History cleared ({})", app.history_filter.as_str());
+                                    let _ = app.refresh_jobs(&conn);
+                                }
                             }
                             
                             // Reset
@@ -1818,15 +1820,21 @@ fn draw_confirmation_modal(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .style(app.theme.panel_style())
         .border_style(app.theme.border_active_style());
 
-    let area = centered_rect(area, 60, 20);
+    let area = centered_fixed_rect(area, 60, 8);
     f.render_widget(ratatui::widgets::Clear, area); // Clear background
     f.render_widget(block.clone(), area);
 
+    // Use inner area with padding for content
+    let content_area = block.inner(area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .margin(2)
-        .constraints([Constraint::Min(1), Constraint::Length(3)])
-        .split(block.inner(area));
+        .constraints([
+            Constraint::Min(1), // Message
+            Constraint::Length(1), // Spacer
+            Constraint::Length(1), // Actions
+        ])
+        .margin(1)
+        .split(content_area);
 
     let msg = Paragraph::new(app.confirmation_msg.as_str())
         .wrap(Wrap { trim: true })
@@ -1839,9 +1847,32 @@ fn draw_confirmation_modal(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .alignment(ratatui::layout::Alignment::Center)
         .style(app.theme.accent_style().add_modifier(Modifier::BOLD));
     
-    f.render_widget(actions, chunks[1]);
+    f.render_widget(actions, chunks[2]);
 }
 
+
+fn centered_fixed_rect(r: Rect, width: u16, height: u16) -> Rect {
+    let empty_x = r.width.saturating_sub(width) / 2;
+    let empty_y = r.height.saturating_sub(height) / 2;
+    
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(empty_y),
+            Constraint::Length(height),
+            Constraint::Length(empty_y),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(empty_x),
+            Constraint::Length(width),
+            Constraint::Length(empty_x),
+        ])
+        .split(popup_layout[1])[1]
+}
 
 fn draw_system_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let av_status = app.clamav_status.lock().unwrap().clone();

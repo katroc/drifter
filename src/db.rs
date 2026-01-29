@@ -278,25 +278,52 @@ pub fn delete_job(conn: &Connection, job_id: i64) -> Result<()> {
 // Clear history based on filter (All, Complete, Quarantined)
 // Always excludes "active" jobs (pending, scanning, uploading)
 pub fn clear_history(conn: &Connection, filter: Option<&str>) -> Result<()> {
-    let base_query = "DELETE FROM jobs WHERE status NOT IN ('pending', 'scanning', 'uploading', 'failed_retryable')";
+    // 1. Identify IDs to delete
+    let mut query = "SELECT id FROM jobs WHERE status NOT IN ('pending', 'scanning', 'uploading', 'failed_retryable')".to_string();
     
     match filter {
         Some("Quarantined") => {
-            conn.execute(
-                &format!("{} AND (status = 'quarantined' OR status = 'quarantined_removed')", base_query),
-                [],
-            )?;
+            query.push_str(" AND (status = 'quarantined' OR status = 'quarantined_removed')");
         }
         Some("Complete") => {
-            conn.execute(
-                &format!("{} AND status = 'complete'", base_query),
-                [],
-            )?;
+            query.push_str(" AND status = 'complete'");
         }
         _ => {
-            // All: clears complete, quarantined, failed, etc.
-            conn.execute(base_query, [])?;
+            // All: match base query
         }
+    }
+
+    let mut stmt = conn.prepare(&query)?;
+    let ids_iter = stmt.query_map([], |row| row.get(0))?;
+    let mut ids: Vec<i64> = Vec::new();
+    for id in ids_iter {
+        ids.push(id?);
+    }
+
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    // 2. Delete dependencies
+    // Construct safe "IN (?,?,?)" clause
+    // Since SQLite limit is usually 999 parameters, batching might be needed for huge lists.
+    // For now, simpler iteration or string construction if local
+    // Let's use iteration for simplicity and safety, wrapped in transaction? 
+    // Or just robust one-by-one deletions since user interaction isn't high frequency high volume here usually.
+    // Actually better: just use delete_job for each ID, but ensure delete_job deletes uploads/parts too.
+    
+    // Check if we should update delete_job first? Yes.
+    // But let's fix it here for now to be self-contained.
+    
+    for id in ids {
+        // Delete parts
+        conn.execute("DELETE FROM parts WHERE upload_id IN (SELECT id FROM uploads WHERE job_id = ?)", params![id])?;
+        // Delete uploads
+        conn.execute("DELETE FROM uploads WHERE job_id = ?", params![id])?;
+        // Delete events
+        conn.execute("DELETE FROM events WHERE job_id = ?", params![id])?;
+        // Delete job
+        conn.execute("DELETE FROM jobs WHERE id = ?", params![id])?;
     }
     
     Ok(())
