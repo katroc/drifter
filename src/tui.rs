@@ -1212,7 +1212,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                         let _ = std::fs::remove_file(p);
                                     }
                                     
-                                    app.status_message = format!("Cleared quarantined job {} (record kept in history)", id);
+                                    app.status_message = format!("Threat neutralized: File '{}' deleted", job.source_path);
                                     
                                     if app.selected_quarantine >= app.quarantine.len() && app.selected_quarantine > 0 { app.selected_quarantine -= 1; }
                                 }
@@ -1807,7 +1807,10 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
     // 2. If History focused -> Split panel: Top=List, Bottom=Details.
     // 3. Otherwise -> Show full History list.
 
-    if app.focus == AppFocus::Queue && !app.jobs.is_empty() && app.selected < app.jobs.len() {
+    if app.current_tab == AppTab::Quarantine && !app.quarantine.is_empty() && app.selected_quarantine < app.quarantine.len() {
+        // Quarantine Tab: Show selected threat details in full right panel
+        draw_job_details(f, app, right_panel, &app.quarantine[app.selected_quarantine]);
+    } else if app.focus == AppFocus::Queue && !app.jobs.is_empty() && app.selected < app.jobs.len() {
         // Queue focused: Show selected job details in full right panel
         draw_job_details(f, app, right_panel, &app.jobs[app.selected]);
     } else if app.focus == AppFocus::History && !app.history.is_empty() && app.selected_history < app.history.len() {
@@ -2590,68 +2593,118 @@ fn draw_quarantine(f: &mut ratatui::Frame, app: &App, area: Rect) {
         app.theme.border_style()
     };
     
-    let outer_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(app.theme.border_type)
-        .title(" Quarantine Zone ")
-        .border_style(focus_style)
-        .style(app.theme.panel_style());
-    
-    let inner_area = outer_block.inner(area);
-    f.render_widget(outer_block, area);
+    // Header
+    let header_cells = ["File", "Threat", "Status", "Time"]
+        .iter()
+        .map(|h| Cell::from(*h).style(app.theme.header_style()));
+    let header = Row::new(header_cells)
+        .style(app.theme.header_style())
+        .height(1);
 
-    if app.quarantine.is_empty() {
-         let p = Paragraph::new("No threats detected.")
-            .block(Block::default().borders(Borders::NONE))
-            .style(app.theme.status_style(StatusKind::Success));
-         f.render_widget(p, inner_area);
-         return;
-    }
-
-    let total_items = app.quarantine.len();
-    let display_height = inner_area.height as usize; 
-    let items_per_page = display_height / 3; // Each item is 3 lines
+    let total_rows = app.quarantine.len();
+    let display_height = area.height.saturating_sub(4) as usize; // Border + Header
     let mut offset = 0;
     
-    if total_items > items_per_page {
-        if app.selected_quarantine >= items_per_page / 2 {
-            offset = (app.selected_quarantine + 1).saturating_sub(items_per_page / 2);
+    if total_rows > display_height {
+        if app.selected_quarantine >= display_height / 2 {
+            offset = (app.selected_quarantine + 1).saturating_sub(display_height / 2);
         }
-        if offset + items_per_page > total_items {
-            offset = total_items.saturating_sub(items_per_page);
+        if offset + display_height > total_rows {
+            offset = total_rows.saturating_sub(display_height);
         }
     }
 
-    let items: Vec<ListItem> = app.quarantine.iter().enumerate()
+    let rows = app.quarantine.iter().enumerate()
         .skip(offset)
-        .take(items_per_page)
-        .map(|(i, job)| {
-        let is_selected = i == app.selected_quarantine && app.focus == AppFocus::Quarantine;
-        let base_style = if is_selected {
+        .take(display_height)
+        .map(|(idx, job)| {
+        let is_selected = (idx == app.selected_quarantine) && (app.focus == AppFocus::Quarantine);
+        let row_style = if is_selected {
             app.theme.selection_style()
         } else {
-            app.theme.text_style()
+            app.theme.row_style(idx % 2 != 0)
         };
-        let danger_style = app.theme.status_style(StatusKind::Error);
         
-        ListItem::new(vec![
-            Line::from(vec![
-                Span::styled(format!("ID: {}", job.id), base_style),
-                Span::from(" | "),
-                Span::styled(job.source_path.clone(), base_style),
-            ]),
-            Line::from(vec![
-                Span::from("Status: "),
-                Span::styled(job.status.clone(), danger_style),
-                Span::from(" | Details: "),
-                Span::from(job.scan_status.clone().unwrap_or_default()),
-            ]),
-            Line::from(""),
-        ])
-    }).collect();
+        let filename = std::path::Path::new(&job.source_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| job.source_path.clone());
+        let display_name = if filename.len() > 25 {
+            format!("{}…", &filename[..24])
+        } else {
+            filename
+        };
 
-    let list = List::new(items)
-        .highlight_style(Style::default().add_modifier(Modifier::ITALIC));
-    
-    f.render_widget(list, inner_area);
+        let threat = extract_threat_name(job.scan_status.as_deref().unwrap_or(""));
+        let status = if job.status == "quarantined_removed" { "Removed" } else { "Detected" };
+        let time_str = format_relative_time(&job.created_at);
+        
+        let status_style = if is_selected {
+            app.theme.selection_style()
+        } else if job.status == "quarantined_removed" {
+             app.theme.status_style(StatusKind::Info)
+        } else {
+             app.theme.status_style(StatusKind::Error)
+        };
+
+        Row::new(vec![
+            Cell::from(display_name),
+            Cell::from(threat).style(if is_selected { Style::default() } else { app.theme.status_style(StatusKind::Error) }),
+            Cell::from(status).style(status_style),
+            Cell::from(time_str),
+        ])
+        .style(row_style)
+    });
+
+    let table = Table::new(rows, [
+        Constraint::Min(20),
+        Constraint::Length(25),
+        Constraint::Length(12),
+        Constraint::Length(10),
+    ])
+    .header(header)
+    .block(
+         Block::default()
+            .borders(Borders::ALL)
+            .border_type(app.theme.border_type)
+            .title(" Quarantine Zone ")
+            .border_style(focus_style)
+            .style(app.theme.panel_style()),
+    );
+
+    f.render_widget(table, area);
+}
+
+fn extract_threat_name(scan_status: &str) -> String {
+    if scan_status.contains("FOUND") {
+        // Example: "/path/to/file: Eicar-Test-Signature FOUND" or similar
+        // Or if using clamav-client, it might be just "FOUND Eicar-Test-Signature"
+        // Let's try to find the word before "FOUND" or the word after "FOUND" if it's "FOUND <Signature>"
+        // Actually, typically it is "FOUND <Signature>" or "<Signature> FOUND"
+        // Let's assume common format. If we split by space:
+        // "FOUND Eicar-Signature" -> parts[1]
+        let parts: Vec<&str> = scan_status.split_whitespace().collect();
+        if let Some(pos) = parts.iter().position(|&s| s == "FOUND") {
+            // Check next
+            if pos + 1 < parts.len() {
+                return parts[pos + 1].to_string();
+            }
+            // Check prev
+            if pos > 0 {
+                 let candidate = parts[pos - 1];
+                 // Simple heuristic: if it doesn't look like a path, use it
+                 if !candidate.contains('/') && !candidate.contains('\\') {
+                     return candidate.to_string();
+                 }
+            }
+        }
+        // Fallback: just return the status but truncated
+        if scan_status.len() > 20 {
+            format!("{}...", &scan_status[..20])
+        } else {
+            scan_status.to_string()
+        }
+    } else {
+        "-".to_string()
+    }
 }
