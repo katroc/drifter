@@ -63,10 +63,12 @@ impl Coordinator {
                 self.process_scan(&job)?;
             } else {
                 // Skip scan, move directly to uploading (or ready for upload)
-                // We fake a "clean" scan result
-                db::update_scan_status(&conn, job.id, "skipped", "scanned")?;
+                // We fake a "clean" scan result but go straight to uploading to avoid UI flicker
+                db::update_upload_status(&conn, job.id, "uploading", "uploading")?;
                 db::insert_event(&conn, job.id, "scan", "scan skipped by policy")?;
-                // Note: The next loop iteration will pick it up as "scanned" and move to "uploading"
+                
+                drop(conn);
+                self.process_upload(&job)?;
             }
             return Ok(()); // Loop again
         }
