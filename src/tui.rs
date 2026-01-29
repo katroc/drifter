@@ -992,6 +992,10 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                     }
                                     KeyCode::Char('/') => {
                                         app.input_mode = InputMode::Filter;
+                                        app.picker.search_recursive = true;
+                                        app.picker.is_searching = true;
+                                        app.picker.refresh();
+                                        app.status_message = "Search (recursive)".to_string();
                                     }
                                     KeyCode::Char(' ') => app.picker.toggle_select(),
                                     KeyCode::Char('t') => app.picker.toggle_view(),
@@ -1027,6 +1031,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                         app.input_mode = InputMode::Browsing;
                                         app.input_buffer.clear();
                                         app.picker.is_searching = false;
+                                        app.picker.search_recursive = false;
                                         app.picker.refresh();
                                     }
                                     KeyCode::Enter => {
