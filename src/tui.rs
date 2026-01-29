@@ -1260,6 +1260,21 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                             KeyCode::Right | KeyCode::Enter => {
                                 app.focus = AppFocus::SettingsFields;
                             }
+                            KeyCode::Char('s') => {
+                                let mut cfg = app.config.lock().unwrap();
+                                app.settings.apply_to_config(&mut cfg);
+                                
+                                // Apply theme immediately
+                                app.theme = Theme::from_name(&cfg.theme);
+                                
+                                // Save entire config to database
+                                let conn = conn_mutex.lock().unwrap();
+                                if let Err(e) = crate::config::save_config_to_db(&conn, &cfg) {
+                                    app.status_message = format!("Save error: {}", e);
+                                } else {
+                                    app.status_message = "Configuration saved".to_string();
+                                }
+                            }
                             _ => {}
                          }
                     }
@@ -1746,8 +1761,8 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
             AppFocus::History => "Tab: Rail | Left: Queue",
             AppFocus::Quarantine => "Tab: Rail | Left: Rail | d: Clear | R: Refresh",
             AppFocus::SettingsCategory => match app.settings.active_category {
-                 SettingsCategory::S3 | SettingsCategory::Scanner => "Tab/Right: Fields | Left: Rail | ↑/↓: Category | t: Test",
-                 _ => "Tab/Right: Fields | Left: Rail | ↑/↓: Category",
+                 SettingsCategory::S3 | SettingsCategory::Scanner => "Tab/Right: Fields | Left: Rail | ↑/↓: Category | s: Save | t: Test",
+                 _ => "Tab/Right: Fields | Left: Rail | ↑/↓: Category | s: Save",
             },
             AppFocus::SettingsFields => match app.settings.active_category {
                  SettingsCategory::S3 | SettingsCategory::Scanner => "Tab: Rail | Left: Category | Enter: Edit | s: Save | t: Test",
@@ -2322,7 +2337,7 @@ fn draw_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
         app.theme.border_style()
     };
 
-    let title = " Configuration (S: Save Changes) ";
+    let title = " Configuration ";
     let outer_block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
