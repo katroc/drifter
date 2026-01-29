@@ -1672,6 +1672,8 @@ fn draw_history(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .style(row_style)
     });
 
+    let title = format!(" History [{}] ", app.history_filter.as_str());
+
     let table = Table::new(rows, [
         Constraint::Min(20),
         Constraint::Length(16),
@@ -1683,7 +1685,7 @@ fn draw_history(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_type(app.theme.border_type)
-            .title(" History ")
+            .title(title)
             .border_style(focus_style)
             .style(app.theme.panel_style()),
     );
