@@ -1797,12 +1797,32 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         AppTab::Settings => draw_settings(f, app, main_layout[1]),
     }
 
+    // Render History / Details panel (Right side)
+    let right_panel = main_layout[2];
+    
+    // Logic: 
+    // 1. If Queue focused & selected -> Replace generic History list with Job Details (retaining existing behavior for Queue focus).
+    // 2. If History focused -> Split panel: Top=List, Bottom=Details.
+    // 3. Otherwise -> Show full History list.
+
     if app.focus == AppFocus::Queue && !app.jobs.is_empty() && app.selected < app.jobs.len() {
-        draw_job_details(f, app, main_layout[2], &app.jobs[app.selected]);
+        // Queue focused: Show selected job details in full right panel
+        draw_job_details(f, app, right_panel, &app.jobs[app.selected]);
     } else if app.focus == AppFocus::History && !app.history.is_empty() && app.selected_history < app.history.len() {
-        draw_job_details(f, app, main_layout[2], &app.history[app.selected_history]);
+        // History focused: Split view
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(50),
+                Constraint::Percentage(50),
+            ])
+            .split(right_panel);
+        
+        draw_history(f, app, chunks[0]);
+        draw_job_details(f, app, chunks[1], &app.history[app.selected_history]);
     } else {
-        draw_history(f, app, main_layout[2]);
+        // Default: Full history list
+        draw_history(f, app, right_panel);
     }
     draw_system_status(f, app, root[1]);
     draw_footer(f, app, root[2]);
