@@ -84,40 +84,6 @@ impl Scanner {
         Ok(true)
     }
 
-
-    async fn scan_buffer(&self, data: &[u8]) -> Result<bool> {
-        let address = format!("{}:{}", self.clamd_host, self.clamd_port);
-        let addr: SocketAddr = address.parse().context("Invalid clamd address")?;
-        
-        let mut stream = TcpStream::connect(addr).await.context("Failed to connect to clamd")?;
-        stream.write_all(b"zINSTREAM\0").await.context("Failed to send zINSTREAM")?;
-        
-        let mut cursor = 0;
-        while cursor < data.len() {
-            let end = (cursor + 32768).min(data.len());
-            let chunk = &data[cursor..end];
-            let len_bytes = (chunk.len() as u32).to_be_bytes();
-            
-            stream.write_all(&len_bytes).await.context("Failed to write chunk len")?;
-            stream.write_all(chunk).await.context("Failed to write chunk")?;
-            
-            cursor = end;
-        }
-
-        stream.write_all(&[0u8; 4]).await.context("Failed to write stream end")?;
-        
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).await.context("Failed to read response")?;
-        let response_str = String::from_utf8_lossy(&response);
-        
-        if response_str.contains("FOUND") {
-            Ok(false)
-        } else if response_str.contains("OK") {
-            Ok(true)
-        } else {
-             Err(anyhow::anyhow!("ClamAV Error: {}", response_str.trim()))
-        }
-    }
     pub async fn check_connection(&self) -> Result<String> {
         let address = format!("{}:{}", self.clamd_host, self.clamd_port);
         let addr: SocketAddr = address.parse().context("Invalid clamd address")?;
