@@ -13,25 +13,31 @@ jobs:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
+          targets: x86_64-unknown-linux-musl
 
-      - name: Build release binary
-        run: cargo build --release --verbose
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build static release binary
+        run: cargo build --release --target x86_64-unknown-linux-musl
 
       - name: Run tests
-        run: cargo test --release --verbose
+        run: cargo test --release
+
+      - name: Prepare release artifact
+        run: |
+          mkdir -p release
+          cp target/x86_64-unknown-linux-musl/release/drifter release/drifter-linux-x86_64
+          chmod +x release/drifter-linux-x86_64
 
       - name: Create Release
-        id: create_release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: target/release/drifter
+          files: release/drifter-linux-x86_64
           generate_release_notes: true
