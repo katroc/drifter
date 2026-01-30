@@ -7,7 +7,7 @@ use crate::theme::{StatusKind, Theme};
 use crate::watch::Watcher;
 use anyhow::Result;
 use std::sync::mpsc;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, EnableMouseCapture, DisableMouseCapture, Event, KeyCode, MouseEventKind, MouseButton};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -660,6 +660,24 @@ pub struct App {
     pub metrics: MetricsCollector,
     pub last_metrics: HostMetricsSnapshot,
     pub last_metrics_refresh: Instant,
+    
+    // Mouse Interaction
+    last_click_time: Option<Instant>,
+    last_click_pos: Option<(u16, u16)>,
+}
+
+fn calculate_list_offset(selected: usize, total: usize, display_height: usize) -> usize {
+    if total <= display_height {
+        return 0;
+    }
+    let mut offset = 0;
+    if selected >= display_height / 2 {
+        offset = (selected + 1).saturating_sub(display_height / 2);
+    }
+    if offset + display_height > total {
+        offset = total.saturating_sub(display_height);
+    }
+    offset
 }
 
 impl App {
@@ -712,6 +730,8 @@ impl App {
             view_mode: ViewMode::Flat,
             visual_jobs: Vec::new(),
             visual_history: Vec::new(),
+            last_click_time: None,
+            last_click_pos: None,
         };
 
         let status_clone = app.clamav_status.clone();
@@ -1062,7 +1082,7 @@ impl App {
 pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>, cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>, needs_wizard: bool) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -1103,7 +1123,9 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
         }
 
         if event::poll(tick_rate)? {
-            if let Event::Key(key) = event::read()? {
+            let event = event::read()?;
+            match event {
+                Event::Key(key) => {
                 // Handle Confirmation Mode
                 if app.input_mode == InputMode::Confirmation {
                      match key.code {
@@ -1860,12 +1882,460 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                         }
                     }
                 }
+                }
+                Event::Mouse(mouse) => {
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        if let Ok(size) = terminal.size() {
+                            let root = Layout::default()
+                                .direction(Direction::Vertical)
+                                .constraints([
+                                    Constraint::Min(0),
+                                    Constraint::Length(2),
+                                    Constraint::Length(1),
+                                ])
+                                .split(size);
+
+                            let main_layout = Layout::default()
+                                .direction(Direction::Horizontal)
+                                .constraints([
+                                    Constraint::Length(14),
+                                    Constraint::Min(0),
+                                    Constraint::Length(60),
+                                ])
+                                .split(root[0]);
+                                
+                            let rail = main_layout[0];
+                            let center = main_layout[1];
+                            let right = main_layout[2];
+                            let x = mouse.column;
+                            let y = mouse.row;
+                            
+                            if x >= rail.x && x < rail.x + rail.width && y >= rail.y && y < rail.y + rail.height {
+                                // Rail Click
+                                let rel_ry = y.saturating_sub(rail.y);
+                                if rel_ry == 1 { app.current_tab = AppTab::Transfers; app.focus = AppFocus::Rail; }
+                                else if rel_ry == 2 { app.current_tab = AppTab::Quarantine; app.focus = AppFocus::Rail; }
+                                else if rel_ry == 3 { app.current_tab = AppTab::Settings; app.focus = AppFocus::Rail; }
+                            } else if x >= center.x && x < center.x + center.width && y >= center.y && y < center.y + center.height {
+                                // Center Click (Transfers / Settings)
+                                match app.current_tab {
+                                    AppTab::Transfers => {
+                                        let chunks = Layout::default()
+                                            .direction(Direction::Horizontal)
+                                            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                                            .split(center);
+                                        
+                                        // Browser Panel Interaction
+                                        if x >= chunks[0].x && x < chunks[0].x + chunks[0].width {
+                                            app.focus = AppFocus::Browser;
+                                            
+                                            // Handle Double Click (Global for Panel)
+                                            let now = Instant::now();
+                                            let is_double_click = if let (Some(last_time), Some(last_pos)) = (app.last_click_time, app.last_click_pos) {
+                                                now.duration_since(last_time) < Duration::from_millis(500) && last_pos == (x, y)
+                                            } else {
+                                                false
+                                            };
+
+                                            if is_double_click {
+                                                // Reset click timer
+                                                app.last_click_time = None;
+                                                  
+                                                // If Normal mode, switch to Browsing (Global Action)
+                                                if app.input_mode == InputMode::Normal {
+                                                    app.input_mode = InputMode::Browsing;
+                                                    app.status_message = "Browsing files...".to_string();
+                                                } else if app.input_mode == InputMode::Browsing {
+                                                    // If already Browsing, check if we double-clicked a specific item to Enter
+                                                     let has_filter = !app.input_buffer.is_empty() || app.input_mode == InputMode::Filter;
+                                                     let data_start_y = chunks[0].y + 1 + 1 + if has_filter { 1 } else { 0 } + 1;
+
+                                                     if y >= data_start_y {
+                                                         let relative_row = (y - data_start_y) as usize;
+                                                         let display_height = chunks[0].height.saturating_sub(if has_filter { 4 } else { 3 }) as usize;
+                                                         
+                                                         let filter = if app.input_mode == InputMode::Filter { app.input_buffer.clone() } else { app.input_buffer.clone() };
+                                                         let filtered_entries: Vec<usize> = app.picker.entries.iter().enumerate()
+                                                             .filter(|(_, e)| e.is_parent || filter.is_empty() || fuzzy_match(&filter, &e.name))
+                                                             .map(|(i, _)| i)
+                                                             .collect();
+                                                         
+                                                         let total_rows = filtered_entries.len();
+                                                         let current_filtered_selected = filtered_entries.iter().position(|&i| i == app.picker.selected).unwrap_or(0);
+                                                         let offset = calculate_list_offset(current_filtered_selected, total_rows, display_height);
+                                                         
+                                                         if relative_row < display_height && offset + relative_row < total_rows {
+                                                             // Valid item double-clicked
+                                                             let new_filtered_idx = offset + relative_row;
+                                                             let new_real_idx = filtered_entries[new_filtered_idx];
+                                                             app.picker.selected = new_real_idx;
+
+                                                             let entry = app.picker.entries[app.picker.selected].clone();
+                                                             if entry.is_dir {
+                                                                 if entry.is_parent {
+                                                                     app.picker.go_parent();
+                                                                 } else {
+                                                                     app.picker.try_set_cwd(entry.path);
+                                                                 }
+                                                             } else {
+                                                                if let Ok(conn) = conn_mutex.lock() {
+                                                                    if let Ok(cfg_guard) = cfg.lock() {
+                                                                        let _ = ingest_path(&conn, &cfg_guard.staging_dir, &cfg_guard.staging_mode, &entry.path.to_string_lossy());
+                                                                        drop(cfg_guard);
+                                                                        drop(conn);
+                                                                        app.status_message = "File added to queue".to_string();
+                                                                    }
+                                                                }
+                                                             }
+                                                         }
+                                                     }
+                                                }
+                                            } else {
+                                                // Single Click Logic
+                                                app.last_click_time = Some(now);
+                                                app.last_click_pos = Some((x, y));
+                                                
+                                                // Handle selection
+                                                let has_filter = !app.input_buffer.is_empty() || app.input_mode == InputMode::Filter;
+                                                let data_start_y = chunks[0].y + 1 + 1 + if has_filter { 1 } else { 0 } + 1;
+    
+                                                if y >= data_start_y {
+                                                     let relative_row = (y - data_start_y) as usize;
+                                                     let display_height = chunks[0].height.saturating_sub(if has_filter { 4 } else { 3 }) as usize;
+                                                     
+                                                     let filter = if app.input_mode == InputMode::Filter { app.input_buffer.clone() } else { app.input_buffer.clone() };
+                                                     let filtered_entries: Vec<usize> = app.picker.entries.iter().enumerate()
+                                                         .filter(|(_, e)| e.is_parent || filter.is_empty() || fuzzy_match(&filter, &e.name))
+                                                         .map(|(i, _)| i)
+                                                         .collect();
+                                                     
+                                                     let total_rows = filtered_entries.len();
+                                                     
+                                                     let current_filtered_selected = filtered_entries.iter().position(|&i| i == app.picker.selected).unwrap_or(0);
+                                                     let offset = calculate_list_offset(current_filtered_selected, total_rows, display_height);
+                                                     
+                                                     if relative_row < display_height && offset + relative_row < total_rows {
+                                                         let new_filtered_idx = offset + relative_row;
+                                                         let new_real_idx = filtered_entries[new_filtered_idx];
+                                                         app.picker.selected = new_real_idx;
+                                                     }
+                                                }
+                                            }
+                                        } 
+                                        // Queue Panel Interaction
+                                        else if x >= chunks[1].x && x < chunks[1].x + chunks[1].width {
+                                            app.focus = AppFocus::Queue;
+                                            let inner_y = chunks[1].y + 1; // Header
+                                            if y > inner_y {
+                                                let relative_row = (y - inner_y - 1) as usize; // -1 because row 0 is header
+                                                let display_height = chunks[1].height.saturating_sub(2) as usize; // Borders
+                                                let total_rows = app.visual_jobs.len();
+                                                let offset = calculate_list_offset(app.selected, total_rows, display_height);
+                                                
+                                                if relative_row < display_height && offset + relative_row < total_rows {
+                                                    app.selected = offset + relative_row;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    AppTab::Quarantine => {
+                                        app.focus = AppFocus::Quarantine;
+                                        let inner_y = center.y + 1; // Header
+                                        if y > inner_y {
+                                            let relative_row = (y - inner_y - 1) as usize;
+                                            let display_height = center.height.saturating_sub(4) as usize;
+                                            let total_rows = app.quarantine.len();
+                                            let offset = calculate_list_offset(app.selected_quarantine, total_rows, display_height);
+                                            
+                                            if relative_row < display_height && offset + relative_row < total_rows {
+                                                app.selected_quarantine = offset + relative_row;
+                                            }
+                                        }
+                                    },
+                                    AppTab::Settings => {
+                                        // Calculate layout exactly as in draw_settings
+                                        let outer_block = Block::default().borders(Borders::ALL);
+                                        let inner_area = outer_block.inner(center);
+                                        
+                                        let chunks = Layout::default()
+                                            .direction(Direction::Horizontal)
+                                            .constraints([Constraint::Length(16), Constraint::Min(0)])
+                                            .split(inner_area);
+                                        
+                                         if x >= chunks[0].x && x < chunks[0].x + chunks[0].width {
+                                            app.focus = AppFocus::SettingsCategory;
+                                            
+                                            // Handle Category Selection
+                                            // List items start at chunks[0].y
+                                            if y >= chunks[0].y {
+                                                let rel_y = (y - chunks[0].y) as usize;
+                                                // Categories: S3, Scanner, Performance, Theme
+                                                if rel_y < 4 {
+                                                    let new_cat = match rel_y {
+                                                        0 => SettingsCategory::S3,
+                                                        1 => SettingsCategory::Scanner,
+                                                        2 => SettingsCategory::Performance,
+                                                        3 => SettingsCategory::Theme,
+                                                        _ => SettingsCategory::S3,
+                                                    };
+                                                    
+                                                    if app.settings.active_category != new_cat {
+                                                        app.settings.active_category = new_cat;
+                                                        app.settings.selected_field = 0; // Reset field on category switch
+                                                    }
+                                                }
+                                            }
+                                        } else if x >= chunks[1].x && x < chunks[1].x + chunks[1].width {
+                                            app.focus = AppFocus::SettingsFields;
+                                            
+                                            // Handle Field Selection
+                                            // Special Case: Theme Selection Popup
+                                            if app.settings.editing && app.settings.active_category == SettingsCategory::Theme {
+                                                let max_width = chunks[1].width.saturating_sub(2);
+                                                let max_height = chunks[1].height.saturating_sub(2);
+                                                if max_width >= 22 && max_height >= 8 {
+                                                    let width = max_width.min(62);
+                                                    let height = max_height.min(14).max(8);
+                                                    let theme_area = Rect {
+                                                        x: chunks[1].x + 1,
+                                                        y: chunks[1].y + 1,
+                                                        width,
+                                                        height,
+                                                    };
+                                                    let show_preview = theme_area.width >= 54;
+                                                    let list_width = if show_preview { 24 } else { theme_area.width };
+                                                    let list_area = Rect {
+                                                        x: theme_area.x,
+                                                        y: theme_area.y,
+                                                        width: list_width,
+                                                        height: theme_area.height,
+                                                    };
+
+                                                    if x >= list_area.x && x < list_area.x + list_area.width && y >= list_area.y && y < list_area.y + list_area.height {
+                                                        // Click inside theme list
+                                                        let rel_ly = (y.saturating_sub(list_area.y + 1)) as usize; // +1 for border
+                                                        let max_visible = list_area.height.saturating_sub(2) as usize;
+                                                        
+                                                        if rel_ly < max_visible {
+                                                            let total = app.theme_names.len();
+                                                            let current_theme = app.settings.theme.as_str();
+                                                            
+                                                            // Calculate offset as in rendering
+                                                            let mut offset = 0;
+                                                            if let Some(idx) = app.theme_names.iter().position(|&n| n == current_theme) {
+                                                                if max_visible > 0 && total > max_visible {
+                                                                    offset = idx.saturating_sub(max_visible / 2);
+                                                                    if offset + max_visible > total {
+                                                                        offset = total.saturating_sub(max_visible);
+                                                                    }
+                                                                }
+                                                            }
+                                                            
+                                                            let target_idx = offset + rel_ly;
+                                                            if target_idx < total {
+                                                                let now = Instant::now();
+                                                                let is_double_click = if let (Some(last_time), Some(last_pos)) = (app.last_click_time, app.last_click_pos) {
+                                                                    now.duration_since(last_time) < Duration::from_millis(500) && last_pos == (x, y)
+                                                                } else {
+                                                                    false
+                                                                };
+
+                                                                app.settings.theme = app.theme_names[target_idx].to_string();
+                                                                // Live preview
+                                                                app.theme = Theme::from_name(&app.settings.theme);
+
+                                                                if is_double_click {
+                                                                    // Commit and Exit on Double Click
+                                                                    app.settings.editing = false;
+                                                                    app.settings.original_theme = None;
+                                                                    let mut cfg = app.config.lock().unwrap();
+                                                                    app.settings.apply_to_config(&mut cfg);
+                                                                    let conn = conn_mutex.lock().unwrap();
+                                                                    let _ = crate::config::save_config_to_db(&conn, &cfg);
+                                                                    app.status_message = "Theme saved".to_string();
+                                                                    app.last_click_time = None;
+                                                                } else {
+                                                                    app.last_click_time = Some(now);
+                                                                    app.last_click_pos = Some((x, y));
+                                                                }
+                                                            }
+                                                        }
+                                                        continue; // Don't process other field clicks
+                                                    } else {
+                                                        // Click-off: Exit and Commit
+                                                        app.settings.editing = false;
+                                                        app.settings.original_theme = None;
+                                                        let mut cfg = app.config.lock().unwrap();
+                                                        app.settings.apply_to_config(&mut cfg);
+                                                        let conn = conn_mutex.lock().unwrap();
+                                                        let _ = crate::config::save_config_to_db(&conn, &cfg);
+                                                        app.status_message = "Theme selection closed".to_string();
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+
+                                            // Default Field Selection
+                                            if y >= chunks[1].y {
+                                                let rel_y = (y - chunks[1].y) as usize;
+                                                let clicked_view_idx = rel_y / 3;
+                                                
+                                                // Calculate Context
+                                                let count = match app.settings.active_category {
+                                                     SettingsCategory::S3 => 6,
+                                                     SettingsCategory::Scanner => 4,
+                                                     SettingsCategory::Performance => 6,
+                                                     SettingsCategory::Theme => 1,
+                                                };
+                                                
+                                                let display_height = chunks[1].height as usize;
+                                                let fields_per_view = display_height / 3;
+                                                
+                                                // Replicate render offset logic
+                                                let mut offset = 0;
+                                                if app.settings.selected_field >= fields_per_view {
+                                                    offset = app.settings.selected_field.saturating_sub(fields_per_view / 2);
+                                                }
+                                                // Safety check for offset
+                                                if count > fields_per_view && offset + fields_per_view > count {
+                                                    offset = count - fields_per_view;
+                                                }
+                                                
+                                                let target_idx = offset + clicked_view_idx;
+                                                
+                                                if target_idx < count {
+                                                    // Handle Boolean Toggles on Click
+                                                    let is_toggle = 
+                                                        (app.settings.active_category == SettingsCategory::Scanner && target_idx == 3) ||
+                                                        (app.settings.active_category == SettingsCategory::Performance && target_idx >= 3);
+
+                                                    if is_toggle {
+                                                        match (app.settings.active_category, target_idx) {
+                                                            (SettingsCategory::Scanner, 3) => {
+                                                                app.settings.scanner_enabled = !app.settings.scanner_enabled;
+                                                                app.status_message = format!("Scanner {}", if app.settings.scanner_enabled { "Enabled" } else { "Disabled" });
+                                                            }
+                                                            (SettingsCategory::Performance, 3) => {
+                                                                app.settings.staging_mode_direct = !app.settings.staging_mode_direct;
+                                                                app.status_message = format!("Staging Mode: {}", if app.settings.staging_mode_direct { "Direct (no copy)" } else { "Copy (default)" });
+                                                            }
+                                                            (SettingsCategory::Performance, 4) => {
+                                                                app.settings.delete_source_after_upload = !app.settings.delete_source_after_upload;
+                                                                app.status_message = format!("Delete Source: {}", if app.settings.delete_source_after_upload { "Enabled" } else { "Disabled" });
+                                                            }
+                                                            (SettingsCategory::Performance, 5) => {
+                                                                app.settings.host_metrics_enabled = !app.settings.host_metrics_enabled;
+                                                                app.status_message = format!("Metrics: {}", if app.settings.host_metrics_enabled { "Enabled" } else { "Disabled" });
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        
+                                                        // Auto-Save logic for toggles
+                                                        let mut cfg = app.config.lock().unwrap();
+                                                        app.settings.apply_to_config(&mut cfg);
+                                                        let conn = conn_mutex.lock().unwrap();
+                                                        let _ = crate::config::save_config_to_db(&conn, &cfg);
+                                                        
+                                                        app.settings.selected_field = target_idx;
+                                                        continue;
+                                                    }
+
+                                                    // Handle Double Click for Editing
+                                                    let now = Instant::now();
+                                                    let is_double_click = if let (Some(last_time), Some(last_pos)) = (app.last_click_time, app.last_click_pos) {
+                                                        now.duration_since(last_time) < Duration::from_millis(500) && last_pos == (x, y)
+                                                    } else {
+                                                        false
+                                                    };
+
+                                                    app.settings.selected_field = target_idx;
+                                                    
+                                                    // Request: expand theme dropdown when we click it
+                                                    if app.settings.active_category == SettingsCategory::Theme {
+                                                        app.settings.editing = true;
+                                                    } else if is_double_click {
+                                                        app.settings.editing = true;
+                                                        app.last_click_time = None;
+                                                    } else {
+                                                        app.last_click_time = Some(now);
+                                                        app.last_click_pos = Some((x, y));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if x >= right.x && x < right.x + right.width && y >= right.y && y < right.y + right.height {
+                                // Right Panel Click (History)
+                                app.focus = AppFocus::History;
+                                let inner_y = right.y + 1; // Header
+                                if y > inner_y {
+                                    let relative_row = (y - inner_y - 1) as usize;
+                                    let display_height = right.height.saturating_sub(4) as usize; // approx overhead
+                                    let total_rows = app.visual_history.len();
+                                    let offset = calculate_list_offset(app.selected_history, total_rows, display_height);
+                                    
+                                    if relative_row < display_height && offset + relative_row < total_rows {
+                                        app.selected_history = offset + relative_row;
+                                    }
+                                }
+                            }
+                        }
+                    } else if let MouseEventKind::ScrollDown = mouse.kind {
+                         match app.focus {
+                             AppFocus::Browser => app.picker.move_down(),
+                             AppFocus::Queue => if app.selected + 1 < app.visual_jobs.len() { app.selected += 1; },
+                             AppFocus::History => if app.selected_history + 1 < app.visual_history.len() { app.selected_history += 1; },
+                             AppFocus::Quarantine => if app.selected_quarantine + 1 < app.quarantine.len() { app.selected_quarantine += 1; },
+                             AppFocus::SettingsCategory => {
+                                app.settings.active_category = match app.settings.active_category {
+                                    SettingsCategory::S3 => SettingsCategory::Scanner,
+                                    SettingsCategory::Scanner => SettingsCategory::Performance,
+                                    SettingsCategory::Performance => SettingsCategory::Theme,
+                                    SettingsCategory::Theme => SettingsCategory::S3,
+                                };
+                                app.settings.selected_field = 0;
+                             }
+                             AppFocus::SettingsFields => {
+                                 let count = match app.settings.active_category {
+                                     SettingsCategory::S3 => 6,
+                                     SettingsCategory::Scanner => 4,
+                                     SettingsCategory::Performance => 6,
+                                     SettingsCategory::Theme => 1,
+                                 };
+                                 if app.settings.selected_field + 1 < count { app.settings.selected_field += 1; }
+                             }
+                             _ => {}
+                         }
+                    } else if let MouseEventKind::ScrollUp = mouse.kind {
+                         match app.focus {
+                             AppFocus::Browser => app.picker.move_up(),
+                             AppFocus::Queue => if app.selected > 0 { app.selected -= 1; },
+                             AppFocus::History => if app.selected_history > 0 { app.selected_history -= 1; },
+                             AppFocus::Quarantine => if app.selected_quarantine > 0 { app.selected_quarantine -= 1; },
+                             AppFocus::SettingsCategory => {
+                                 app.settings.active_category = match app.settings.active_category {
+                                    SettingsCategory::S3 => SettingsCategory::Theme,
+                                    SettingsCategory::Scanner => SettingsCategory::S3,
+                                    SettingsCategory::Performance => SettingsCategory::Scanner,
+                                    SettingsCategory::Theme => SettingsCategory::Performance,
+                                };
+                                app.settings.selected_field = 0;
+                             }
+                             AppFocus::SettingsFields => {
+                                 if app.settings.selected_field > 0 { app.settings.selected_field -= 1; }
+                             }
+                             _ => {}
+                         }
+                    }
+                }
+                _ => {}
             }
         }
     }
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -2066,16 +2536,7 @@ fn draw_history(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let total_rows = app.visual_history.len();
     let display_height = area.height.saturating_sub(4) as usize; // Border + Header
-    let mut offset = 0;
-    
-    if total_rows > display_height {
-        if app.selected_history >= display_height / 2 {
-            offset = (app.selected_history + 1).saturating_sub(display_height / 2);
-        }
-        if offset + display_height > total_rows {
-            offset = total_rows.saturating_sub(display_height);
-        }
-    }
+    let offset = calculate_list_offset(app.selected_history, total_rows, display_height);
 
     let rows = app.visual_history.iter().enumerate()
         .skip(offset)
@@ -2594,16 +3055,7 @@ fn draw_jobs(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let total_rows = app.visual_jobs.len();
     let display_height = area.height.saturating_sub(4) as usize; // Border + Header
-    let mut offset = 0;
-    
-    if total_rows > display_height {
-        if app.selected >= display_height / 2 {
-            offset = (app.selected + 1).saturating_sub(display_height / 2);
-        }
-        if offset + display_height > total_rows {
-            offset = total_rows.saturating_sub(display_height);
-        }
-    }
+    let offset = calculate_list_offset(app.selected, total_rows, display_height);
 
     let rows = app.visual_jobs.iter().enumerate()
         .skip(offset)
@@ -2853,16 +3305,7 @@ fn draw_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
     
     // Find current index in filtered list
     let filtered_selected = filtered_entries.iter().position(|(i, _)| *i == app.picker.selected).unwrap_or(0);
-
-    let mut offset = 0;
-    if total_rows > display_height {
-        if filtered_selected >= display_height / 2 {
-            offset = (filtered_selected + 1).saturating_sub(display_height / 2);
-        }
-        if offset + display_height > total_rows {
-            offset = total_rows.saturating_sub(display_height);
-        }
-    }
+    let offset = calculate_list_offset(filtered_selected, total_rows, display_height);
 
     let header = Row::new(vec![
         Cell::from("Name"),
@@ -3263,16 +3706,7 @@ fn draw_quarantine(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let total_rows = app.quarantine.len();
     let display_height = area.height.saturating_sub(4) as usize; // Border + Header
-    let mut offset = 0;
-    
-    if total_rows > display_height {
-        if app.selected_quarantine >= display_height / 2 {
-            offset = (app.selected_quarantine + 1).saturating_sub(display_height / 2);
-        }
-        if offset + display_height > total_rows {
-            offset = total_rows.saturating_sub(display_height);
-        }
-    }
+    let offset = calculate_list_offset(app.selected_quarantine, total_rows, display_height);
 
     let rows = app.quarantine.iter().enumerate()
         .skip(offset)
