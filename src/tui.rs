@@ -193,6 +193,7 @@ struct SettingsState {
     scan_chunk_size: String,
     part_size: String,
     concurrency_global: String,
+    scan_concurrency: String,
     active_category: SettingsCategory,
     selected_field: usize,
     editing: bool,
@@ -1317,7 +1318,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                         let field_count = match app.settings.active_category {
                             SettingsCategory::S3 => 6,
                             SettingsCategory::Scanner => 4,
-                            SettingsCategory::Performance => 4,
+                            SettingsCategory::Performance => 5,
                             SettingsCategory::Theme => 1,
                         };
                         match key.code {
@@ -1325,7 +1326,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                 // Special handling for Boolean Toggles
                                 let is_toggle = 
                                     (app.settings.active_category == SettingsCategory::Scanner && app.settings.selected_field == 3) ||
-                                    (app.settings.active_category == SettingsCategory::Performance && app.settings.selected_field >= 2);
+                                    (app.settings.active_category == SettingsCategory::Performance && app.settings.selected_field >= 3);
                                 
                                 if is_toggle {
                                     // Handle toggle based on category and field
@@ -1334,11 +1335,11 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                             app.settings.scanner_enabled = !app.settings.scanner_enabled;
                                             app.status_message = format!("Scanner {}", if app.settings.scanner_enabled { "Enabled" } else { "Disabled" });
                                         }
-                                        (SettingsCategory::Performance, 2) => {
+                                        (SettingsCategory::Performance, 3) => {
                                             app.settings.staging_mode_direct = !app.settings.staging_mode_direct;
                                             app.status_message = format!("Staging Mode: {}", if app.settings.staging_mode_direct { "Direct (no copy)" } else { "Copy (default)" });
                                         }
-                                        (SettingsCategory::Performance, 3) => {
+                                        (SettingsCategory::Performance, 4) => {
                                             app.settings.delete_source_after_upload = !app.settings.delete_source_after_upload;
                                             app.status_message = format!("Delete Source: {}", if app.settings.delete_source_after_upload { "Enabled" } else { "Disabled" });
                                         }
@@ -1454,6 +1455,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                     (SettingsCategory::Scanner, 2) => app.settings.scan_chunk_size.push(c),
                                     (SettingsCategory::Performance, 0) => app.settings.part_size.push(c),
                                     (SettingsCategory::Performance, 1) => app.settings.concurrency_global.push(c),
+                                    (SettingsCategory::Performance, 2) => app.settings.scan_concurrency.push(c),
                                     _ => {}
                                 }
                             }
@@ -1470,6 +1472,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                     (SettingsCategory::Scanner, 2) => { app.settings.scan_chunk_size.pop(); }
                                     (SettingsCategory::Performance, 0) => { app.settings.part_size.pop(); }
                                     (SettingsCategory::Performance, 1) => { app.settings.concurrency_global.pop(); }
+                                    (SettingsCategory::Performance, 2) => { app.settings.scan_concurrency.pop(); }
                                     _ => {}
                                 }
                             }
@@ -1561,6 +1564,7 @@ impl SettingsState {
             scan_chunk_size: cfg.scan_chunk_size_mb.to_string(),
             part_size: cfg.part_size_mb.to_string(),
             concurrency_global: cfg.concurrency_upload_global.to_string(),
+            scan_concurrency: cfg.concurrency_parts_per_file.to_string(),
             active_category: SettingsCategory::S3,
             selected_field: 0,
             editing: false,
@@ -1585,6 +1589,7 @@ impl SettingsState {
         if let Ok(v) = self.scan_chunk_size.trim().parse() { cfg.scan_chunk_size_mb = v; }
         if let Ok(v) = self.part_size.trim().parse() { cfg.part_size_mb = v; }
         if let Ok(v) = self.concurrency_global.trim().parse() { cfg.concurrency_upload_global = v; }
+        if let Ok(v) = self.scan_concurrency.trim().parse() { cfg.concurrency_parts_per_file = v; }
         cfg.theme = self.theme.clone();
         cfg.scanner_enabled = self.scanner_enabled;
         cfg.staging_mode = if self.staging_mode_direct { StagingMode::Direct } else { StagingMode::Copy };
@@ -2551,6 +2556,7 @@ fn draw_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
         SettingsCategory::Performance => vec![
             ("Part Size (MB)", app.settings.part_size.as_str()),
             ("Global Concurrency", app.settings.concurrency_global.as_str()),
+            ("Scan Concurrency", app.settings.scan_concurrency.as_str()),
             ("Staging Mode", if app.settings.staging_mode_direct { "[X] Direct (no copy)" } else { "[ ] Copy (default)" }),
             ("Delete Source After Upload", if app.settings.delete_source_after_upload { "[X] Enabled" } else { "[ ] Disabled" }),
         ],
