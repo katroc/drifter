@@ -937,21 +937,6 @@ impl App {
                         }
                     }
                     
-                    // Add file to current node
-                    // But wait, if components is 1 (File only logic), `current` is `root`.
-                    // We must check if `root` already has this file to support collision at root level?
-                    // The loop above only handles Folders.
-                    // If logic is `d/A` (Loop runs once for `d`).
-                    // If logic is `A` (Loop doesn't run). `current` = `root`.
-                    // We add `A`.
-                    // If next is `A`. We add `A`. `root` has `A, A`.
-                    // User says "repeats get nested under same folder".
-                    // If at root, they are just in the list.
-                    // Flattening `root` prints files.
-                    // `A`, `A`.
-                    // This is fine. Root is not a "Visual Folder".
-                    // The issue was "Nested under SAME folder".
-                    
                     current.files.push(idx);
                 }
 
@@ -2626,35 +2611,157 @@ fn draw_history(f: &mut ratatui::Frame, app: &App, area: Rect) {
 }
 
 fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let footer_text = match app.input_mode {
-        InputMode::Filter => {
-            "Filter: Type to search fuzzy | ↑/↓: Select | Enter: Confirm | Esc: Back"
-        }
-        InputMode::Browsing => {
-            "Hopper: ←/→ dirs | ↑/↓ select | /: Filter | t: Tree | space: Select | s: Stage | Esc: Exit"
-        }
-        InputMode::Confirmation => {
-            "Confirmation Required"
-        }
+    // Helper to create styled key-action pairs
+    let sep = || Span::styled("  │  ".to_string(), app.theme.muted_style());
+    let key = |k: &str| Span::styled(k.to_string(), app.theme.accent_style().add_modifier(Modifier::BOLD));
+    let act = |a: &str| Span::styled(format!(" {}", a), app.theme.muted_style());
+
+    let footer_spans = match app.input_mode {
+        InputMode::Filter => vec![
+            key("Type"), act("to filter"), sep(),
+            key("↑/↓"), act("Select"), sep(),
+            key("Enter"), act("Confirm"), sep(),
+            key("Esc"), act("Back"),
+        ],
+        InputMode::Browsing => vec![
+            key("←/→"), act("Navigate"), sep(),
+            key("↑/↓"), act("Select"), sep(),
+            key("/"), act("Filter"), sep(),
+            key("t"), act("Tree"), sep(),
+            key("Space"), act("Select"), sep(),
+            key("s"), act("Stage"), sep(),
+            key("Esc"), act("Exit"),
+        ],
+        InputMode::Confirmation => vec![
+            Span::styled("Confirmation Required", app.theme.muted_style()),
+        ],
         InputMode::Normal => match app.focus {
-            AppFocus::Rail => "Tab/Right: Content | ↑/↓: Switch Tab | q: Quit",
-            AppFocus::Browser => "↑/↓: Select | a/Enter: Browse | Tab: Next Panel",
-            AppFocus::Queue => "↑/↓: Select | Enter: Details | c: Clear Done | r: Retry | d: Delete",
-            AppFocus::History => "Tab: Rail | Left: Queue",
-            AppFocus::Quarantine => "Tab: Rail | Left: Rail | d: Clear | R: Refresh",
+            AppFocus::Rail => vec![
+                key("Tab/→"), act("Content"), sep(),
+                key("↑/↓"), act("Switch Tab"), sep(),
+                key("q"), act("Quit"),
+            ],
+            AppFocus::Browser => vec![
+                key("↑/↓"), act("Select"), sep(),
+                key("a"), act("Browse"), sep(),
+                key("Tab"), act("Next Panel"),
+            ],
+            AppFocus::Queue => vec![
+                key("↑/↓"), act("Select"), sep(),
+                key("Enter"), act("Details"), sep(),
+                key("c"), act("Clear Done"), sep(),
+                key("r"), act("Retry"), sep(),
+                key("d"), act("Delete"),
+            ],
+            AppFocus::History => vec![
+                key("Tab"), act("Rail"), sep(),
+                key("←"), act("Queue"),
+            ],
+            AppFocus::Quarantine => vec![
+                key("Tab"), act("Rail"), sep(),
+                key("←"), act("Rail"), sep(),
+                key("d"), act("Clear"), sep(),
+                key("R"), act("Refresh"),
+            ],
             AppFocus::SettingsCategory => match app.settings.active_category {
-                 SettingsCategory::S3 | SettingsCategory::Scanner => "Tab/Right: Fields | Left: Rail | ↑/↓: Category | s: Save | t: Test",
-                 _ => "Tab/Right: Fields | Left: Rail | ↑/↓: Category | s: Save",
+                SettingsCategory::S3 | SettingsCategory::Scanner => vec![
+                    key("Tab/→"), act("Fields"), sep(),
+                    key("←"), act("Rail"), sep(),
+                    key("↑/↓"), act("Category"), sep(),
+                    key("s"), act("Save"), sep(),
+                    key("t"), act("Test"),
+                ],
+                _ => vec![
+                    key("Tab/→"), act("Fields"), sep(),
+                    key("←"), act("Rail"), sep(),
+                    key("↑/↓"), act("Category"), sep(),
+                    key("s"), act("Save"),
+                ],
             },
             AppFocus::SettingsFields => match app.settings.active_category {
-                 SettingsCategory::S3 | SettingsCategory::Scanner => "Tab: Rail | Left: Category | Enter: Edit | s: Save | t: Test",
-                 _ => "Tab: Rail | Left: Category | Enter: Edit | s: Save",
+                SettingsCategory::S3 | SettingsCategory::Scanner => vec![
+                    key("Tab"), act("Rail"), sep(),
+                    key("←"), act("Category"), sep(),
+                    key("Enter"), act("Edit"), sep(),
+                    key("s"), act("Save"), sep(),
+                    key("t"), act("Test"),
+                ],
+                _ => vec![
+                    key("Tab"), act("Rail"), sep(),
+                    key("←"), act("Category"), sep(),
+                    key("Enter"), act("Edit"), sep(),
+                    key("s"), act("Save"),
+                ],
             },
         },
     };
-    let status_line = format!("{} | {}", footer_text, app.status_message);
-    let footer = Paragraph::new(status_line).style(app.theme.muted_style());
-    f.render_widget(footer, area);
+
+    // Calculate system status parts
+    let av_status = app.clamav_status.lock().unwrap().clone();
+    let s3_status = if app.settings.bucket.is_empty() { "Not Configured" } else { "Ready" };
+
+    let left_content = Line::from(footer_spans);
+
+    let right_content = Line::from(vec![
+        Span::styled("ClamAV: ", app.theme.muted_style()),
+        Span::styled(
+            av_status,
+            if app.clamav_status.lock().unwrap().contains("Ready") {
+                app.theme.status_style(StatusKind::Success)
+            } else {
+                app.theme.status_style(StatusKind::Warning)
+            },
+        ),
+        Span::styled("  │  ", app.theme.muted_style()),
+        Span::styled("S3: ", app.theme.muted_style()),
+        Span::styled(
+            s3_status,
+            if app.settings.bucket.is_empty() {
+                app.theme.status_style(StatusKind::Error)
+            } else {
+                app.theme.status_style(StatusKind::Success)
+            },
+        ),
+        Span::styled(
+            if app.settings.bucket.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", &app.settings.bucket)
+            },
+            app.theme.muted_style()
+        ),
+        Span::styled("  │  ", app.theme.muted_style()),
+        Span::styled("Jobs: ", app.theme.muted_style()),
+        Span::styled(
+            format!("{}", app.jobs.len()),
+            if app.jobs.is_empty() {
+                app.theme.muted_style()
+            } else {
+                app.theme.highlight_style()
+            }
+        ),
+        Span::styled("  │  ", app.theme.muted_style()),
+        Span::styled("Threats: ", app.theme.muted_style()),
+        Span::styled(
+            format!("{}", app.quarantine.len()),
+            if app.quarantine.is_empty() {
+                app.theme.muted_style()
+            } else {
+                app.theme.status_style(StatusKind::Error)
+            }
+        ),
+    ]);
+
+    let footer_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(40),
+            Constraint::Length(120), // Increased to prevent truncation of status metrics
+        ])
+        .split(area);
+
+    f.render_widget(Paragraph::new(left_content).alignment(ratatui::layout::Alignment::Left), footer_chunks[0]);
+    f.render_widget(Paragraph::new(right_content).alignment(ratatui::layout::Alignment::Right), footer_chunks[1]);
 }
 
 fn draw_confirmation_modal(f: &mut ratatui::Frame, app: &App, area: Rect) {
@@ -2723,53 +2830,6 @@ fn centered_fixed_rect(r: Rect, width: u16, height: u16) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-fn draw_system_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let av_status = app.clamav_status.lock().unwrap().clone();
-    let s3_status = if app.settings.bucket.is_empty() { "Not Configured" } else { "Ready" };
-
-    let content = vec![
-        Line::from(vec![
-            Span::styled(" CLAMAV ", app.theme.button_style(true)),
-            Span::from(" "),
-            Span::styled(
-                av_status,
-                if app.clamav_status.lock().unwrap().contains("Ready") {
-                    app.theme.status_style(StatusKind::Success)
-                } else {
-                    app.theme.status_style(StatusKind::Warning)
-                },
-            ),
-            Span::from("  │  "),
-            Span::styled(" S3 STORAGE ", app.theme.button_style(true)),
-            Span::from(" "),
-            Span::styled(
-                s3_status,
-                if app.settings.bucket.is_empty() {
-                    app.theme.status_style(StatusKind::Error)
-                } else {
-                    app.theme.status_style(StatusKind::Success)
-                },
-            ),
-            Span::from(format!(" (Bucket: {})", if app.settings.bucket.is_empty() { "-" } else { &app.settings.bucket })),
-            Span::from("  │  "),
-            Span::styled(" QUEUE ", app.theme.button_style(true)),
-            Span::from(format!(" {} Jobs", app.jobs.len())),
-            Span::from("  │  "),
-            Span::styled(" QUARANTINE ", app.theme.status_badge_style(StatusKind::Error)),
-            Span::from(format!(" {} Threats", app.quarantine.len())),
-        ]),
-    ];
-
-    let p = Paragraph::new(content)
-        .block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_type(app.theme.border_type)
-                .border_style(app.theme.border_style())
-                .style(app.theme.panel_style()),
-        );
-    f.render_widget(p, area);
-}
 
 fn format_bytes_rate(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
@@ -2796,8 +2856,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(2), // System Status (metrics moved)
-            Constraint::Length(1), // Footer
+            Constraint::Length(1), // Combined Footer + Status
         ])
         .split(f.size());
 
@@ -2870,8 +2929,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         // Default: Full history list
         draw_history(f, app, right_panel);
     }
-    draw_system_status(f, app, root[1]);
-    draw_footer(f, app, root[2]);
+    draw_footer(f, app, root[1]);
     
     // Render Modal last (on top)
     draw_confirmation_modal(f, app, f.size());
