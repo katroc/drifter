@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::db::{list_active_jobs, list_history_jobs, list_quarantined_jobs, JobRow};
 use crate::ingest::ingest_path;
+use crate::metrics::{HostMetricsSnapshot, MetricsCollector};
 use crate::state::ProgressInfo;
 use crate::theme::{StatusKind, Theme};
 use crate::watch::Watcher;
@@ -200,6 +201,7 @@ struct SettingsState {
     theme: String,
     original_theme: Option<String>,
     scanner_enabled: bool,
+    host_metrics_enabled: bool,
     staging_mode_direct: bool,  // true = Direct mode, false = Copy mode
     delete_source_after_upload: bool,
 }
@@ -629,6 +631,11 @@ pub struct App {
     // Modal State
     pub pending_action: ModalAction,
     pub confirmation_msg: String,
+    
+    // Metrics
+    pub metrics: MetricsCollector,
+    pub last_metrics: HostMetricsSnapshot,
+    pub last_metrics_refresh: Instant,
 }
 
 impl App {
@@ -673,6 +680,10 @@ impl App {
             theme_names: Theme::list_names(),
             pending_action: ModalAction::None,
             confirmation_msg: String::new(),
+            
+            metrics: MetricsCollector::new(),
+            last_metrics: HostMetricsSnapshot::default(),
+            last_metrics_refresh: Instant::now(),
         };
 
         let status_clone = app.clamav_status.clone();
@@ -817,6 +828,14 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
 
     let tick_rate = Duration::from_millis(200);
     loop {
+        // Refresh metrics periodically (e.g. every 1s) if enabled
+        if app.config.lock().unwrap().host_metrics_enabled {
+            if app.last_metrics_refresh.elapsed() >= Duration::from_secs(1) {
+                app.last_metrics = app.metrics.refresh();
+                app.last_metrics_refresh = Instant::now();
+            }
+        }
+
         terminal.draw(|f| ui(f, &app))?;
 
         if app.last_refresh.elapsed() > Duration::from_secs(1) {
@@ -1318,7 +1337,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                         let field_count = match app.settings.active_category {
                             SettingsCategory::S3 => 6,
                             SettingsCategory::Scanner => 4,
-                            SettingsCategory::Performance => 5,
+                            SettingsCategory::Performance => 6,
                             SettingsCategory::Theme => 1,
                         };
                         match key.code {
@@ -1342,6 +1361,10 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                         (SettingsCategory::Performance, 4) => {
                                             app.settings.delete_source_after_upload = !app.settings.delete_source_after_upload;
                                             app.status_message = format!("Delete Source: {}", if app.settings.delete_source_after_upload { "Enabled" } else { "Disabled" });
+                                        }
+                                        (SettingsCategory::Performance, 5) => {
+                                            app.settings.host_metrics_enabled = !app.settings.host_metrics_enabled;
+                                            app.status_message = format!("Host Metrics: {}", if app.settings.host_metrics_enabled { "Enabled" } else { "Disabled" });
                                         }
                                         _ => {}
                                     }
@@ -1571,6 +1594,7 @@ impl SettingsState {
             theme: cfg.theme.clone(),
             original_theme: None,
             scanner_enabled: cfg.scanner_enabled,
+            host_metrics_enabled: cfg.host_metrics_enabled,
             staging_mode_direct: cfg.staging_mode == StagingMode::Direct,
             delete_source_after_upload: cfg.delete_source_after_upload,
         }
@@ -1592,6 +1616,7 @@ impl SettingsState {
         if let Ok(v) = self.scan_concurrency.trim().parse() { cfg.concurrency_parts_per_file = v; }
         cfg.theme = self.theme.clone();
         cfg.scanner_enabled = self.scanner_enabled;
+        cfg.host_metrics_enabled = self.host_metrics_enabled;
         cfg.staging_mode = if self.staging_mode_direct { StagingMode::Direct } else { StagingMode::Copy };
         cfg.delete_source_after_upload = self.delete_source_after_upload;
     }
@@ -1927,7 +1952,7 @@ fn centered_fixed_rect(r: Rect, width: u16, height: u16) -> Rect {
 fn draw_system_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let av_status = app.clamav_status.lock().unwrap().clone();
     let s3_status = if app.settings.bucket.is_empty() { "Not Configured" } else { "Ready" };
-    
+
     let content = vec![
         Line::from(vec![
             Span::styled(" CLAMAV ", app.theme.button_style(true)),
@@ -1972,6 +1997,18 @@ fn draw_system_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(p, area);
 }
 
+fn format_bytes_rate(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.2} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 fn ui(f: &mut ratatui::Frame, app: &App) {
     // If wizard is active, render wizard overlay instead
     if app.show_wizard {
@@ -1985,7 +2022,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(2), // System Status
+            Constraint::Length(2), // System Status (metrics moved)
             Constraint::Length(1), // Footer
         ])
         .split(f.size());
@@ -2007,8 +2044,27 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         AppTab::Settings => draw_settings(f, app, main_layout[1]),
     }
 
-    // Render History / Details panel (Right side)
-    let right_panel = main_layout[2];
+    // Render History / Details panel (Right side) - With Metrics support
+    let right_panel_full = main_layout[2];
+    
+    // Check if metrics enabled
+    let metrics_enabled = app.config.lock().unwrap().host_metrics_enabled;
+    let (metrics_area, right_panel) = if metrics_enabled {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(0),      // History/Details (Top)
+                Constraint::Length(4),   // Metrics (Bottom)
+            ])
+            .split(right_panel_full);
+        (Some(chunks[1]), chunks[0])
+    } else {
+        (None, right_panel_full)
+    };
+    
+    if let Some(area) = metrics_area {
+        draw_metrics_panel(f, app, area);
+    }
     
     // Logic: 
     // 1. If Queue focused & selected -> Replace generic History list with Job Details (retaining existing behavior for Queue focus).
@@ -2042,6 +2098,44 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
     
     // Render Modal last (on top)
     draw_confirmation_modal(f, app, f.size());
+}
+
+fn draw_metrics_panel(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let m = &app.last_metrics;
+    let read_fmt = format_bytes_rate(m.disk_read_bytes_sec);
+    let write_fmt = format_bytes_rate(m.disk_write_bytes_sec);
+    let rx_fmt = format_bytes_rate(m.net_rx_bytes_sec);
+    let tx_fmt = format_bytes_rate(m.net_tx_bytes_sec);
+
+    let mk_style = app.theme.accent_style().add_modifier(Modifier::BOLD);
+    let mk_val = app.theme.text_style();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(app.theme.border_type)
+        .border_style(app.theme.border_style())
+        .title(" Host Metrics ")
+        .style(app.theme.panel_style());
+    
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(inner_area);
+
+    let disk_content = vec![
+        Line::from(vec![Span::styled("Disk Read:  ", mk_style), Span::styled(&read_fmt, mk_val)]),
+        Line::from(vec![Span::styled("Disk Write: ", mk_style), Span::styled(&write_fmt, mk_val)]),
+    ];
+    f.render_widget(Paragraph::new(disk_content), chunks[0]);
+
+    let net_content = vec![
+        Line::from(vec![Span::styled("Net Down: ", mk_style), Span::styled(&rx_fmt, mk_val)]),
+        Line::from(vec![Span::styled("Net Up:   ", mk_style), Span::styled(&tx_fmt, mk_val)]),
+    ];
+    f.render_widget(Paragraph::new(net_content), chunks[1]);
 }
 
 
@@ -2557,8 +2651,9 @@ fn draw_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
             ("Part Size (MB)", app.settings.part_size.as_str()),
             ("Global Concurrency", app.settings.concurrency_global.as_str()),
             ("Scan Concurrency", app.settings.scan_concurrency.as_str()),
-            ("Staging Mode", if app.settings.staging_mode_direct { "[X] Direct (no copy)" } else { "[ ] Copy (default)" }),
+            ("Staging Mode", if app.settings.staging_mode_direct { "[X] Direct (no copy)" } else { "[ ] Copy" }),
             ("Delete Source After Upload", if app.settings.delete_source_after_upload { "[X] Enabled" } else { "[ ] Disabled" }),
+            ("Show Host Metrics", if app.settings.host_metrics_enabled { "[X] Enabled" } else { "[ ] Disabled" }),
         ],
         SettingsCategory::Theme => vec![
             ("Theme", app.settings.theme.as_str()),

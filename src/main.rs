@@ -7,6 +7,7 @@ mod tui;
 mod uploader;
 mod watch;
 mod theme;
+mod metrics;
 
 use crate::state::Coordinator;
 use anyhow::Result;
