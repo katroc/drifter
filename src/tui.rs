@@ -2638,7 +2638,7 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
         }
         InputMode::Normal => match app.focus {
             AppFocus::Rail => "Tab/Right: Content | ↑/↓: Switch Tab | q: Quit",
-            AppFocus::Browser => "↑/↓: Select | a/Enter: Browse | Tab: Next Panel",
+            AppFocus::Browser => "↑/↓: Select | a: Browse | Tab: Next Panel",
             AppFocus::Queue => "↑/↓: Select | Enter: Details | c: Clear Done | r: Retry | d: Delete",
             AppFocus::History => "Tab: Rail | Left: Queue",
             AppFocus::Quarantine => "Tab: Rail | Left: Rail | d: Clear | R: Refresh",
@@ -2652,9 +2652,54 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
             },
         },
     };
-    let status_line = format!("{} | {}", footer_text, app.status_message);
-    let footer = Paragraph::new(status_line).style(app.theme.muted_style());
-    f.render_widget(footer, area);
+
+    // Calculate system status parts
+    let av_status = app.clamav_status.lock().unwrap().clone();
+    let s3_status = if app.settings.bucket.is_empty() { "Not Configured" } else { "Ready" };
+
+    let left_content = Line::from(vec![
+        Span::styled(footer_text, app.theme.muted_style()),
+    ]);
+
+    let right_content = Line::from(vec![
+        Span::styled(format!(" {} ", app.status_message.to_uppercase()), app.theme.accent_style().add_modifier(Modifier::BOLD)),
+        Span::from("  │  "),
+        Span::styled(" CLAMAV ", app.theme.button_style(true)),
+        Span::from(" "),
+        Span::styled(
+            av_status,
+            if app.clamav_status.lock().unwrap().contains("Ready") {
+                app.theme.status_style(StatusKind::Success)
+            } else {
+                app.theme.status_style(StatusKind::Warning)
+            },
+        ),
+        Span::from("  │  "),
+        Span::styled(" S3 ", app.theme.button_style(true)),
+        Span::from(" "),
+        Span::styled(
+            s3_status,
+            if app.settings.bucket.is_empty() {
+                app.theme.status_style(StatusKind::Error)
+            } else {
+                app.theme.status_style(StatusKind::Success)
+            },
+        ),
+        Span::from("  │  "),
+        Span::styled(format!(" {} Jobs ", app.jobs.len()), app.theme.muted_style()),
+        Span::styled(format!(" {} Threats ", app.quarantine.len()), if app.quarantine.is_empty() { app.theme.muted_style() } else { app.theme.status_badge_style(StatusKind::Error) }),
+    ]);
+
+    let footer_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(40),
+            Constraint::Length(80), // Approx size for status metrics
+        ])
+        .split(area);
+
+    f.render_widget(Paragraph::new(left_content).alignment(ratatui::layout::Alignment::Left), footer_chunks[0]);
+    f.render_widget(Paragraph::new(right_content).alignment(ratatui::layout::Alignment::Right), footer_chunks[1]);
 }
 
 fn draw_confirmation_modal(f: &mut ratatui::Frame, app: &App, area: Rect) {
@@ -2723,53 +2768,6 @@ fn centered_fixed_rect(r: Rect, width: u16, height: u16) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-fn draw_system_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let av_status = app.clamav_status.lock().unwrap().clone();
-    let s3_status = if app.settings.bucket.is_empty() { "Not Configured" } else { "Ready" };
-
-    let content = vec![
-        Line::from(vec![
-            Span::styled(" CLAMAV ", app.theme.button_style(true)),
-            Span::from(" "),
-            Span::styled(
-                av_status,
-                if app.clamav_status.lock().unwrap().contains("Ready") {
-                    app.theme.status_style(StatusKind::Success)
-                } else {
-                    app.theme.status_style(StatusKind::Warning)
-                },
-            ),
-            Span::from("  │  "),
-            Span::styled(" S3 STORAGE ", app.theme.button_style(true)),
-            Span::from(" "),
-            Span::styled(
-                s3_status,
-                if app.settings.bucket.is_empty() {
-                    app.theme.status_style(StatusKind::Error)
-                } else {
-                    app.theme.status_style(StatusKind::Success)
-                },
-            ),
-            Span::from(format!(" (Bucket: {})", if app.settings.bucket.is_empty() { "-" } else { &app.settings.bucket })),
-            Span::from("  │  "),
-            Span::styled(" QUEUE ", app.theme.button_style(true)),
-            Span::from(format!(" {} Jobs", app.jobs.len())),
-            Span::from("  │  "),
-            Span::styled(" QUARANTINE ", app.theme.status_badge_style(StatusKind::Error)),
-            Span::from(format!(" {} Threats", app.quarantine.len())),
-        ]),
-    ];
-
-    let p = Paragraph::new(content)
-        .block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_type(app.theme.border_type)
-                .border_style(app.theme.border_style())
-                .style(app.theme.panel_style()),
-        );
-    f.render_widget(p, area);
-}
 
 fn format_bytes_rate(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
@@ -2796,8 +2794,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(2), // System Status (metrics moved)
-            Constraint::Length(1), // Footer
+            Constraint::Length(1), // Combined Footer + Status
         ])
         .split(f.size());
 
@@ -2870,8 +2867,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         // Default: Full history list
         draw_history(f, app, right_panel);
     }
-    draw_system_status(f, app, root[1]);
-    draw_footer(f, app, root[2]);
+    draw_footer(f, app, root[1]);
     
     // Render Modal last (on top)
     draw_confirmation_modal(f, app, f.size());
