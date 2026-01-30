@@ -68,33 +68,13 @@ impl MetricsCollector {
             total_disk_write += disk_usage.written_bytes;
         }
 
-        // sysinfo process.disk_usage() returns "bytes read/written since start" or "during last interval"?
-        // documentation says: "Returns the disk usage of this process." which contains total_read_bytes 
-        // and written_bytes... wait.
-        // Actually for `sysinfo`, `disk_usage()` usually returns the usage *since last refresh*.
-        // Just to be safe, we'll verify behavior or treat them as rates if they are per-interval.
-        // Looking at sysinfo docs: "read_bytes: Total bytes read... wait, old sysinfo had it differently."
-        // IN sysinfo 0.30+: ProcessDiskUsage has `read_bytes` and `written_bytes` which are 
-        // "Number of bytes read/written during the last interval." (if supported).
-        // So these ARE rates (bytes per interval), which we then largely treat as "bytes in this last slice".
-        // To get per-second rate, we divide by elapsed time?
-        // Actually, typically sysinfo metrics like this are "amount since last refresh".
-        // So Rate = Amount / Elapsed.
-        
-        // However, `data.received()` on NetworkData: "Returns the number of bytes received since the last refresh."
-        // So yes, we need to divide by elapsed to get bytes/sec.
-
-        // Wait, ProcessDiskUsage struct in 0.30:
-        // read_bytes: "Bytes read since last update."
-        // So yes, both are "since last update".
-
         let rx_rate = (total_rx as f64 / elapsed) as u64;
         let tx_rate = (total_tx as f64 / elapsed) as u64;
-        let dist_read_rate = (total_disk_read as f64 / elapsed) as u64;
+        let disk_read_rate = (total_disk_read as f64 / elapsed) as u64;
         let disk_write_rate = (total_disk_write as f64 / elapsed) as u64;
 
         self.last_snapshot = HostMetricsSnapshot {
-            disk_read_bytes_sec: dist_read_rate,
+            disk_read_bytes_sec: disk_read_rate,
             disk_write_bytes_sec: disk_write_rate,
             net_tx_bytes_sec: tx_rate,
             net_rx_bytes_sec: rx_rate,

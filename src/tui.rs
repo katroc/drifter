@@ -17,10 +17,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap};
-// #[allow(unused_imports)]
-// use ratatui::layout::Alignment;
 
-#[allow(dead_code)]
 fn centered_rect(
     r: ratatui::layout::Rect,
     percent_x: u16,
@@ -1103,7 +1100,6 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
 
         if app.watch_enabled && app.last_watch_scan.elapsed() > Duration::from_secs(2) {
             let _conn = conn_mutex.lock().unwrap();
-            // ... (keep commented or simplified logic for now)
             app.last_watch_scan = Instant::now();
         }
 

@@ -110,8 +110,6 @@ impl Default for Config {
     }
 }
 
-
-
 fn default_staging_dir() -> String { "./staging".to_string() }
 fn default_quarantine_dir() -> String { "./quarantine".to_string() }
 fn default_state_dir() -> String { "./state".to_string() }
@@ -253,7 +251,6 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
     
     db::set_setting(conn, "part_size_mb", &cfg.part_size_mb.to_string())?;
     db::set_setting(conn, "concurrency_upload_global", &cfg.concurrency_upload_global.to_string())?;
-    db::set_setting(conn, "concurrency_parts_per_file", &cfg.concurrency_parts_per_file.to_string())?;
     db::set_setting(conn, "concurrency_parts_per_file", &cfg.concurrency_parts_per_file.to_string())?;
     db::set_setting(conn, "theme", &cfg.theme)?;
     db::set_setting(conn, "scanner_enabled", if cfg.scanner_enabled { "true" } else { "false" })?;

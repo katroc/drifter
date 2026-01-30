@@ -29,7 +29,7 @@ impl Scanner {
 
         match self.mode {
             ScanMode::Skip => Ok(true),
-            ScanMode::Stream => self.scan_chunked(path).await, // Use chunked for 'stream' mode basically
+            ScanMode::Stream => self.scan_chunked(path).await,
             ScanMode::Full => self.scan_chunked(path).await,
         }
     }

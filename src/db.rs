@@ -6,7 +6,6 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct JobRow {
     pub id: i64,
     pub created_at: String,
@@ -184,28 +183,6 @@ pub fn update_job_upload_id(conn: &Connection, job_id: i64, upload_id: &str) -> 
     Ok(())
 }
 
-#[allow(dead_code)]
-pub fn get_job_parts(conn: &Connection, job_id: i64) -> Result<Vec<UploadPart>> {
-    let mut stmt = conn.prepare(
-        "SELECT p.part_number, p.size_bytes, p.status, p.etag 
-         FROM parts p
-         INNER JOIN uploads u ON p.upload_id = u.id
-         WHERE u.job_id = ?
-         ORDER BY p.part_number"
-    )?;
-    let rows = stmt
-        .query_map(params![job_id], |row| {
-            Ok(UploadPart {
-                part_number: row.get(0)?,
-                size_bytes: row.get(1)?,
-                status: row.get(2)?,
-                etag: row.get(3)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
-}
-
 pub fn create_job(conn: &Connection, source_path: &str, size_bytes: i64, s3_key: Option<&str>) -> Result<i64> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
@@ -343,15 +320,6 @@ pub fn insert_event(conn: &Connection, job_id: i64, event_type: &str, message: &
     conn.execute(
         "INSERT INTO events (job_id, event_type, message, created_at) VALUES (?, ?, ?, ?)",
         params![job_id, event_type, message, now],
-    )?;
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub fn update_job_status(conn: &Connection, job_id: i64, status: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE jobs SET status = ?, error = NULL WHERE id = ?",
-        params![status, job_id],
     )?;
     Ok(())
 }
