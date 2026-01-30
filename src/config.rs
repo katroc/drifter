@@ -71,9 +71,17 @@ pub struct Config {
     pub scanner_enabled: bool,
     #[serde(default)]
     pub host_metrics_enabled: bool,
+
+    // Layout dimensions
+    #[serde(default = "default_hopper_width_percent")]
+    pub hopper_width_percent: u16,
+    #[serde(default = "default_history_width")]
+    pub history_width: u16,
 }
 
 fn default_scanner_enabled() -> bool { true }
+fn default_hopper_width_percent() -> u16 { 50 }
+fn default_history_width() -> u16 { 60 }
 
 impl Default for Config {
     fn default() -> Self {
@@ -106,6 +114,8 @@ impl Default for Config {
             theme: Theme::default_name().to_string(),
             scanner_enabled: true,
             host_metrics_enabled: true,
+            hopper_width_percent: 50,
+            history_width: 60,
         }
     }
 }
@@ -200,6 +210,8 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
             .to_string(),
         scanner_enabled: get("scanner_enabled").map(|s| s == "true").unwrap_or(true),
         host_metrics_enabled: get("host_metrics_enabled").map(|s| s == "true").unwrap_or(true),
+        hopper_width_percent: get_u16("hopper_width_percent", 50),
+        history_width: get_u16("history_width", 60),
     })
 }
 
@@ -255,11 +267,14 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
     db::set_setting(conn, "theme", &cfg.theme)?;
     db::set_setting(conn, "scanner_enabled", if cfg.scanner_enabled { "true" } else { "false" })?;
     db::set_setting(conn, "host_metrics_enabled", if cfg.host_metrics_enabled { "true" } else { "false" })?;
-    
+
+    db::set_setting(conn, "hopper_width_percent", &cfg.hopper_width_percent.to_string())?;
+    db::set_setting(conn, "history_width", &cfg.history_width.to_string())?;
+
     // Save secret separately with obfuscation
     if let Some(ref secret) = cfg.s3_secret_key {
         db::set_secret(conn, "s3_secret", secret)?;
     }
-    
+
     Ok(())
 }
