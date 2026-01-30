@@ -199,6 +199,8 @@ struct SettingsState {
     theme: String,
     original_theme: Option<String>,
     scanner_enabled: bool,
+    staging_mode_direct: bool,  // true = Direct mode, false = Copy mode
+    delete_source_after_upload: bool,
 }
 
 
@@ -1077,8 +1079,9 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                                 let conn = conn_mutex.lock().unwrap();
                                                 let cfg_guard = cfg.lock().unwrap();
                                                 let staging = cfg_guard.staging_dir.clone();
+                                                let staging_mode = cfg_guard.staging_mode.clone();
                                                 drop(cfg_guard);
-                                                let _ = ingest_path(&conn, &staging, &entry.path.to_string_lossy());
+                                                let _ = ingest_path(&conn, &staging, &staging_mode, &entry.path.to_string_lossy());
                                                 app.status_message = "File added to queue".to_string();
                                             }
                                             // Right arrow on a file does nothing
@@ -1105,10 +1108,11 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                             let conn = conn_mutex.lock().unwrap();
                                             let cfg_guard = cfg.lock().unwrap();
                                             let staging = cfg_guard.staging_dir.clone();
+                                            let staging_mode = cfg_guard.staging_mode.clone();
                                             drop(cfg_guard);
                                             let mut total = 0;
                                             for path in paths {
-                                                if let Ok(count) = ingest_path(&conn, &staging, &path.to_string_lossy()) {
+                                                if let Ok(count) = ingest_path(&conn, &staging, &staging_mode, &path.to_string_lossy()) {
                                                     total += count;
                                                 }
                                             }
@@ -1313,14 +1317,33 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                         let field_count = match app.settings.active_category {
                             SettingsCategory::S3 => 6,
                             SettingsCategory::Scanner => 4,
-                            SettingsCategory::Performance => 2,
+                            SettingsCategory::Performance => 4,
                             SettingsCategory::Theme => 1,
                         };
                         match key.code {
                             KeyCode::Enter => {
-                                // Special handling for Boolean Toggles (Scanner Enabled)
-                                if app.settings.active_category == SettingsCategory::Scanner && app.settings.selected_field == 3 {
-                                    app.settings.scanner_enabled = !app.settings.scanner_enabled;
+                                // Special handling for Boolean Toggles
+                                let is_toggle = 
+                                    (app.settings.active_category == SettingsCategory::Scanner && app.settings.selected_field == 3) ||
+                                    (app.settings.active_category == SettingsCategory::Performance && app.settings.selected_field >= 2);
+                                
+                                if is_toggle {
+                                    // Handle toggle based on category and field
+                                    match (app.settings.active_category, app.settings.selected_field) {
+                                        (SettingsCategory::Scanner, 3) => {
+                                            app.settings.scanner_enabled = !app.settings.scanner_enabled;
+                                            app.status_message = format!("Scanner {}", if app.settings.scanner_enabled { "Enabled" } else { "Disabled" });
+                                        }
+                                        (SettingsCategory::Performance, 2) => {
+                                            app.settings.staging_mode_direct = !app.settings.staging_mode_direct;
+                                            app.status_message = format!("Staging Mode: {}", if app.settings.staging_mode_direct { "Direct (no copy)" } else { "Copy (default)" });
+                                        }
+                                        (SettingsCategory::Performance, 3) => {
+                                            app.settings.delete_source_after_upload = !app.settings.delete_source_after_upload;
+                                            app.status_message = format!("Delete Source: {}", if app.settings.delete_source_after_upload { "Enabled" } else { "Disabled" });
+                                        }
+                                        _ => {}
+                                    }
                                     
                                     // Trigger Auto-Save logic immediately
                                     let mut cfg = app.config.lock().unwrap();
@@ -1328,8 +1351,6 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                     let conn = conn_mutex.lock().unwrap();
                                     if let Err(e) = crate::config::save_config_to_db(&conn, &cfg) {
                                         app.status_message = format!("Save error: {}", e);
-                                    } else {
-                                        app.status_message = format!("Scanner {}", if app.settings.scanner_enabled { "Enabled" } else { "Disabled" });
                                     }
                                 } else {
                                     app.settings.editing = !app.settings.editing;
@@ -1527,6 +1548,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
 
 impl SettingsState {
     fn from_config(cfg: &Config) -> Self {
+        use crate::config::StagingMode;
         Self {
             endpoint: cfg.s3_endpoint.clone().unwrap_or_default(),
             bucket: cfg.s3_bucket.clone().unwrap_or_default(),
@@ -1545,10 +1567,13 @@ impl SettingsState {
             theme: cfg.theme.clone(),
             original_theme: None,
             scanner_enabled: cfg.scanner_enabled,
+            staging_mode_direct: cfg.staging_mode == StagingMode::Direct,
+            delete_source_after_upload: cfg.delete_source_after_upload,
         }
     }
 
     fn apply_to_config(&self, cfg: &mut Config) {
+        use crate::config::StagingMode;
         cfg.s3_endpoint = if self.endpoint.trim().is_empty() { None } else { Some(self.endpoint.trim().to_string()) };
         cfg.s3_bucket = if self.bucket.trim().is_empty() { None } else { Some(self.bucket.trim().to_string()) };
         cfg.s3_region = if self.region.trim().is_empty() { None } else { Some(self.region.trim().to_string()) };
@@ -1562,6 +1587,8 @@ impl SettingsState {
         if let Ok(v) = self.concurrency_global.trim().parse() { cfg.concurrency_upload_global = v; }
         cfg.theme = self.theme.clone();
         cfg.scanner_enabled = self.scanner_enabled;
+        cfg.staging_mode = if self.staging_mode_direct { StagingMode::Direct } else { StagingMode::Copy };
+        cfg.delete_source_after_upload = self.delete_source_after_upload;
     }
 }
 
@@ -2524,6 +2551,8 @@ fn draw_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
         SettingsCategory::Performance => vec![
             ("Part Size (MB)", app.settings.part_size.as_str()),
             ("Global Concurrency", app.settings.concurrency_global.as_str()),
+            ("Staging Mode", if app.settings.staging_mode_direct { "[X] Direct (no copy)" } else { "[ ] Copy (default)" }),
+            ("Delete Source After Upload", if app.settings.delete_source_after_upload { "[X] Enabled" } else { "[ ] Disabled" }),
         ],
         SettingsCategory::Theme => vec![
             ("Theme", app.settings.theme.as_str()),

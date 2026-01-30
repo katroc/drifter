@@ -10,11 +10,11 @@ pub enum ScanMode {
     Skip,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum StagingMode {
     Copy,
-    Link,
+    Direct,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +41,10 @@ pub struct Config {
     #[serde(default = "default_state_dir")]
     pub state_dir: String,
     pub watch_dir: Option<String>,
+    #[serde(default = "default_staging_mode")]
+    pub staging_mode: StagingMode,
+    #[serde(default)]
+    pub delete_source_after_upload: bool,
     pub scan_mode: ScanMode,
     pub scan_chunk_size_mb: u64,
     pub max_scan_size_mb: Option<u64>,
@@ -76,6 +80,8 @@ impl Default for Config {
             quarantine_dir: "./quarantine".to_string(),
             state_dir: "./state".to_string(),
             watch_dir: None,
+            staging_mode: StagingMode::Copy,
+            delete_source_after_upload: false,
             scan_mode: ScanMode::Stream,
             scan_chunk_size_mb: 24,
             max_scan_size_mb: None,
@@ -107,6 +113,7 @@ fn default_staging_dir() -> String { "./staging".to_string() }
 fn default_quarantine_dir() -> String { "./quarantine".to_string() }
 fn default_state_dir() -> String { "./state".to_string() }
 fn default_theme() -> String { Theme::default_name().to_string() }
+fn default_staging_mode() -> StagingMode { StagingMode::Copy }
 
 // --- Database-backed config ---
 
@@ -136,6 +143,11 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         settings.get(key).and_then(|s| s.parse().ok()).unwrap_or(default)
     };
     
+    let staging_mode = match settings.get("staging_mode").map(|s| s.as_str()) {
+        Some("direct") => StagingMode::Direct,
+        _ => StagingMode::Copy,
+    };
+    
     let scan_mode = match settings.get("scan_mode").map(|s| s.as_str()) {
         Some("full") => ScanMode::Full,
         Some("skip") => ScanMode::Skip,
@@ -161,6 +173,8 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         quarantine_dir: get_or("quarantine_dir", "./quarantine"),
         state_dir: get_or("state_dir", "./state"),
         watch_dir: get("watch_dir"),
+        staging_mode,
+        delete_source_after_upload: get("delete_source_after_upload").map(|s| s == "true").unwrap_or(false),
         scan_mode,
         scan_chunk_size_mb: get_u64("scan_chunk_size_mb", 24),
         max_scan_size_mb: get("max_scan_size_mb").and_then(|s| s.parse().ok()),
@@ -192,6 +206,13 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
     db::set_setting(conn, "quarantine_dir", &cfg.quarantine_dir)?;
     db::set_setting(conn, "state_dir", &cfg.state_dir)?;
     db::set_setting(conn, "watch_dir", cfg.watch_dir.as_deref().unwrap_or(""))?;
+    
+    let staging_mode = match cfg.staging_mode {
+        StagingMode::Copy => "copy",
+        StagingMode::Direct => "direct",
+    };
+    db::set_setting(conn, "staging_mode", staging_mode)?;
+    db::set_setting(conn, "delete_source_after_upload", if cfg.delete_source_after_upload { "true" } else { "false" })?;
     
     let scan_mode = match cfg.scan_mode {
         ScanMode::Stream => "stream",

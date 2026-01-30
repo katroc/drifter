@@ -25,6 +25,7 @@ impl Watcher {
     pub fn start(&mut self, path: PathBuf) {
         let conn = self.conn.clone();
         let staging_dir = self.config.staging_dir.clone();
+        let staging_mode = self.config.staging_mode.clone();
 
         // Create a watcher that runs on a separate thread (managed by notify)
         let watcher_result = RecommendedWatcher::new(
@@ -39,7 +40,7 @@ impl Watcher {
                                         // ingest_path might take time, blocking notifier thread, but that's ok for now.
                                         if let Ok(conn) = conn.lock() {
                                             // Ignore errors for now
-                                            let _ = ingest_path(&conn, &staging_dir, &path.to_string_lossy());
+                                            let _ = ingest_path(&conn, &staging_dir, &staging_mode, &path.to_string_lossy());
                                         }
                                     }
                                 }

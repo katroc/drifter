@@ -38,6 +38,7 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
     conn.execute_batch(
         "
         PRAGMA journal_mode = WAL;
+        PRAGMA foreign_keys = OFF;
         CREATE TABLE IF NOT EXISTS jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at TEXT NOT NULL,

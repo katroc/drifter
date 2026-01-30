@@ -3,4 +3,5 @@
 /staging
 /state
 /test_uploads
+/uploads
 *.log

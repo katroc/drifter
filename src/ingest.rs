@@ -1,10 +1,11 @@
+use crate::config::StagingMode;
 use crate::db::{create_job, insert_event, update_job_error, update_job_staged};
 use anyhow::Result;
 use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub fn ingest_path(conn: &Connection, staging_dir: &str, path: &str) -> Result<usize> {
+pub fn ingest_path(conn: &Connection, staging_dir: &str, staging_mode: &StagingMode, path: &str) -> Result<usize> {
     let root = PathBuf::from(path);
     if !root.exists() {
         return Ok(0);
@@ -47,12 +48,29 @@ pub fn ingest_path(conn: &Connection, staging_dir: &str, path: &str) -> Result<u
         let size = metadata.len() as i64;
         let source_str = file_path.to_string_lossy().to_string();
         let job_id = create_job(conn, &source_str, size, Some(&relative_path))?;
-        insert_event(conn, job_id, "ingest", "queued for staging")?;
+        
+        // Stage file based on mode
+        let stage_result = match staging_mode {
+            StagingMode::Direct => {
+                // Direct mode: use source path directly, no copy
+                insert_event(conn, job_id, "ingest", "using direct mode (no copy)")?;
+                Ok(source_str.clone())
+            }
+            StagingMode::Copy => {
+                insert_event(conn, job_id, "ingest", "queued for staging")?;
+                stage_file(staging_dir, job_id, &file_path)
+            }
+        };
 
-        match stage_file(staging_dir, job_id, &file_path) {
+        match stage_result {
             Ok(staged_path) => {
                 update_job_staged(conn, job_id, &staged_path, "queued")?;
-                insert_event(conn, job_id, "stage", "staged locally")?;
+                let event_msg = if *staging_mode == StagingMode::Direct {
+                    "ready (direct mode)"
+                } else {
+                    "staged locally"
+                };
+                insert_event(conn, job_id, "stage", event_msg)?;
                 count += 1;
             }
             Err(err) => {
@@ -63,6 +81,7 @@ pub fn ingest_path(conn: &Connection, staging_dir: &str, path: &str) -> Result<u
     }
     Ok(count)
 }
+
 
 fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();

@@ -168,13 +168,25 @@ impl Coordinator {
                 let conn = self.conn.lock().unwrap();
                 db::update_upload_status(&conn, job.id, "completed", "complete")?;
                 db::insert_event(&conn, job.id, "upload", "upload completed")?;
-                // Cleanup staged file and its parent directory
+                
+                // Cleanup based on staging mode
+                use crate::config::StagingMode;
                 if let Some(staged) = &job.staged_path {
                     let staged_path = std::path::Path::new(staged);
-                    let _ = std::fs::remove_file(staged_path);
-                    // Remove the job subdirectory if now empty
-                    if let Some(parent) = staged_path.parent() {
-                        let _ = std::fs::remove_dir(parent); // Only removes if empty
+                    match config.staging_mode {
+                        StagingMode::Copy => {
+                            // Copy mode: delete staged file and its parent directory
+                            let _ = std::fs::remove_file(staged_path);
+                            if let Some(parent) = staged_path.parent() {
+                                let _ = std::fs::remove_dir(parent); // Only removes if empty
+                            }
+                        }
+                        StagingMode::Direct => {
+                            // Direct mode: only delete source if configured to do so
+                            if config.delete_source_after_upload {
+                                let _ = std::fs::remove_file(staged_path);
+                            }
+                        }
                     }
                 }
             }
