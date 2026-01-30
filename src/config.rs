@@ -69,6 +69,8 @@ pub struct Config {
     pub theme: String,
     #[serde(default = "default_scanner_enabled")]
     pub scanner_enabled: bool,
+    #[serde(default)]
+    pub host_metrics_enabled: bool,
 }
 
 fn default_scanner_enabled() -> bool { true }
@@ -80,7 +82,7 @@ impl Default for Config {
             quarantine_dir: "./quarantine".to_string(),
             state_dir: "./state".to_string(),
             watch_dir: None,
-            staging_mode: StagingMode::Copy,
+            staging_mode: StagingMode::Direct,
             delete_source_after_upload: false,
             scan_mode: ScanMode::Stream,
             scan_chunk_size_mb: 24,
@@ -103,6 +105,7 @@ impl Default for Config {
             concurrency_parts_per_file: 4,
             theme: Theme::default_name().to_string(),
             scanner_enabled: true,
+            host_metrics_enabled: true,
         }
     }
 }
@@ -113,7 +116,7 @@ fn default_staging_dir() -> String { "./staging".to_string() }
 fn default_quarantine_dir() -> String { "./quarantine".to_string() }
 fn default_state_dir() -> String { "./state".to_string() }
 fn default_theme() -> String { Theme::default_name().to_string() }
-fn default_staging_mode() -> StagingMode { StagingMode::Copy }
+fn default_staging_mode() -> StagingMode { StagingMode::Direct }
 
 // --- Database-backed config ---
 
@@ -144,8 +147,8 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
     };
     
     let staging_mode = match settings.get("staging_mode").map(|s| s.as_str()) {
-        Some("direct") => StagingMode::Direct,
-        _ => StagingMode::Copy,
+        Some("copy") => StagingMode::Copy,
+        _ => StagingMode::Direct,
     };
     
     let scan_mode = match settings.get("scan_mode").map(|s| s.as_str()) {
@@ -198,6 +201,7 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
             .unwrap_or(Theme::default_name())
             .to_string(),
         scanner_enabled: get("scanner_enabled").map(|s| s == "true").unwrap_or(true),
+        host_metrics_enabled: get("host_metrics_enabled").map(|s| s == "true").unwrap_or(true),
     })
 }
 
@@ -253,6 +257,7 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
     db::set_setting(conn, "concurrency_parts_per_file", &cfg.concurrency_parts_per_file.to_string())?;
     db::set_setting(conn, "theme", &cfg.theme)?;
     db::set_setting(conn, "scanner_enabled", if cfg.scanner_enabled { "true" } else { "false" })?;
+    db::set_setting(conn, "host_metrics_enabled", if cfg.host_metrics_enabled { "true" } else { "false" })?;
     
     // Save secret separately with obfuscation
     if let Some(ref secret) = cfg.s3_secret_key {
