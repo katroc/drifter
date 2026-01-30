@@ -13,6 +13,7 @@ use crate::state::Coordinator;
 use anyhow::Result;
 use db::init_db;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 use std::thread;
 
 use std::collections::HashMap;
@@ -42,14 +43,17 @@ fn main() -> Result<()> {
 
     let conn = Arc::new(Mutex::new(conn));
     let cfg = Arc::new(Mutex::new(cfg));
+
     let progress = Arc::new(Mutex::new(HashMap::new()));
+    let cancellation_tokens = Arc::new(Mutex::new(HashMap::<i64, Arc<AtomicBool>>::new()));
 
     let coordinator_conn = conn.clone();
     let coordinator_cfg = cfg.clone();
     let coordinator_progress = progress.clone();
+    let coordinator_tokens = cancellation_tokens.clone();
     
     thread::spawn(move || {
-        let coordinator = match Coordinator::new(coordinator_conn, coordinator_cfg, coordinator_progress) {
+        let coordinator = match Coordinator::new(coordinator_conn, coordinator_cfg, coordinator_progress, coordinator_tokens) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Failed to create coordinator: {}", e);
@@ -60,6 +64,6 @@ fn main() -> Result<()> {
     });
 
     // Run TUI, passing wizard flag
-    tui::run_tui(conn, cfg, progress, needs_wizard)?;
+    tui::run_tui(conn, cfg, progress, cancellation_tokens, needs_wizard)?;
     Ok(())
 }

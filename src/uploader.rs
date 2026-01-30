@@ -14,6 +14,15 @@ use std::sync::{Arc, Mutex};
 use crate::state::ProgressInfo;
 use rusqlite::Connection;
 use crate::db;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+pub struct TaskGuard(pub tokio::task::JoinHandle<()>);
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 pub struct Uploader {}
 
@@ -71,6 +80,7 @@ impl Uploader {
         progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
         conn_mutex: Arc<Mutex<Connection>>,
         initial_upload_id: Option<String>,
+        cancellation_token: Arc<AtomicBool>,
     ) -> Result<bool> {
         let bucket = config.s3_bucket.as_deref().unwrap_or_default();
         let prefix = config.s3_prefix.as_deref().unwrap_or_default();
@@ -322,16 +332,24 @@ impl Uploader {
                 }
             }
         });
+        let _monitor_guard = TaskGuard(monitor_handle);
 
         // Initialize uploaded bytes 
         // Note: We already set disk_bytes above. uploaded_bytes is set around line 118.
         // We need to keep them effectively synced or logical.
         
-        let mut handles = Vec::new();
+        let mut handles: Vec<tokio::task::JoinHandle<Result<CompletedPart>>> = Vec::new();
         let mut part_number = 1;
         let mut buffer = vec![0u8; part_size];
 
         loop {
+            // Check cancellation
+            if cancellation_token.load(Ordering::Relaxed) {
+                // Guards will abort monitor and pending handles (if we wrapped handles? No, handles are just handles)
+                for h in handles { h.abort(); }
+                return Ok(false);
+            }
+
             // Check if part is already done
             if completed_indices.contains(&(part_number as i32)) {
                 use std::io::SeekFrom;
@@ -445,6 +463,8 @@ impl Uploader {
             .send()
             .await
             .map_err(|e| anyhow::anyhow!("Failed complete: {}", e))?;
+            
+        // monitor_handle aborted by TaskGuard drop
 
         // Cleanup DB
         {
@@ -455,10 +475,9 @@ impl Uploader {
              // We can set it to NULL or keep it as record. 
              // Setting to NULL is good to indicate "done/no active upload".
              let _ = conn.execute("UPDATE jobs SET s3_upload_id = NULL WHERE id = ?", rusqlite::params![job_id]);
-             let _ = conn.execute("UPDATE jobs SET s3_upload_id = NULL WHERE id = ?", rusqlite::params![job_id]);
         }
         
-        monitor_handle.abort();
+        // monitor_handle aborted by TaskGuard
 
         Ok(true)
     }

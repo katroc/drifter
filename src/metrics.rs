@@ -7,7 +7,7 @@ pub struct HostMetricsSnapshot {
     pub disk_write_bytes_sec: u64,
     pub net_tx_bytes_sec: u64,
     pub net_rx_bytes_sec: u64,
-    pub timestamp: Option<Instant>,
+
 }
 
 pub struct MetricsCollector {
@@ -98,7 +98,6 @@ impl MetricsCollector {
             disk_write_bytes_sec: disk_write_rate,
             net_tx_bytes_sec: tx_rate,
             net_rx_bytes_sec: rx_rate,
-            timestamp: Some(now),
         };
         
         self.last_update = now;

@@ -5,6 +5,7 @@ use crate::uploader::Uploader;
 use anyhow::Result;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::Duration;
 use tokio::runtime::Runtime;
@@ -26,10 +27,11 @@ pub struct Coordinator {
     scanner: Scanner,
     uploader: Uploader,
     progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
+    cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
 }
 
 impl Coordinator {
-    pub fn new(conn: Arc<Mutex<Connection>>, config: Arc<Mutex<Config>>, progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>) -> Result<Self> {
+    pub fn new(conn: Arc<Mutex<Connection>>, config: Arc<Mutex<Config>>, progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>, cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>) -> Result<Self> {
         let runtime = Arc::new(Runtime::new()?);
         // We need lock to init scanner/uploader but they are just helpers now or cheap to init
         let cfg = config.lock().unwrap();
@@ -37,7 +39,7 @@ impl Coordinator {
         let uploader = Uploader::new(&cfg);
         drop(cfg);
         
-        Ok(Self { conn, config, runtime, scanner, uploader, progress })
+        Ok(Self { conn, config, runtime, scanner, uploader, progress, cancellation_tokens })
     }
 
     pub fn run(&self) {
@@ -155,16 +157,24 @@ impl Coordinator {
             db::update_upload_status(&conn, job.id, "starting", "uploading")?;
         }
 
+        // Register cancellation token
+        let cancel_token = Arc::new(AtomicBool::new(false));
+        self.cancellation_tokens.lock().unwrap().insert(job.id, cancel_token.clone());
+
         let res = self.runtime.block_on(self.uploader.upload_file(
             &config, 
             path, 
             job.id, 
             self.progress.clone(),
             self.conn.clone(),
-            job.s3_upload_id.clone()
+            job.s3_upload_id.clone(),
+            cancel_token
         ));
+        
+        // Remove token
+        self.cancellation_tokens.lock().unwrap().remove(&job.id);
         match res {
-            Ok(_) => {
+            Ok(true) => {
                 let conn = self.conn.lock().unwrap();
                 db::update_upload_status(&conn, job.id, "completed", "complete")?;
                 db::insert_event(&conn, job.id, "upload", "upload completed")?;
@@ -189,6 +199,16 @@ impl Coordinator {
                         }
                     }
                 }
+            }
+            Ok(false) => {
+                // Cancelled
+                let conn = self.conn.lock().unwrap();
+                // We use update_job_error for now or a specific status?
+                // Actually cancel_job_to_history in db would set it to cancelled.
+                // But if we returned false, it means we detected cancellation flag.
+                // The TUI likely already updated the DB status to 'cancelled'.
+                // But we should ensure we log an event.
+                 db::insert_event(&conn, job.id, "upload", "upload cancelled")?;
             }
             Err(e) => {
                 let conn = self.conn.lock().unwrap();

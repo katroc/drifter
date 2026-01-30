@@ -52,6 +52,7 @@ use std::fs;
 use std::io::{self};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +212,22 @@ struct SettingsState {
 pub enum ModalAction {
     None,
     ClearHistory,
+    CancelJob(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewMode {
+    Flat,
+    Tree,
+}
+
+#[derive(Debug, Clone)]
+pub struct VisualItem {
+    pub text: String,
+    pub index_in_jobs: Option<usize>, // Index in original flat list
+    pub is_folder: bool,
+    pub depth: usize,
+    pub first_job_index: Option<usize>, // For details view when folder is selected
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -620,6 +637,13 @@ pub struct App {
     config: Arc<Mutex<Config>>,
     clamav_status: Arc<Mutex<String>>,
     progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
+    pub cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
+    
+    // Visualization
+    pub view_mode: ViewMode,
+    pub visual_jobs: Vec<VisualItem>,
+    pub visual_history: Vec<VisualItem>,
+    
     // Async feedback channel
     pub async_rx: mpsc::Receiver<String>,
     pub async_tx: mpsc::Sender<String>,
@@ -639,7 +663,7 @@ pub struct App {
 }
 
 impl App {
-    fn new(conn: Arc<Mutex<Connection>>, config: Arc<Mutex<Config>>, progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>) -> Self {
+    fn new(conn: Arc<Mutex<Connection>>, config: Arc<Mutex<Config>>, progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>, cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>) -> Self {
         let cfg_guard = config.lock().unwrap();
         let watcher_cfg = cfg_guard.clone();
         let settings = SettingsState::from_config(&cfg_guard);
@@ -684,6 +708,10 @@ impl App {
             metrics: MetricsCollector::new(),
             last_metrics: HostMetricsSnapshot::default(),
             last_metrics_refresh: Instant::now(),
+            cancellation_tokens,
+            view_mode: ViewMode::Flat,
+            visual_jobs: Vec::new(),
+            visual_history: Vec::new(),
         };
 
         let status_clone = app.clamav_status.clone();
@@ -725,12 +753,14 @@ impl App {
         self.history = list_history_jobs(conn, 100, filter_str)?;
         self.quarantine = list_quarantined_jobs(conn, 100)?;
         
-        // Auto-fix selected if out of bounds
-        if self.selected >= self.jobs.len() {
-            self.selected = self.jobs.len().saturating_sub(1);
+        self.rebuild_visual_lists();
+        
+        // Auto-fix selected if out of bounds (using visual list size)
+        if self.selected >= self.visual_jobs.len() {
+            self.selected = self.visual_jobs.len().saturating_sub(1);
         }
-        if self.selected_history >= self.history.len() {
-            self.selected_history = self.history.len().saturating_sub(1);
+        if self.selected_history >= self.visual_history.len() {
+            self.selected_history = self.visual_history.len().saturating_sub(1);
         }
         if self.selected_quarantine >= self.quarantine.len() {
             self.selected_quarantine = self.quarantine.len().saturating_sub(1);
@@ -738,6 +768,224 @@ impl App {
         
         self.last_refresh = Instant::now();
         Ok(())
+    }
+
+    fn rebuild_visual_lists(&mut self) {
+        self.visual_jobs = self.build_visual_list(&self.jobs);
+        self.visual_history = self.build_visual_list(&self.history);
+    }
+    
+    fn build_visual_list(&self, jobs: &[JobRow]) -> Vec<VisualItem> {
+        match self.view_mode {
+            ViewMode::Flat => {
+                jobs.iter().enumerate().map(|(i, job)| {
+                    // Extract filename for display
+                    let name = Path::new(&job.source_path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| job.source_path.clone());
+                        
+                    VisualItem {
+                        text: name,
+                        index_in_jobs: Some(i),
+                        is_folder: false,
+                        depth: 0,
+                        first_job_index: None,
+                    }
+                }).collect()
+            }
+            ViewMode::Tree => {
+                if jobs.is_empty() { return Vec::new(); }
+
+                // 1. Calculate Common Prefix
+                // We must scan ALL paths since we aren't sorting anymore.
+                let paths: Vec<&Path> = jobs.iter().map(|j| Path::new(&j.source_path)).collect();
+                let p0 = paths[0];
+                let mut common_components: Vec<_> = p0.components().collect();
+
+                for p in &paths[1..] {
+                    let comps: Vec<_> = p.components().collect();
+                    let min_len = std::cmp::min(common_components.len(), comps.len());
+                    let mut match_len = 0;
+                    while match_len < min_len && common_components[match_len] == comps[match_len] {
+                         match_len += 1;
+                    }
+                    common_components.truncate(match_len);
+                    if common_components.is_empty() { break; }
+                }
+
+                let common_path_buf: std::path::PathBuf = common_components.iter().collect();
+
+                // 2. Heuristic for Base Path
+                
+                // If common prefix is exactly a file path (e.g. single file in list), 
+                // we should start "view" at its parent folder to show structure.
+                let common_is_file = jobs.iter().any(|j| Path::new(&j.source_path) == &common_path_buf);
+                
+                let effective_common_path = if common_is_file {
+                    common_path_buf.parent().unwrap_or(&common_path_buf).to_path_buf()
+                } else {
+                     common_path_buf.clone()
+                };
+
+                // Check depths relative to effective common prefix
+                let max_depth = paths.iter()
+                    .map(|p| p.strip_prefix(&effective_common_path).unwrap_or(p).components().count())
+                    .max()
+                    .unwrap_or(0);
+                
+                // If max_depth <= 1, it means all items are immediate children.
+                // We show parent container context effectively.
+                let base_path_buf = if max_depth <= 1 && common_path_buf.components().count() > 0 {
+                      effective_common_path.parent().map(|p| p.to_path_buf()).unwrap_or(effective_common_path)
+                } else {
+                      effective_common_path
+                };
+
+                // 3. Build Tree (Order Preserving)
+                struct TreeNode {
+                    name: String,
+                    children: Vec<TreeNode>,
+                    files: Vec<usize>, // Indicies in original 'jobs' slice
+                }
+                
+                let mut root = TreeNode { name: String::new(), children: Vec::new(), files: Vec::new() };
+
+                for (idx, job) in jobs.iter().enumerate() {
+                    let full_path = Path::new(&job.source_path);
+                    let rel_path = full_path.strip_prefix(&base_path_buf).unwrap_or(full_path);
+                    
+                    // Components of the relative path
+                    let components: Vec<String> = rel_path.components()
+                        .map(|c| c.as_os_str().to_string_lossy().to_string())
+                        .collect();
+                    
+                    let mut current = &mut root;
+                    
+                    // Traverse folders (components excluding the last one, which is the file)
+                    if components.len() > 1 {
+                        for i in 0..components.len()-1 {
+                            let comp = &components[i];
+                            let remaining_for_file = &components[i+1..]; // This includes the filename at end
+                            
+                            // Sequential Merge Check:
+                            // Check ONLY the last child to preserve time order.
+                            // And check for collisions.
+                            let mut should_merge = false;
+                            
+                            if let Some(last) = current.children.last() {
+                                if last.name == *comp {
+                                     // Check collision: Does `last` already contain the file we are about to add?
+                                     // We need to verify if `last` + `remaining_for_file` hits an existing file.
+                                     // Helper closure for collision
+                                     fn check_collision(node: &TreeNode, path: &[String], jobs: &[JobRow]) -> bool {
+                                         if path.len() == 1 {
+                                             // Path is just [filename]. Check node.files.
+                                             let filename = &path[0];
+                                             for &f_idx in &node.files {
+                                                 let f_path = &jobs[f_idx].source_path;
+                                                 let f_name = std::path::Path::new(f_path).file_name().unwrap_or_default().to_string_lossy();
+                                                 if f_name == *filename { return true; }
+                                             }
+                                             return false;
+                                         }
+                                         // Path is [dir, ..., filename]
+                                         let next_dir = &path[0];
+                                         if let Some(child) = node.children.iter().find(|c| c.name == *next_dir) {
+                                             return check_collision(child, &path[1..], jobs);
+                                         }
+                                         false
+                                     }
+                                     
+                                     if !check_collision(last, remaining_for_file, jobs) {
+                                         should_merge = true;
+                                     }
+                                }
+                            }
+                            
+                            if should_merge {
+                                current = current.children.last_mut().unwrap();
+                            } else {
+                                let new_node = TreeNode { 
+                                    name: comp.clone(), 
+                                    children: Vec::new(), 
+                                    files: Vec::new() 
+                                };
+                                current.children.push(new_node);
+                                current = current.children.last_mut().unwrap();
+                            }
+                        }
+                    }
+                    
+                    // Add file to current node
+                    // But wait, if components is 1 (File only logic), `current` is `root`.
+                    // We must check if `root` already has this file to support collision at root level?
+                    // The loop above only handles Folders.
+                    // If logic is `d/A` (Loop runs once for `d`).
+                    // If logic is `A` (Loop doesn't run). `current` = `root`.
+                    // We add `A`.
+                    // If next is `A`. We add `A`. `root` has `A, A`.
+                    // User says "repeats get nested under same folder".
+                    // If at root, they are just in the list.
+                    // Flattening `root` prints files.
+                    // `A`, `A`.
+                    // This is fine. Root is not a "Visual Folder".
+                    // The issue was "Nested under SAME folder".
+                    
+                    current.files.push(idx);
+                }
+
+                // 4. Flatten Tree
+                let mut items = Vec::new();
+                fn flatten(node: &TreeNode, depth: usize, items: &mut Vec<VisualItem>, jobs: &[JobRow]) {
+                    // Helper to find first file in a node
+                    fn find_any_file(node: &TreeNode) -> Option<usize> {
+                        if let Some(&idx) = node.files.first() {
+                            return Some(idx);
+                        }
+                        for child in &node.children {
+                            if let Some(idx) = find_any_file(child) {
+                                return Some(idx);
+                            }
+                        }
+                        None
+                    }
+
+                    // Folders
+                    for child in &node.children {
+                         let first_job = find_any_file(child);
+                         items.push(VisualItem {
+                            text: format!("{}/", child.name),
+                            index_in_jobs: None,
+                            is_folder: true,
+                            depth,
+                            first_job_index: first_job,
+                        });
+                        flatten(child, depth + 1, items, jobs);
+                    }
+                    
+                    // Files
+                    for &idx in &node.files {
+                        let job = &jobs[idx];
+                         let filename = std::path::Path::new(&job.source_path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| job.source_path.clone());
+                            
+                        items.push(VisualItem {
+                            text: filename,
+                            index_in_jobs: Some(idx),
+                            is_folder: false,
+                            depth,
+                            first_job_index: None,
+                        });
+                    }
+                }
+                
+                flatten(&root, 0, &mut items, jobs);
+                items
+            }
+        }
     }
 
     fn browser_move_down(&mut self) {
@@ -811,14 +1059,14 @@ impl App {
     }
 }
 
-pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>, needs_wizard: bool) -> Result<()> {
+pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>, cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>, needs_wizard: bool) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = App::new(conn_mutex.clone(), cfg.clone(), progress);
+    let mut app = App::new(conn_mutex.clone(), cfg.clone(), progress, cancellation_tokens);
     app.show_wizard = needs_wizard;
     
     {
@@ -861,16 +1109,33 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                      match key.code {
                         KeyCode::Char('y') | KeyCode::Enter => {
                             // Execute Action
-                            if app.pending_action == ModalAction::ClearHistory {
-                                let conn = conn_mutex.lock().unwrap();
-                                let filter_str = if app.history_filter == HistoryFilter::All { None } else { Some(app.history_filter.as_str()) };
-                                if let Err(e) = crate::db::clear_history(&conn, filter_str) {
-                                    app.status_message = format!("Error clearing history: {}", e);
-                                } else {
-                                    app.selected_history = 0;
-                                    app.status_message = format!("History cleared ({})", app.history_filter.as_str());
+                            match app.pending_action {
+                                ModalAction::ClearHistory => {
+                                    let conn = conn_mutex.lock().unwrap();
+                                    let filter_str = if app.history_filter == HistoryFilter::All { None } else { Some(app.history_filter.as_str()) };
+                                    if let Err(e) = crate::db::clear_history(&conn, filter_str) {
+                                        app.status_message = format!("Error clearing history: {}", e);
+                                    } else {
+                                        app.selected_history = 0;
+                                        app.status_message = format!("History cleared ({})", app.history_filter.as_str());
+                                        let _ = app.refresh_jobs(&conn);
+                                    }
+                                }
+                                ModalAction::CancelJob(id) => {
+                                    // Trigger cancellation token
+                                    if let Some(token) = app.cancellation_tokens.lock().unwrap().get(&id) {
+                                        token.store(true, Ordering::Relaxed);
+                                    }
+                                    
+                                    // Update DB status (Soft Delete / Cancel)
+                                    let conn = conn_mutex.lock().unwrap();
+                                    let _ = crate::db::cancel_job(&conn, id);
+                                    app.status_message = format!("Cancelled job {}", id);
+                                    
+                                    // Refresh to update list
                                     let _ = app.refresh_jobs(&conn);
                                 }
+                                _ => {}
                             }
                             
                             // Reset
@@ -1182,26 +1447,52 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                     AppFocus::Queue => {
                          match key.code {
                             KeyCode::Up | KeyCode::Char('k') => if app.selected > 0 { app.selected -= 1; },
-                            KeyCode::Down | KeyCode::Char('j') => if app.selected + 1 < app.jobs.len() { app.selected += 1; },
+                            KeyCode::Down | KeyCode::Char('j') => if app.selected + 1 < app.visual_jobs.len() { app.selected += 1; },
+                            KeyCode::Char('t') => {
+                                app.view_mode = match app.view_mode {
+                                    ViewMode::Flat => ViewMode::Tree,
+                                    ViewMode::Tree => ViewMode::Flat,
+                                };
+                                app.status_message = format!("Switched to {:?} View", app.view_mode);
+                                let conn = conn_mutex.lock().unwrap();
+                                let _ = app.refresh_jobs(&conn);
+                            }
                             KeyCode::Char('R') => {
                                 let conn = conn_mutex.lock().unwrap();
                                 let _ = app.refresh_jobs(&conn);
                             }
                             KeyCode::Char('r') => {
-                                if !app.jobs.is_empty() && app.selected < app.jobs.len() {
-                                    let id = app.jobs[app.selected].id;
-                                    let conn = conn_mutex.lock().unwrap();
-                                    let _ = crate::db::retry_job(&conn, id);
-                                    app.status_message = format!("Retried job {}", id);
+                                if !app.visual_jobs.is_empty() && app.selected < app.visual_jobs.len() {
+                                    if let Some(idx) = app.visual_jobs[app.selected].index_in_jobs {
+                                        let id = app.jobs[idx].id;
+                                        let conn = conn_mutex.lock().unwrap();
+                                        let _ = crate::db::retry_job(&conn, id);
+                                        app.status_message = format!("Retried job {}", id);
+                                    }
                                 }
                             }
                             KeyCode::Char('d') | KeyCode::Delete => {
-                                if !app.jobs.is_empty() && app.selected < app.jobs.len() {
-                                    let id = app.jobs[app.selected].id;
-                                    let conn = conn_mutex.lock().unwrap();
-                                    let _ = crate::db::delete_job(&conn, id);
-                                    app.status_message = format!("Deleted job {}", id);
-                                    if app.selected >= app.jobs.len() && app.selected > 0 { app.selected -= 1; }
+                                if !app.visual_jobs.is_empty() && app.selected < app.visual_jobs.len() {
+                                    if let Some(idx) = app.visual_jobs[app.selected].index_in_jobs {
+                                        let job = &app.jobs[idx];
+                                        let id = job.id;
+                                        let is_active = job.status == "uploading" || job.status == "scanning" || job.status == "pending" || job.status == "queued";
+                                        
+                                        if is_active {
+                                            // Require confirmation
+                                            app.pending_action = ModalAction::CancelJob(id);
+                                            app.confirmation_msg = format!("Cancel active job #{}? (y/n)", id);
+                                            app.input_mode = InputMode::Confirmation;
+                                        } else {
+                                            // Just do it (Soft delete/Cancel)
+                                            let conn = conn_mutex.lock().unwrap();
+                                            let _ = crate::db::cancel_job(&conn, id);
+                                            app.status_message = format!("Removed job {}", id);
+                                            let _ = app.refresh_jobs(&conn);
+                                            // Selection adjustment happens in refresh_jobs (auto-fix) or we can decrement if at end
+                                            // But standard behavior is fine.
+                                        }
+                                    }
                                 }
                             }
                             KeyCode::Char('c') => {
@@ -1226,7 +1517,15 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                     AppFocus::History => {
                          match key.code {
                             KeyCode::Up | KeyCode::Char('k') => if app.selected_history > 0 { app.selected_history -= 1; },
-                            KeyCode::Down | KeyCode::Char('j') => if app.selected_history + 1 < app.history.len() { app.selected_history += 1; },
+                            KeyCode::Down | KeyCode::Char('j') => if app.selected_history + 1 < app.visual_history.len() { app.selected_history += 1; },
+                            KeyCode::Char('t') => {
+                                app.view_mode = match app.view_mode {
+                                    ViewMode::Flat => ViewMode::Tree,
+                                    ViewMode::Tree => ViewMode::Flat,
+                                };
+                                let conn = conn_mutex.lock().unwrap();
+                                let _ = app.refresh_jobs(&conn);
+                            }
                             KeyCode::Char('f') => {
                                 app.history_filter = app.history_filter.next();
                                 app.selected_history = 0; // Reset selection
@@ -1245,14 +1544,14 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                 });
                             }
                             KeyCode::Char('d') | KeyCode::Delete => {
-                                if !app.history.is_empty() && app.selected_history < app.history.len() {
-                                    let job = &app.history[app.selected_history];
-                                    let id = job.id;
-                                    let conn = conn_mutex.lock().unwrap();
-                                    let _ = crate::db::delete_job(&conn, id);
-                                    let _ = app.refresh_jobs(&conn);
-                                    if app.selected_history >= app.history.len() && app.selected_history > 0 {
-                                        app.selected_history -= 1;
+                                if !app.visual_history.is_empty() && app.selected_history < app.visual_history.len() {
+                                    if let Some(idx) = app.visual_history[app.selected_history].index_in_jobs {
+                                        let job = &app.history[idx];
+                                        let id = job.id;
+                                        let conn = conn_mutex.lock().unwrap();
+                                        let _ = crate::db::delete_job(&conn, id);
+                                        let _ = app.refresh_jobs(&conn);
+                                        // Auto-fix happens in refresh_jobs
                                     }
                                 }
                             }
@@ -1765,7 +2064,7 @@ fn draw_history(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .style(app.theme.header_style())
         .height(1);
 
-    let total_rows = app.history.len();
+    let total_rows = app.visual_history.len();
     let display_height = area.height.saturating_sub(4) as usize; // Border + Header
     let mut offset = 0;
     
@@ -1778,10 +2077,10 @@ fn draw_history(f: &mut ratatui::Frame, app: &App, area: Rect) {
         }
     }
 
-    let rows = app.history.iter().enumerate()
+    let rows = app.visual_history.iter().enumerate()
         .skip(offset)
         .take(display_height)
-        .map(|(idx, job)| {
+        .map(|(idx, item)| {
         let is_selected = (idx == app.selected_history) && (app.focus == AppFocus::History);
         let row_style = if is_selected {
             app.theme.selection_style()
@@ -1789,45 +2088,59 @@ fn draw_history(f: &mut ratatui::Frame, app: &App, area: Rect) {
             app.theme.row_style(idx % 2 != 0)
         };
         
-        // Extract filename from source_path
-        let filename = std::path::Path::new(&job.source_path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| job.source_path.clone());
-        let display_name = if filename.len() > 30 {
-            format!("{}…", &filename[..29])
+        let indent = " ".repeat(item.depth * 2);
+        let text = if item.text.len() > 30 {
+             format!("{}…", &item.text[..29])
         } else {
-            filename
+             item.text.clone()
         };
-
-        // Status text
-        let status_str = match job.status.as_str() {
-            "quarantined" => "Threat Detected",
-            "quarantined_removed" => "Threat Removed",
-            "complete" => "Done",
-            s => s,
-        };
-
-        // Relative time
-        let time_str = format_relative_time(&job.created_at);
-
-        let status_style = if is_selected {
-            app.theme.selection_style()
+        
+        let display_name = if item.is_folder {
+            format!("{}📁 {}", indent, text)
         } else {
-            match job.status.as_str() {
-                "quarantined" | "quarantined_removed" => app.theme.status_style(StatusKind::Error),
-                "complete" => app.theme.status_style(StatusKind::Success),
-                _ => app.theme.text_style(),
-            }
+             format!("{}📄 {}", indent, text)
         };
+        
+        if let Some(job_idx) = item.index_in_jobs {
+            let job = &app.history[job_idx];
 
-        Row::new(vec![
-            Cell::from(display_name),
-            Cell::from(status_str).style(status_style),
-            Cell::from(format_bytes(job.size_bytes as u64)),
-            Cell::from(time_str),
-        ])
-        .style(row_style)
+            // Status text
+            let status_str = match job.status.as_str() {
+                "quarantined" => "Threat Detected",
+                "quarantined_removed" => "Threat Removed",
+                "complete" => "Done",
+                s => s,
+            };
+
+            // Relative time
+            let time_str = format_relative_time(&job.created_at);
+
+            let status_style = if is_selected {
+                app.theme.selection_style()
+            } else {
+                match job.status.as_str() {
+                    "quarantined" | "quarantined_removed" => app.theme.status_style(StatusKind::Error),
+                    "complete" => app.theme.status_style(StatusKind::Success),
+                    _ => app.theme.text_style(),
+                }
+            };
+
+            Row::new(vec![
+                Cell::from(display_name),
+                Cell::from(status_str).style(status_style),
+                Cell::from(format_bytes(job.size_bytes as u64)),
+                Cell::from(time_str),
+            ])
+            .style(row_style)
+        } else {
+           Row::new(vec![
+                Cell::from(display_name),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+            ])
+            .style(row_style)
+        }
     });
 
     let title = format!(" History [{}] ", app.history_filter.as_str());
@@ -2074,21 +2387,24 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
     if app.current_tab == AppTab::Quarantine && !app.quarantine.is_empty() && app.selected_quarantine < app.quarantine.len() {
         // Quarantine Tab: Show selected threat details in full right panel
         draw_job_details(f, app, right_panel, &app.quarantine[app.selected_quarantine]);
-    } else if app.focus == AppFocus::Queue && !app.jobs.is_empty() && app.selected < app.jobs.len() {
+    } else if app.focus == AppFocus::Queue && !app.visual_jobs.is_empty() && app.selected < app.visual_jobs.len() {
         // Queue focused: Show selected job details in full right panel
-        draw_job_details(f, app, right_panel, &app.jobs[app.selected]);
-    } else if app.focus == AppFocus::History && !app.history.is_empty() && app.selected_history < app.history.len() {
+        let visual_item = &app.visual_jobs[app.selected];
+        if let Some(idx) = visual_item.index_in_jobs.or(visual_item.first_job_index) {
+            draw_job_details(f, app, right_panel, &app.jobs[idx]);
+        }
+    } else if app.focus == AppFocus::History && !app.visual_history.is_empty() && app.selected_history < app.visual_history.len() {
         // History focused: Split view
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
-            ])
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(right_panel);
         
         draw_history(f, app, chunks[0]);
-        draw_job_details(f, app, chunks[1], &app.history[app.selected_history]);
+        let visual_item = &app.visual_history[app.selected_history];
+        if let Some(idx) = visual_item.index_in_jobs.or(visual_item.first_job_index) {
+            draw_job_details(f, app, chunks[1], &app.history[idx]);
+        }
     } else {
         // Default: Full history list
         draw_history(f, app, right_panel);
@@ -2276,7 +2592,7 @@ fn draw_jobs(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .style(app.theme.header_style())
         .height(1);
 
-    let total_rows = app.jobs.len();
+    let total_rows = app.visual_jobs.len();
     let display_height = area.height.saturating_sub(4) as usize; // Border + Header
     let mut offset = 0;
     
@@ -2289,10 +2605,10 @@ fn draw_jobs(f: &mut ratatui::Frame, app: &App, area: Rect) {
         }
     }
 
-    let rows = app.jobs.iter().enumerate()
+    let rows = app.visual_jobs.iter().enumerate()
         .skip(offset)
         .take(display_height)
-        .map(|(idx, job)| {
+        .map(|(idx, item)| {
         let is_selected = (idx == app.selected) && (app.focus == AppFocus::Queue);
         let row_style = if is_selected {
             app.theme.selection_style()
@@ -2300,62 +2616,79 @@ fn draw_jobs(f: &mut ratatui::Frame, app: &App, area: Rect) {
             app.theme.row_style(idx % 2 != 0)
         };
         
-        // Extract filename from source_path
-        let filename = std::path::Path::new(&job.source_path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| job.source_path.clone());
-        let display_name = if filename.len() > 25 {
-            format!("{}…", &filename[..24])
+        // Indentation
+        let indent = " ".repeat(item.depth * 2);
+        let text = if item.text.len() > 35 {
+             format!("{}…", &item.text[..34])
         } else {
-            filename
+             item.text.clone()
+        };
+        
+        let display_name = if item.is_folder {
+            format!("{}📁 {}", indent, text)
+        } else {
+             format!("{}📄 {}", indent, text)
         };
 
-        let p_str = {
-            if job.status == "uploading" {
-                let p_map = app.progress.lock().unwrap();
-                let entry = p_map.get(&job.id).cloned();
-                drop(p_map);
-                if let Some(info) = entry {
-                    let bar_width = 10;
-                    let filled = (info.percent.clamp(0.0, 100.0) / 100.0 * (bar_width as f64)) as usize;
-                    format!("{}{} {:.0}%", "█".repeat(filled), "░".repeat(bar_width - filled), info.percent)
+        if let Some(job_idx) = item.index_in_jobs {
+            // It's a file with a job
+            let job = &app.jobs[job_idx];
+
+            let p_str = {
+                if job.status == "uploading" {
+                    let p_map = app.progress.lock().unwrap();
+                    let entry = p_map.get(&job.id).cloned();
+                    drop(p_map);
+                    if let Some(info) = entry {
+                        let bar_width = 10;
+                        let filled = (info.percent.clamp(0.0, 100.0) / 100.0 * (bar_width as f64)) as usize;
+                        format!("{}{} {:.0}%", "█".repeat(filled), "░".repeat(bar_width - filled), info.percent)
+                    } else {
+                        "░░░░░░░░░░ 0%".to_string()
+                    }
+                } else if job.status == "complete" {
+                    "██████████ 100%".to_string()
+                } else if job.status == "quarantined" || job.status == "quarantined_removed" {
+                    "XXXXXXXXXX ERR".to_string()
+                } else if job.status == "error" || job.status == "failed" {
+                    "!! ERROR !!".to_string()
                 } else {
-                    "░░░░░░░░░░ 0%".to_string()
+                    "----------".to_string()
                 }
-            } else if job.status == "complete" {
-                "██████████ 100%".to_string()
-            } else if job.status == "quarantined" || job.status == "quarantined_removed" {
-                "XXXXXXXXXX ERR".to_string()
-            } else if job.status == "error" || job.status == "failed" {
-                "!! ERROR !!".to_string()
+            };
+            
+            let time_str = format_relative_time(&job.created_at);
+            
+            let status_style = if is_selected {
+                app.theme.selection_style()
             } else {
-                "----------".to_string()
-            }
-        };
+                app.theme.status_style(status_kind(job.status.as_str()))
+            };
+            let progress_style = if is_selected {
+                app.theme.selection_style()
+            } else {
+                app.theme.progress_style()
+            };
 
-        // Relative time from created_at
-        let time_str = format_relative_time(&job.created_at);
-
-        let status_style = if is_selected {
-            app.theme.selection_style()
+            Row::new(vec![
+                Cell::from(display_name),
+                Cell::from(job.status.clone()).style(status_style),
+                Cell::from(format_bytes(job.size_bytes as u64)),
+                Cell::from(p_str).style(progress_style),
+                Cell::from(time_str),
+            ])
+            .style(row_style)
         } else {
-            app.theme.status_style(status_kind(job.status.as_str()))
-        };
-        let progress_style = if is_selected {
-            app.theme.selection_style()
-        } else {
-            app.theme.progress_style()
-        };
-
-        Row::new(vec![
-            Cell::from(display_name),
-            Cell::from(job.status.clone()).style(status_style),
-            Cell::from(format_bytes(job.size_bytes as u64)),
-            Cell::from(p_str).style(progress_style),
-            Cell::from(time_str),
-        ])
-        .style(row_style)
+            // Folder Row
+            Row::new(vec![
+                Cell::from(display_name),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+            ])
+            .style(row_style)
+        }
     });
 
     let table = Table::new(rows, [
@@ -2445,7 +2778,12 @@ fn fuzzy_match(pattern: &str, text: &str) -> bool {
 fn draw_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let is_focused = app.focus == AppFocus::Browser;
     let focus_style = if is_focused {
-        app.theme.border_active_style()
+        if app.input_mode == InputMode::Browsing || app.input_mode == InputMode::Filter {
+            // Activated Hopper: Use Success/Green style to indicate active navigation
+             app.theme.status_style(StatusKind::Success)
+        } else {
+            app.theme.border_active_style()
+        }
     } else {
         app.theme.border_style()
     };
@@ -2547,15 +2885,26 @@ fn draw_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
             let size_str = if entry.is_dir { "-".to_string() } else { format_size(entry.size) };
             let mod_str = format_modified(entry.modified);
 
-            let style = if (*orig_idx == app.picker.selected) && (app.focus == AppFocus::Browser) {
+            let is_selected = (*orig_idx == app.picker.selected) && (app.focus == AppFocus::Browser);
+            let is_staged = app.picker.selected_paths.contains(&entry.path);
+            
+            let mut style = if is_selected {
                 app.theme.selection_style()
-            } else if app.picker.selected_paths.contains(&entry.path) {
-                app.theme.status_style(StatusKind::Success)
             } else if (visible_idx + offset) % 2 == 0 {
                 app.theme.row_style(false)
             } else {
                  app.theme.row_style(true)
             };
+            
+            if is_staged {
+                if is_selected {
+                    // Combined: Selected + Staged. 
+                    // Assuming Selection is Reversed, setting FG to Green makes BG Green.
+                    style = style.fg(ratatui::style::Color::Green);
+                } else {
+                    style = app.theme.status_style(StatusKind::Success);
+                }
+            }
 
             Row::new(vec![
                 Cell::from(name_styled),

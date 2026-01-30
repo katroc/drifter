@@ -103,7 +103,7 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
 pub fn list_active_jobs(conn: &Connection, limit: i64) -> Result<Vec<JobRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key FROM jobs 
-         WHERE status NOT IN ('complete', 'quarantined', 'quarantined_removed') 
+         WHERE status NOT IN ('complete', 'quarantined', 'quarantined_removed', 'cancelled') 
          OR datetime(created_at) > datetime('now', '-15 seconds')
          ORDER BY id DESC LIMIT ?",
     )?;
@@ -130,7 +130,7 @@ pub fn list_history_jobs(conn: &Connection, limit: i64, filter: Option<&str>) ->
     let sql = match filter {
         Some("Complete") => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key FROM jobs WHERE status = 'complete' ORDER BY id DESC LIMIT ?",
         Some("Quarantined") => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key FROM jobs WHERE status IN ('quarantined', 'quarantined_removed') ORDER BY id DESC LIMIT ?",
-        _ => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key FROM jobs WHERE status IN ('complete', 'quarantined', 'quarantined_removed') ORDER BY id DESC LIMIT ?",
+        _ => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key FROM jobs WHERE status IN ('complete', 'quarantined', 'quarantined_removed', 'cancelled') ORDER BY id DESC LIMIT ?",
     };
     
     let mut stmt = conn.prepare(sql)?;
@@ -273,6 +273,14 @@ pub fn delete_job(conn: &Connection, job_id: i64) -> Result<()> {
     conn.execute("DELETE FROM events WHERE job_id = ?", params![job_id])?;
     // Delete the job
     conn.execute("DELETE FROM jobs WHERE id = ?", params![job_id])?;
+    Ok(())
+}
+
+pub fn cancel_job(conn: &Connection, job_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE jobs SET status = 'cancelled', error = 'Cancelled by user' WHERE id = ?",
+        params![job_id],
+    )?;
     Ok(())
 }
 
