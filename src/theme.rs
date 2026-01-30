@@ -294,11 +294,6 @@ impl Theme {
             .add_modifier(modifier)
     }
 
-    #[allow(dead_code)]
-    pub fn info_style(&self) -> Style {
-        Style::default().fg(self.info)
-    }
-
     pub fn transparent() -> Self {
         Self {
             name: "Transparent",

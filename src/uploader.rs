@@ -101,12 +101,6 @@ impl Uploader {
             });
         }
 
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("debug.log") {
-            let ak_log = access_key.map(|s| format!("{}... (len={})", &s[..4.min(s.len())], s.len())).unwrap_or_else(|| "NONE".to_string());
-            let sk_log = secret_key.map(|s| format!("{}... (len={})", &s[..4.min(s.len())], s.len())).unwrap_or_else(|| "NONE".to_string());
-            let _ = std::io::Write::write_all(&mut f, format!("[S3_CONNECT] AK={} SK={} Bucket={} Region={}\n", ak_log, sk_log, bucket, region).as_bytes());
-        }
-
         if bucket.is_empty() {
              return Err(anyhow::anyhow!("S3 bucket not configured"));
         }
@@ -268,12 +262,7 @@ impl Uploader {
         // Initialize uploaded bytes with already completed parts size? 
         // We lack part sizes in list_parts usually (it returns Part struct). 
         // We can estimate or just track new uploads. For progress bar correctness on resume, 
-        // it's tricky without summing existing parts. 
-        // Ideally we sum existing parts.
-        // But for time saving, let's start progress from what we upload now, or existing.
-        // Actually, we can just calculate total = file_size.
-        // Correct way:
-        let initial_bytes: u64 = completed_indices.len() as u64 * part_size as u64; // Approx
+        let initial_bytes: u64 = completed_indices.len() as u64 * part_size as u64;
         uploaded_bytes.store(initial_bytes, std::sync::atomic::Ordering::Relaxed);
 
         // Monitor State
@@ -334,10 +323,6 @@ impl Uploader {
         });
         let _monitor_guard = TaskGuard(monitor_handle);
 
-        // Initialize uploaded bytes 
-        // Note: We already set disk_bytes above. uploaded_bytes is set around line 118.
-        // We need to keep them effectively synced or logical.
-        
         let mut handles: Vec<tokio::task::JoinHandle<Result<CompletedPart>>> = Vec::new();
         let mut part_number = 1;
         let mut buffer = vec![0u8; part_size];
@@ -405,13 +390,7 @@ impl Uploader {
                     .map_err(|e| anyhow::anyhow!("Failed to upload part {}: {}", part_number, e))?;
 
                 // Update Net Tracker
-                let previous = uploaded_bytes.fetch_add(bytes_read as u64, std::sync::atomic::Ordering::Relaxed);
-                
-                // Debug to file
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("debug.log") {
-                    let _ = writeln!(f, "[UPLOAD_DONE] part={} bytes_read={} prev={} new={}", part_number, bytes_read, previous, previous + bytes_read as u64);
-                }
+                uploaded_bytes.fetch_add(bytes_read as u64, std::sync::atomic::Ordering::Relaxed);
 
                 if let Some(etag) = upload_part_output.e_tag() {
                     Ok(CompletedPart::builder()
