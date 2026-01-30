@@ -1663,7 +1663,7 @@ pub fn run_tui(conn_mutex: Arc<Mutex<Connection>>, cfg: Arc<Mutex<Config>>, prog
                                         }
                                         (SettingsCategory::Performance, 5) => {
                                             app.settings.host_metrics_enabled = !app.settings.host_metrics_enabled;
-                                            app.status_message = format!("Host Metrics: {}", if app.settings.host_metrics_enabled { "Enabled" } else { "Disabled" });
+                                            app.status_message = format!("Metrics: {}", if app.settings.host_metrics_enabled { "Enabled" } else { "Disabled" });
                                         }
                                         _ => {}
                                     }
@@ -2430,7 +2430,7 @@ fn draw_metrics_panel(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
         .border_style(app.theme.border_style())
-        .title(" Host Metrics ")
+        .title(" Metrics ")
         .style(app.theme.panel_style());
     
     let inner_area = block.inner(area);
@@ -3002,7 +3002,7 @@ fn draw_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
             ("Scan Concurrency", app.settings.scan_concurrency.as_str()),
             ("Staging Mode", if app.settings.staging_mode_direct { "[X] Direct (no copy)" } else { "[ ] Copy" }),
             ("Delete Source After Upload", if app.settings.delete_source_after_upload { "[X] Enabled" } else { "[ ] Disabled" }),
-            ("Show Host Metrics", if app.settings.host_metrics_enabled { "[X] Enabled" } else { "[ ] Disabled" }),
+            ("Show Metrics", if app.settings.host_metrics_enabled { "[X] Enabled" } else { "[ ] Disabled" }),
         ],
         SettingsCategory::Theme => vec![
             ("Theme", app.settings.theme.as_str()),
