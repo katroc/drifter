@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use crate::config::{Config, ScanMode};
+use crate::core::config::{Config, ScanMode};
 use std::net::SocketAddr;
 use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt};
@@ -36,7 +36,7 @@ impl Scanner {
 
     async fn scan_chunked(&self, path: &str) -> Result<bool> {
         let chunk_size = (self.scan_chunk_size_mb * 1024 * 1024) as usize;
-        let overlap = 1 * 1024 * 1024; // 1MB overlap
+        let overlap = 1024 * 1024; // 1MB overlap
         let chunk_size = chunk_size.max(overlap + 1024);
         let concurrency = self.concurrency.max(1);
         

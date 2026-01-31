@@ -1,7 +1,7 @@
-use crate::config::Config;
+use crate::core::config::Config;
 use crate::db::{self, JobRow};
-use crate::scanner::Scanner;
-use crate::uploader::Uploader;
+use crate::services::scanner::Scanner;
+use crate::services::uploader::Uploader;
 use anyhow::Result;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use std::collections::HashMap;
+use crate::utils::lock_mutex;
 
 #[derive(Debug, Clone)]
 pub struct ProgressInfo {
@@ -34,7 +35,7 @@ impl Coordinator {
     pub fn new(conn: Arc<Mutex<Connection>>, config: Arc<Mutex<Config>>, progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>, cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>) -> Result<Self> {
         let runtime = Arc::new(Runtime::new()?);
         // We need lock to init scanner/uploader but they are just helpers now or cheap to init
-        let cfg = config.lock().unwrap();
+        let cfg = lock_mutex(&config)?;
         let scanner = Scanner::new(&cfg);
         let uploader = Uploader::new(&cfg);
         drop(cfg);
@@ -52,11 +53,11 @@ impl Coordinator {
     }
 
     fn process_cycle(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_mutex(&self.conn)?;
         
         // Find jobs in "queued" state
         if let Some(job) = db::get_next_job(&conn, "queued")? {
-            let scanner_enabled = self.config.lock().unwrap().scanner_enabled;
+            let scanner_enabled = lock_mutex(&self.config)?.scanner_enabled;
             if scanner_enabled {
                 // Move to scanning
                 db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
@@ -91,7 +92,7 @@ impl Coordinator {
             Some(p) => p,
             None => {
                 // Should not happen if queued
-                 let conn = self.conn.lock().unwrap();
+                 let conn = lock_mutex(&self.conn)?;
                  db::update_job_error(&conn, job.id, "failed", "no staged path")?;
                  return Ok(());
             }
@@ -99,12 +100,12 @@ impl Coordinator {
 
         match self.runtime.block_on(self.scanner.scan_file(path)) {
             Ok(true) => {
-                 let conn = self.conn.lock().unwrap();
+                 let conn = lock_mutex(&self.conn)?;
                  db::update_scan_status(&conn, job.id, "clean", "scanned")?;
                  db::insert_event(&conn, job.id, "scan", "scan completed")?;
             }
             Ok(false) => {
-                 let cfg = self.config.lock().unwrap();
+                 let cfg = lock_mutex(&self.config)?;
                  let quarantine_dir = std::path::Path::new(&cfg.quarantine_dir);
                  if !quarantine_dir.exists() {
                      let _ = std::fs::create_dir_all(quarantine_dir);
@@ -123,7 +124,7 @@ impl Coordinator {
                  }
                  drop(cfg);
 
-                 let conn = self.conn.lock().unwrap();
+                 let conn = lock_mutex(&self.conn)?;
                  db::update_scan_status(&conn, job.id, "infected", "quarantined")?;
                  if !quarantine_path_str.is_empty() {
                      let _ = db::update_job_staged(&conn, job.id, &quarantine_path_str, "quarantined");
@@ -131,7 +132,7 @@ impl Coordinator {
                  db::insert_event(&conn, job.id, "scan", "scan failed: infected (quarantined)")?;
             }
             Err(e) => {
-                 let conn = self.conn.lock().unwrap();
+                 let conn = lock_mutex(&self.conn)?;
                  db::update_job_error(&conn, job.id, "failed", &format!("scan error: {}", e))?;
             }
         }
@@ -144,7 +145,7 @@ impl Coordinator {
              None => return Ok(()),
         };
         
-        let config_guard = self.config.lock().unwrap();
+        let config_guard = lock_mutex(&self.config)?;
         // Clone config to pass into async block or ...? 
         // uploader.upload_file takes &Config. We can't hold mutex across await. 
         // So we should clone the Config. Config is cloneable.
@@ -153,13 +154,13 @@ impl Coordinator {
 
         // Set status to "uploading" BEFORE starting upload
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = lock_mutex(&self.conn)?;
             db::update_upload_status(&conn, job.id, "starting", "uploading")?;
         }
 
         // Register cancellation token
         let cancel_token = Arc::new(AtomicBool::new(false));
-        self.cancellation_tokens.lock().unwrap().insert(job.id, cancel_token.clone());
+        lock_mutex(&self.cancellation_tokens)?.insert(job.id, cancel_token.clone());
 
         let res = self.runtime.block_on(self.uploader.upload_file(
             &config, 
@@ -172,10 +173,10 @@ impl Coordinator {
         ));
         
         // Remove token
-        self.cancellation_tokens.lock().unwrap().remove(&job.id);
+        lock_mutex(&self.cancellation_tokens)?.remove(&job.id);
         match res {
             Ok(true) => {
-                let conn = self.conn.lock().unwrap();
+                let conn = lock_mutex(&self.conn)?;
                 db::update_upload_status(&conn, job.id, "completed", "complete")?;
                 db::insert_event(&conn, job.id, "upload", "upload completed")?;
                 
@@ -202,7 +203,7 @@ impl Coordinator {
             }
             Ok(false) => {
                 // Cancelled
-                let conn = self.conn.lock().unwrap();
+                let conn = lock_mutex(&self.conn)?;
                 // We use update_job_error for now or a specific status?
                 // Actually cancel_job_to_history in db would set it to cancelled.
                 // But if we returned false, it means we detected cancellation flag.
@@ -211,7 +212,7 @@ impl Coordinator {
                  db::insert_event(&conn, job.id, "upload", "upload cancelled")?;
             }
             Err(e) => {
-                let conn = self.conn.lock().unwrap();
+                let conn = lock_mutex(&self.conn)?;
                 db::update_job_error(&conn, job.id, "failed", &format!("upload error: {}", e))?;
             }
         }

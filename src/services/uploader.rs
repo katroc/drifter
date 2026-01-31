@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use crate::config::Config;
+use crate::core::config::Config;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
@@ -11,7 +11,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use crate::state::ProgressInfo;
+use crate::utils::lock_mutex;
+use crate::coordinator::ProgressInfo;
 use rusqlite::Connection;
 use crate::db;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -72,6 +73,7 @@ impl Uploader {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn upload_file(
         &self,
         config: &Config,
@@ -92,7 +94,7 @@ impl Uploader {
 
         // Notify UI of connection phase
         {
-            let mut p = progress.lock().unwrap();
+            let mut p = lock_mutex(&progress)?;
             p.insert(job_id, ProgressInfo { 
                 percent: -1.0, 
                 details: "Connecting to S3...".to_string(),
@@ -135,7 +137,7 @@ impl Uploader {
         
         // Get the original source path or pre-calculated key from the job
         let s3_key_path = {
-            let conn = conn_mutex.lock().unwrap();
+            let conn = lock_mutex(&conn_mutex)?;
             if let Ok(Some(job)) = db::get_job(&conn, job_id) {
                 // If ingest calculated a relative path, use it
                 if let Some(key) = job.s3_key {
@@ -165,7 +167,7 @@ impl Uploader {
         if let Some(uid) = &upload_id {
             // Notify UI
             {
-               let mut p = progress.lock().unwrap();
+               let mut p = lock_mutex(&progress)?;
                p.insert(job_id, ProgressInfo { 
                    percent: -1.0, 
                    details: "Resuming: Listing parts...".to_string(),
@@ -186,11 +188,11 @@ impl Uploader {
                 Ok(output) => {
                     if let Some(parts) = output.parts {
                         for p in parts {
-                             if let Some(pn) = p.part_number {
-                                 if let Some(etag) = p.e_tag {
+                             if let Some(pn) = p.part_number
+                                 && let Some(etag) = p.e_tag
+                             {
                                      completed_parts.push(CompletedPart::builder().part_number(pn).e_tag(etag).build());
                                      completed_indices.insert(pn);
-                                 }
                              }
                         }
                     }
@@ -222,13 +224,13 @@ impl Uploader {
             
             // Save to DB
             {
-                let conn = conn_mutex.lock().unwrap();
+                let conn = lock_mutex(&conn_mutex)?;
                 db::update_job_upload_id(&conn, job_id, &new_uid)?;
             }
             upload_id = Some(new_uid);
         }
         
-        let upload_id = upload_id.unwrap(); // Safety: we just set it if none
+        let upload_id = upload_id.expect("Upload ID guaranteed by logic");
 
         let mut file = File::open(path).await.context("Failed to open file")?;
         let file_size = file.metadata().await?.len();
@@ -251,7 +253,7 @@ impl Uploader {
 
         // 4. Critical: Adjust for S3 10,000 part limit (override everything else)
         // If file is 5TB, part_size MUST be > 500MB regardless of config
-        let required_min_part = (file_size + max_parts - 1) / max_parts;
+        let required_min_part = file_size.div_ceil(max_parts);
         part_size = part_size.max(required_min_part as usize);
 
         // helper to align to nearest MB is nice but not required 
@@ -274,7 +276,7 @@ impl Uploader {
         let m_job_id = job_id;
         let m_file_size = file_size;
         let m_part_size = part_size;
-        let m_total_parts = (file_size as usize + part_size - 1) / part_size;
+        let m_total_parts = (file_size as usize).div_ceil(part_size);
 
         let monitor_handle = tokio::spawn(async move {
             let start_time = std::time::Instant::now();
@@ -306,13 +308,14 @@ impl Uploader {
                     parts_done, m_total_parts, part_size_display, elapsed_str);
                 
                 {
-                    let mut p = monitor_progress.lock().unwrap();
-                    p.insert(m_job_id, ProgressInfo { 
-                        percent: pct, 
-                        details, 
-                        parts_done: parts_done as usize,
-                        parts_total: m_total_parts,
-                    });
+                    if let Ok(mut p) = lock_mutex(&monitor_progress) {
+                        p.insert(m_job_id, ProgressInfo { 
+                            percent: pct, 
+                            details, 
+                            parts_done: parts_done as usize, 
+                            parts_total: m_total_parts
+                        });
+                    }
                 }
 
                 if n >= m_file_size as u64 {
@@ -336,7 +339,7 @@ impl Uploader {
             }
 
             // Check if part is already done
-            if completed_indices.contains(&(part_number as i32)) {
+            if completed_indices.contains(&part_number) {
                 use std::io::SeekFrom;
                 let current_pos = (part_number as u64 - 1) * part_size as u64;
                 file.seek(SeekFrom::Start(current_pos + part_size as u64)).await.unwrap_or(current_pos); 
@@ -348,7 +351,7 @@ impl Uploader {
             }
 
             // Acquire permit BEFORE reading to throttle memory usage
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let permit = semaphore.clone().acquire_owned().await.context("Semaphore closed")?;
 
             use std::io::SeekFrom;
             let offset = (part_number as u64 - 1) * (part_size as u64);
@@ -419,7 +422,7 @@ impl Uploader {
         // Monitor aborted AFTER complete to keep showing stats (likely 0)
         // Update details to "Finalizing"
         {
-            let mut p = progress.lock().unwrap();
+            let mut p = lock_mutex(&progress)?;
             if let Some(mut info) = p.get(&job_id).cloned() {
                 info.details = "Finalizing S3...".to_string();
                 p.insert(job_id, info);
@@ -427,7 +430,7 @@ impl Uploader {
         }
         
         // Sort parts by number (important for S3)
-        completed_parts.sort_by(|a, b| a.part_number().cmp(&b.part_number()));
+        completed_parts.sort_by_key(|a| a.part_number());
 
         // Complete Multipart Upload
         let completed_upload = CompletedMultipartUpload::builder()
@@ -447,10 +450,10 @@ impl Uploader {
 
         // Cleanup DB
         {
-             let mut p = progress.lock().unwrap();
+             let mut p = lock_mutex(&progress)?;
              p.remove(&job_id);
              // Optionally clear s3_upload_id from DB now that it's done? 
-             let conn = conn_mutex.lock().unwrap();
+             let conn = lock_mutex(&conn_mutex)?;
              // We can set it to NULL or keep it as record. 
              // Setting to NULL is good to indicate "done/no active upload".
              let _ = conn.execute("UPDATE jobs SET s3_upload_id = NULL WHERE id = ?", rusqlite::params![job_id]);

@@ -1,21 +1,20 @@
-mod config;
+mod app;
+mod components;
+mod core;
+mod services;
+mod ui;
 mod db;
-mod ingest;
-mod scanner;
-mod state;
+mod coordinator;
 mod tui;
-mod uploader;
-mod watch;
-mod theme;
-mod metrics;
+mod utils;
 
-use crate::state::Coordinator;
+use crate::coordinator::Coordinator;
+use crate::core::config;
+use crate::db::init_db;
 use anyhow::Result;
-use db::init_db;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
 use std::thread;
-
 use std::collections::HashMap;
 
 fn main() -> Result<()> {

@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::ingest::ingest_path;
+use crate::services::ingest::ingest_path;
 use notify::{Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher};
 use rusqlite::Connection;
 use std::path::PathBuf;

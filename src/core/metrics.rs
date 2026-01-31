@@ -62,7 +62,7 @@ impl MetricsCollector {
         let mut total_disk_read = 0;
         let mut total_disk_write = 0;
 
-        for (_pid, process) in self.sys.processes() {
+        for process in self.sys.processes().values() {
             let disk_usage = process.disk_usage();
             total_disk_read += disk_usage.read_bytes;
             total_disk_write += disk_usage.written_bytes;

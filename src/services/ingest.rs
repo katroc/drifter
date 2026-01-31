@@ -1,4 +1,4 @@
-use crate::config::StagingMode;
+use crate::core::config::StagingMode;
 use crate::db::{create_job, insert_event, update_job_error, update_job_staged};
 use anyhow::Result;
 use rusqlite::Connection;
@@ -96,10 +96,8 @@ fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
                 Ok(e) => e,
                 Err(_) => continue,
             };
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    stack.push(entry.path());
-                }
+            for entry in entries.flatten() {
+                stack.push(entry.path());
             }
         } else if metadata.is_file() {
             files.push(path);
