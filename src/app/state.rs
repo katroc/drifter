@@ -70,6 +70,8 @@ pub enum InputMode {
     LogSearch, // In Log Viewer Search
     Confirmation, // Modal
     LayoutAdjust, // Popout
+    QueueSearch,  // In Transfer Queue
+    HistorySearch, // In Job History
 }
 
 #[derive(Debug)]
@@ -158,6 +160,10 @@ pub struct App {
     pub log_search_query: String,
     pub log_search_results: Vec<usize>, // Indicies of matching lines
     pub log_search_current: usize, // Index in log_search_results
+
+    // Queue & History Search
+    pub queue_search_query: String,
+    pub history_search_query: String,
 
     // Visualization
     pub view_mode: ViewMode,
@@ -265,6 +271,9 @@ impl App {
             log_search_query: String::new(),
             log_search_results: Vec::new(),
             log_search_current: 0,
+
+            queue_search_query: String::new(),
+            history_search_query: String::new(),
         };
 
         // ClamAV checker thread
@@ -330,15 +339,36 @@ impl App {
     }
 
     pub fn rebuild_visual_lists(&mut self) {
-        self.visual_jobs = self.build_visual_list(&self.jobs);
-        self.visual_history = self.build_visual_list(&self.history);
+        let q_query = self.queue_search_query.to_lowercase();
+        self.visual_jobs = self.build_visual_list(&self.jobs, &q_query);
+        let h_query = self.history_search_query.to_lowercase();
+        self.visual_history = self.build_visual_list(&self.history, &h_query);
     }
 
-    pub fn build_visual_list(&self, jobs: &[JobRow]) -> Vec<VisualItem> {
+    pub fn build_visual_list(&self, jobs: &[JobRow], filter_query: &str) -> Vec<VisualItem> {
+        let filtered_jobs: Vec<(usize, &JobRow)> = if filter_query.is_empty() {
+            jobs.iter().enumerate().collect()
+        } else {
+            jobs.iter()
+                .enumerate()
+                .filter(|(_, job)| {
+                    job.source_path.to_lowercase().contains(filter_query) ||
+                    Path::new(&job.source_path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_lowercase().contains(filter_query))
+                        .unwrap_or(false)
+                })
+                .collect()
+        };
+
+        let (jobs_to_process, original_indices): (Vec<&JobRow>, Vec<usize>) = filtered_jobs
+            .iter()
+            .map(|(idx, job)| (*job, *idx))
+            .unzip();
+
         match self.view_mode {
             ViewMode::Flat => {
-                jobs.iter()
-                    .enumerate()
+                filtered_jobs.into_iter()
                     .map(|(i, job)| {
                         // Extract filename for display
                         let name = Path::new(&job.source_path)
@@ -357,13 +387,13 @@ impl App {
                     .collect()
             }
             ViewMode::Tree => {
-                if jobs.is_empty() {
+                if jobs_to_process.is_empty() {
                     return Vec::new();
                 }
 
                 // 1. Calculate Common Prefix
                 // We must scan ALL paths since we aren't sorting anymore.
-                let paths: Vec<&Path> = jobs.iter().map(|j| Path::new(&j.source_path)).collect();
+                let paths: Vec<&Path> = jobs_to_process.iter().map(|j| Path::new(&j.source_path)).collect();
                 let p0 = paths[0];
                 let mut common_components: Vec<_> = p0.components().collect();
 
@@ -386,7 +416,7 @@ impl App {
 
                 // If common prefix is exactly a file path (e.g. single file in list),
                 // we should start "view" at its parent folder to show structure.
-                let common_is_file = jobs
+                let common_is_file = jobs_to_process
                     .iter()
                     .any(|j| Path::new(&j.source_path) == common_path_buf);
 
@@ -434,8 +464,9 @@ impl App {
                     children: Vec::new(),
                     files: Vec::new(),
                 };
-
-                for (idx, job) in jobs.iter().enumerate() {
+                
+                for (it_idx, job) in jobs_to_process.iter().enumerate() {
+                    let _orig_idx = original_indices[it_idx];
                     let full_path = Path::new(&job.source_path);
                     let rel_path = full_path.strip_prefix(&base_path_buf).unwrap_or(full_path);
 
@@ -467,13 +498,16 @@ impl App {
                                     fn check_collision(
                                         node: &TreeNode,
                                         path: &[String],
-                                        jobs: &[JobRow],
+                                        jobs_to_process: &[&JobRow],
                                     ) -> bool {
                                         if path.len() == 1 {
                                             // Path is just [filename]. Check node.files.
                                             let filename = &path[0];
                                             for &f_idx in &node.files {
-                                                let f_path = &jobs[f_idx].source_path;
+                                                // index_in_jobs logic: f_idx is a relative index in the filtered list if Tree traversal uses it
+                                                // Actually, current implementation pushes `idx` from loop over `jobs_to_process`
+                                                // which is an index into `jobs_to_process`.
+                                                let f_path = &jobs_to_process[f_idx].source_path;
                                                 let f_name = std::path::Path::new(f_path)
                                                     .file_name()
                                                     .unwrap_or_default()
@@ -489,12 +523,12 @@ impl App {
                                         if let Some(child) =
                                             node.children.iter().find(|c| c.name == *next_dir)
                                         {
-                                            return check_collision(child, &path[1..], jobs);
+                                            return check_collision(child, &path[1..], jobs_to_process);
                                         }
                                         false
                                     }
 
-                                    if !check_collision(last, remaining_for_file, jobs) {
+                                    if !check_collision(last, remaining_for_file, &jobs_to_process) {
                                         should_merge = true;
                                     }
 
@@ -514,7 +548,7 @@ impl App {
                         }
                     }
 
-                    current.files.push(idx);
+                    current.files.push(it_idx);
                 }
 
                 // 4. Flatten Tree
@@ -523,7 +557,8 @@ impl App {
                     node: &TreeNode,
                     depth: usize,
                     items: &mut Vec<VisualItem>,
-                    jobs: &[JobRow],
+                    jobs_to_process: &[&JobRow],
+                    original_indices: &[usize],
                 ) {
                     // Helper to find first file in a node
                     fn find_any_file(node: &TreeNode) -> Option<usize> {
@@ -548,12 +583,13 @@ impl App {
                             depth,
                             first_job_index: first_job,
                         });
-                        flatten(child, depth + 1, items, jobs);
+                        flatten(child, depth + 1, items, jobs_to_process, original_indices);
                     }
 
-                    // Files
-                    for &idx in &node.files {
-                        let job = &jobs[idx];
+                    // Files (Relative to jobs_to_process)
+                    for &it_idx in &node.files {
+                        let job = jobs_to_process[it_idx];
+                        let orig_idx = original_indices[it_idx];
                         let filename = std::path::Path::new(&job.source_path)
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
@@ -561,7 +597,7 @@ impl App {
 
                         items.push(VisualItem {
                             text: filename,
-                            index_in_jobs: Some(idx),
+                            index_in_jobs: Some(orig_idx),
                             is_folder: false,
                             depth,
                             first_job_index: None,
@@ -569,7 +605,7 @@ impl App {
                     }
                 }
 
-                flatten(&root, 0, &mut items, jobs);
+                flatten(&root, 0, &mut items, &jobs_to_process, &original_indices);
                 items
             }
         }
@@ -592,7 +628,18 @@ impl App {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.is_parent || e.name.to_lowercase().contains(&filter))
+            .filter(|(_, e)| {
+                if e.is_parent { return true; }
+                let matches_name = e.name.to_lowercase().contains(&filter);
+                if self.picker.search_recursive {
+                    let rel_path = e.path.strip_prefix(&self.picker.cwd)
+                        .map(|p| p.to_string_lossy().to_lowercase())
+                        .unwrap_or_else(|_| e.name.to_lowercase());
+                    matches_name || rel_path.contains(&filter)
+                } else {
+                    matches_name
+                }
+            })
             .map(|(i, _)| i)
             .collect();
 
@@ -626,7 +673,18 @@ impl App {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.is_parent || e.name.to_lowercase().contains(&filter))
+            .filter(|(_, e)| {
+                if e.is_parent { return true; }
+                let matches_name = e.name.to_lowercase().contains(&filter);
+                if self.picker.search_recursive {
+                    let rel_path = e.path.strip_prefix(&self.picker.cwd)
+                        .map(|p| p.to_string_lossy().to_lowercase())
+                        .unwrap_or_else(|_| e.name.to_lowercase());
+                    matches_name || rel_path.contains(&filter)
+                } else {
+                    matches_name
+                }
+            })
             .map(|(i, _)| i)
             .collect();
 
@@ -660,7 +718,18 @@ impl App {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.is_parent || e.name.to_lowercase().contains(&filter))
+            .filter(|(_, e)| {
+                if e.is_parent { return true; }
+                let matches_name = e.name.to_lowercase().contains(&filter);
+                if self.picker.search_recursive {
+                    let rel_path = e.path.strip_prefix(&self.picker.cwd)
+                        .map(|p| p.to_string_lossy().to_lowercase())
+                        .unwrap_or_else(|_| e.name.to_lowercase());
+                    matches_name || rel_path.contains(&filter)
+                } else {
+                    matches_name
+                }
+            })
             .map(|(i, _)| i)
             .collect();
 

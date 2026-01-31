@@ -575,8 +575,22 @@ pub fn run_tui(
                                             app.picker.go_parent()
                                         }
                                         KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
-                                            if let Some(entry) = app.picker.selected_entry() {
-                                                if entry.is_dir {
+                                            if let Some(entry) = app.picker.selected_entry().cloned() {
+                                                if app.picker.is_searching && app.picker.search_recursive {
+                                                    // Jump to parent directory
+                                                    if let Some(parent) = entry.path.parent() {
+                                                        app.picker.try_set_cwd(parent.to_path_buf());
+                                                        app.input_buffer.clear();
+                                                        app.picker.is_searching = false;
+                                                        app.picker.refresh();
+                                                        
+                                                        // Find the index of the file we were just looking at
+                                                        if let Some(idx) = app.picker.entries.iter().position(|e| e.path == entry.path) {
+                                                            app.picker.selected = idx;
+                                                        }
+                                                        app.status_message = format!("Jumped to {}", parent.display());
+                                                    }
+                                                } else if entry.is_dir {
                                                     if app.picker.view == PickerView::Tree
                                                         && key.code == KeyCode::Right
                                                     {
@@ -665,7 +679,22 @@ pub fn run_tui(
                                         app.picker.search_recursive = false;
                                         app.picker.refresh();
                                     }
-                                    KeyCode::Enter => {
+                                    KeyCode::Enter | KeyCode::Right => {
+                                        if app.picker.search_recursive {
+                                            if let Some(entry) = app.picker.selected_entry().cloned() {
+                                                if let Some(parent) = entry.path.parent() {
+                                                    app.picker.try_set_cwd(parent.to_path_buf());
+                                                    app.input_buffer.clear();
+                                                    app.picker.is_searching = false;
+                                                    app.picker.refresh();
+                                                    
+                                                    if let Some(idx) = app.picker.entries.iter().position(|e| e.path == entry.path) {
+                                                        app.picker.selected = idx;
+                                                    }
+                                                    app.status_message = format!("Jumped to {}", parent.display());
+                                                }
+                                            }
+                                        }
                                         app.input_mode = InputMode::Browsing;
                                     }
                                     KeyCode::Up => app.browser_move_up(),
@@ -688,160 +717,221 @@ pub fn run_tui(
                                     }
                                     _ => {}
                                 },
-                                InputMode::LogSearch => {}
-                                InputMode::Confirmation => {}
                                 InputMode::LayoutAdjust => {},
+                                InputMode::LogSearch | InputMode::Confirmation | InputMode::QueueSearch | InputMode::HistorySearch => {},
 
                             }
                         }
                         AppFocus::Queue => {
-                            match key.code {
-                                KeyCode::Up | KeyCode::Char('k') => {
-                                    if app.selected > 0 {
-                                        app.selected -= 1;
-                                    }
-                                }
-                                KeyCode::Down | KeyCode::Char('j') => {
-                                    if app.selected + 1 < app.visual_jobs.len() {
-                                        app.selected += 1;
-                                    }
-                                }
-                                KeyCode::Char('t') => {
-                                    app.view_mode = match app.view_mode {
-                                        ViewMode::Flat => ViewMode::Tree,
-                                        ViewMode::Tree => ViewMode::Flat,
-                                    };
-                                    app.status_message =
-                                        format!("Switched to {:?} View", app.view_mode);
-                                    let conn = lock_mutex(&conn_mutex)?;
-                                    let _ = app.refresh_jobs(&conn);
-                                }
-                                KeyCode::Char('R') => {
-                                    let conn = lock_mutex(&conn_mutex)?;
-                                    let _ = app.refresh_jobs(&conn);
-                                }
-                                KeyCode::Char('r') => {
-                                    if !app.visual_jobs.is_empty()
-                                        && app.selected < app.visual_jobs.len()
-                                        && let Some(idx) = app.visual_jobs[app.selected].index_in_jobs
-                                    {
-                                            let id = app.jobs[idx].id;
-                                            let conn = lock_mutex(&conn_mutex)?;
-                                            let _ = crate::db::retry_job(&conn, id);
-                                            app.status_message = format!("Retried job {}", id);
-                                        }
-
-                                }
-                                KeyCode::Char('d') | KeyCode::Delete => {
-                                    if !app.visual_jobs.is_empty()
-                                        && app.selected < app.visual_jobs.len()
-                                        && let Some(idx) = app.visual_jobs[app.selected].index_in_jobs
-                                    {
-                                            let job = &app.jobs[idx];
-                                            let id = job.id;
-                                            let is_active = job.status == "uploading"
-                                                || job.status == "scanning"
-                                                || job.status == "pending"
-                                                || job.status == "queued";
-
-                                            if is_active {
-                                                // Require confirmation
-                                                app.pending_action = ModalAction::CancelJob(id);
-                                                app.confirmation_msg =
-                                                    format!("Cancel active job #{}? (y/n)", id);
-                                                app.input_mode = InputMode::Confirmation;
-                                            } else {
-                                                // Just do it (Soft delete/Cancel)
-                                                let conn = lock_mutex(&conn_mutex)?;
-                                                let _ = crate::db::cancel_job(&conn, id);
-                                                app.status_message = format!("Removed job {}", id);
-                                                let _ = app.refresh_jobs(&conn);
-                                                // Selection adjustment happens in refresh_jobs (auto-fix) or we can decrement if at end
-                                                // But standard behavior is fine.
+                            match app.input_mode {
+                                InputMode::Normal => {
+                                    match key.code {
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                            if app.selected > 0 {
+                                                app.selected -= 1;
                                             }
                                         }
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                            if app.selected + 1 < app.visual_jobs.len() {
+                                                app.selected += 1;
+                                            }
+                                        }
+                                        KeyCode::Char('t') => {
+                                            app.view_mode = match app.view_mode {
+                                                ViewMode::Flat => ViewMode::Tree,
+                                                ViewMode::Tree => ViewMode::Flat,
+                                            };
+                                            app.status_message =
+                                                format!("Switched to {:?} View", app.view_mode);
+                                            let conn = lock_mutex(&conn_mutex)?;
+                                            let _ = app.refresh_jobs(&conn);
+                                        }
+                                        KeyCode::Char('/') => {
+                                            app.input_mode = InputMode::QueueSearch;
+                                            app.queue_search_query.clear();
+                                            app.status_message = "Search queue...".to_string();
+                                        }
+                                        KeyCode::Char('R') => {
+                                            let conn = lock_mutex(&conn_mutex)?;
+                                            let _ = app.refresh_jobs(&conn);
+                                        }
+                                        KeyCode::Char('r') => {
+                                            if !app.visual_jobs.is_empty()
+                                                && app.selected < app.visual_jobs.len()
+                                                && let Some(idx) = app.visual_jobs[app.selected].index_in_jobs
+                                            {
+                                                    let id = app.jobs[idx].id;
+                                                    let conn = lock_mutex(&conn_mutex)?;
+                                                    let _ = crate::db::retry_job(&conn, id);
+                                                    app.status_message = format!("Retried job {}", id);
+                                                }
+                                        }
+                                        KeyCode::Char('d') | KeyCode::Delete => {
+                                            if !app.visual_jobs.is_empty()
+                                                && app.selected < app.visual_jobs.len()
+                                                && let Some(idx) = app.visual_jobs[app.selected].index_in_jobs
+                                            {
+                                                    let job = &app.jobs[idx];
+                                                    let id = job.id;
+                                                    let is_active = job.status == "uploading"
+                                                        || job.status == "scanning"
+                                                        || job.status == "pending"
+                                                        || job.status == "queued";
 
-                                }
-                                KeyCode::Char('c') => {
-                                    // Clear all completed jobs
-                                    let conn = lock_mutex(&conn_mutex)?;
-                                    let ids_to_delete: Vec<i64> = app
-                                        .jobs
-                                        .iter()
-                                        .filter(|j| j.status == "complete")
-                                        .map(|j| j.id)
-                                        .collect();
-                                    let count = ids_to_delete.len();
-                                    for id in ids_to_delete {
-                                        let _ = crate::db::delete_job(&conn, id);
+                                                    if is_active {
+                                                        // Require confirmation
+                                                        app.pending_action = ModalAction::CancelJob(id);
+                                                        app.confirmation_msg =
+                                                            format!("Cancel active job #{}? (y/n)", id);
+                                                        app.input_mode = InputMode::Confirmation;
+                                                    } else {
+                                                        // Just do it (Soft delete/Cancel)
+                                                        let conn = lock_mutex(&conn_mutex)?;
+                                                        let _ = crate::db::cancel_job(&conn, id);
+                                                        app.status_message = format!("Removed job {}", id);
+                                                        let _ = app.refresh_jobs(&conn);
+                                                    }
+                                                }
+                                        }
+                                        KeyCode::Char('c') => {
+                                            // Clear all completed jobs
+                                            let conn = lock_mutex(&conn_mutex)?;
+                                            let ids_to_delete: Vec<i64> = app
+                                                .jobs
+                                                .iter()
+                                                .filter(|j| j.status == "complete")
+                                                .map(|j| j.id)
+                                                .collect();
+                                            let count = ids_to_delete.len();
+                                            for id in ids_to_delete {
+                                                let _ = crate::db::delete_job(&conn, id);
+                                            }
+                                            if count > 0 {
+                                                app.status_message =
+                                                    format!("Cleared {} completed jobs", count);
+                                                let _ = app.refresh_jobs(&conn);
+                                            }
+                                        }
+                                        _ => {}
                                     }
-                                    if count > 0 {
-                                        app.status_message =
-                                            format!("Cleared {} completed jobs", count);
-                                        let _ = app.refresh_jobs(&conn);
+                                }
+                                InputMode::QueueSearch => {
+                                    match key.code {
+                                        KeyCode::Esc | KeyCode::Enter => {
+                                            app.input_mode = InputMode::Normal;
+                                        }
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                             if app.selected > 0 { app.selected -= 1; }
+                                        }
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                             if app.selected + 1 < app.visual_jobs.len() { app.selected += 1; }
+                                        }
+                                        KeyCode::Backspace => {
+                                            app.queue_search_query.pop();
+                                            app.rebuild_visual_lists();
+                                        }
+                                        KeyCode::Char(c) => {
+                                            app.queue_search_query.push(c);
+                                            app.rebuild_visual_lists();
+                                        }
+                                        _ => {}
                                     }
                                 }
                                 _ => {}
                             }
                         }
                         AppFocus::History => {
-                            match key.code {
-                                KeyCode::Up | KeyCode::Char('k') => {
-                                    if app.selected_history > 0 {
-                                        app.selected_history -= 1;
-                                    }
-                                }
-                                KeyCode::Down | KeyCode::Char('j') => {
-                                    if app.selected_history + 1 < app.visual_history.len() {
-                                        app.selected_history += 1;
-                                    }
-                                }
-                                KeyCode::Char('t') => {
-                                    app.view_mode = match app.view_mode {
-                                        ViewMode::Flat => ViewMode::Tree,
-                                        ViewMode::Tree => ViewMode::Flat,
-                                    };
-                                    let conn = lock_mutex(&conn_mutex)?;
-                                    let _ = app.refresh_jobs(&conn);
-                                }
-                                KeyCode::Char('f') => {
-                                    app.history_filter = app.history_filter.next();
-                                    app.selected_history = 0; // Reset selection
-                                    app.status_message =
-                                        format!("History Filter: {}", app.history_filter.as_str());
-                                    let conn = lock_mutex(&conn_mutex)?;
-                                    let _ = app.refresh_jobs(&conn);
-                                }
-                                KeyCode::Char('c') => {
-                                    // Trigger confirmation logic for History
-                                    app.input_mode = InputMode::Confirmation;
-                                    app.pending_action = ModalAction::ClearHistory;
-                                    app.confirmation_msg = format!(
-                                        "Clear {} history entries? This cannot be undone.",
-                                        match app.history_filter {
-                                            HistoryFilter::All => "ALL",
-                                            HistoryFilter::Complete => "completed",
-                                            HistoryFilter::Quarantined => "quarantined",
+                            match app.input_mode {
+                                InputMode::Normal => {
+                                    match key.code {
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                            if app.selected_history > 0 {
+                                                app.selected_history -= 1;
+                                            }
                                         }
-                                    );
-                                }
-                                KeyCode::Char('d') | KeyCode::Delete => {
-                                    if !app.visual_history.is_empty()
-                                        && app.selected_history < app.visual_history.len()
-                                        && let Some(idx) = app.visual_history[app.selected_history].index_in_jobs
-                                    {
-                                            let job = &app.history[idx];
-                                            let id = job.id;
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                            if app.selected_history + 1 < app.visual_history.len() {
+                                                app.selected_history += 1;
+                                            }
+                                        }
+                                        KeyCode::Char('t') => {
+                                            app.view_mode = match app.view_mode {
+                                                ViewMode::Flat => ViewMode::Tree,
+                                                ViewMode::Tree => ViewMode::Flat,
+                                            };
                                             let conn = lock_mutex(&conn_mutex)?;
-                                            let _ = crate::db::delete_job(&conn, id);
                                             let _ = app.refresh_jobs(&conn);
-                                            // Auto-fix happens in refresh_jobs
+                                        }
+                                        KeyCode::Char('/') => {
+                                            app.input_mode = InputMode::HistorySearch;
+                                            app.history_search_query.clear();
+                                            app.status_message = "Search history...".to_string();
+                                        }
+                                        KeyCode::Char('f') => {
+                                            app.history_filter = app.history_filter.next();
+                                            app.selected_history = 0; // Reset selection
+                                            app.status_message = format!(
+                                                "History Filter: {}",
+                                                app.history_filter.as_str()
+                                            );
+                                            let conn = lock_mutex(&conn_mutex)?;
+                                            let _ = app.refresh_jobs(&conn);
+                                        }
+                                        KeyCode::Char('c') => {
+                                            // Trigger confirmation logic for History
+                                            app.input_mode = InputMode::Confirmation;
+                                            app.pending_action = ModalAction::ClearHistory;
+                                            app.confirmation_msg = format!(
+                                                "Clear {} history entries? This cannot be undone.",
+                                                match app.history_filter {
+                                                    HistoryFilter::All => "ALL",
+                                                    HistoryFilter::Complete => "completed",
+                                                    HistoryFilter::Quarantined => "quarantined",
+                                                }
+                                            );
+                                        }
+                                        KeyCode::Char('d') | KeyCode::Delete => {
+                                            if !app.visual_history.is_empty()
+                                                && app.selected_history < app.visual_history.len()
+                                                && let Some(idx) = app.visual_history[app.selected_history].index_in_jobs
+                                            {
+                                                    let job = &app.history[idx];
+                                                    let id = job.id;
+                                                    let conn = lock_mutex(&conn_mutex)?;
+                                                    let _ = crate::db::delete_job(&conn, id);
+                                                    let _ = app.refresh_jobs(&conn);
+                                                    // Auto-fix happens in refresh_jobs
 
+                                            }
+                                        }
+                                        KeyCode::Char('R') => {
+                                            let conn = lock_mutex(&conn_mutex)?;
+                                            let _ = app.refresh_jobs(&conn);
+                                        }
+                                        _ => {}
                                     }
                                 }
-                                KeyCode::Char('R') => {
-                                    let conn = lock_mutex(&conn_mutex)?;
-                                    let _ = app.refresh_jobs(&conn);
+                                InputMode::HistorySearch => {
+                                    match key.code {
+                                        KeyCode::Esc | KeyCode::Enter => {
+                                            app.input_mode = InputMode::Normal;
+                                        }
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                             if app.selected_history > 0 { app.selected_history -= 1; }
+                                        }
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                             if app.selected_history + 1 < app.visual_history.len() { app.selected_history += 1; }
+                                        }
+                                        KeyCode::Backspace => {
+                                            app.history_search_query.pop();
+                                            app.rebuild_visual_lists();
+                                        }
+                                        KeyCode::Char(c) => {
+                                            app.history_search_query.push(c);
+                                            app.rebuild_visual_lists();
+                                        }
+                                        _ => {}
+                                    }
                                 }
                                 _ => {}
                             }

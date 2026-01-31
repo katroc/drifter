@@ -187,6 +187,8 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
         InputMode::Confirmation => " Hopper ",
         InputMode::LayoutAdjust => " Layout ",
         InputMode::LogSearch => " Search ",
+        InputMode::QueueSearch => " Queue (Search) ",
+        InputMode::HistorySearch => " History (Search) ",
     };
 
     let block = Block::default()
@@ -258,7 +260,26 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
         .entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.is_parent || filter.is_empty() || fuzzy_match(&filter, &e.name))
+        .filter(|(_, e)| {
+            if e.is_parent {
+                return true;
+            }
+            if filter.is_empty() {
+                return true;
+            }
+            
+            if fuzzy_match(&filter, &e.name) {
+                return true;
+            }
+            
+            if app.picker.search_recursive {
+                if let Ok(rel_path) = e.path.strip_prefix(&app.picker.cwd) {
+                    return fuzzy_match(&filter, &rel_path.to_string_lossy());
+                }
+            }
+            
+            false
+        })
         .collect();
 
     let total_rows = filtered_entries.len();
@@ -295,8 +316,18 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
                 ""
             };
 
+            let display_name = if app.picker.search_recursive && app.picker.is_searching {
+                if let Ok(rel_path) = entry.path.strip_prefix(&app.picker.cwd) {
+                    rel_path.to_string_lossy().to_string()
+                } else {
+                    entry.name.clone()
+                }
+            } else {
+                entry.name.clone()
+            };
+
             let name_styled =
-                format!("{}{}{}", "  ".repeat(entry.depth), expand, prefix) + &entry.name;
+                format!("{}{}{}", "  ".repeat(entry.depth), expand, prefix) + &display_name;
             let size_str = if entry.is_dir {
                 "-".to_string()
             } else {
@@ -361,8 +392,37 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
         .style(app.theme.header_style())
         .height(1);
 
+    let inner_area = Block::default()
+        .borders(Borders::ALL)
+        .inner(area);
+
+    let has_filter = !app.queue_search_query.is_empty() || app.input_mode == InputMode::QueueSearch;
+    
+    if has_filter {
+        let filter_line = Line::from(vec![
+            Span::styled(" 🔍 Filter: ", app.theme.muted_style()),
+            Span::styled(&app.queue_search_query, app.theme.accent_style()),
+            Span::styled(
+                if app.input_mode == InputMode::QueueSearch { " █" } else { "" },
+                app.theme.accent_style(),
+            ),
+        ]);
+        let filter_area = Rect::new(inner_area.x, inner_area.y, inner_area.width, 1);
+        f.render_widget(Paragraph::new(filter_line), filter_area);
+    }
+
+    let table_area = Rect::new(
+        inner_area.x,
+        inner_area.y + if has_filter { 1 } else { 0 },
+        inner_area.width,
+        inner_area.height.saturating_sub(if has_filter { 1 } else { 0 }),
+    );
+
     let total_rows = app.visual_jobs.len();
-    let display_height = area.height.saturating_sub(4) as usize; // Border + Header
+    let display_height = table_area.height.saturating_sub(2) as usize; // Header + 1 padding for table border?
+    // Actually, Ratatui Table.block handles its own border. 
+    // Wait, draw_jobs currently defines its own header row and creates a Table.
+    
     let offset = calculate_list_offset(app.selected, total_rows, display_height);
 
     let rows = app
@@ -461,6 +521,15 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
             }
         });
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(app.theme.border_type)
+        .title(" Queue (Jobs) ")
+        .border_style(focus_style)
+        .style(app.theme.panel_style());
+
+    f.render_widget(block, area);
+
     let table = Table::new(
         rows,
         [
@@ -471,17 +540,9 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(10),
         ],
     )
-    .header(header)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(app.theme.border_type)
-            .title(" Queue (Jobs) ")
-            .border_style(focus_style)
-            .style(app.theme.panel_style()),
-    );
+    .header(header);
 
-    f.render_widget(table, area);
+    f.render_widget(table, table_area);
 }
 
 fn draw_history(f: &mut Frame, app: &App, area: Rect) {
@@ -498,8 +559,45 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
         .style(app.theme.header_style())
         .height(1);
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(app.theme.border_type)
+        .title(format!(" History [{}] ", app.history_filter.as_str()))
+        .border_style(focus_style)
+        .style(app.theme.panel_style());
+
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    let has_filter =
+        !app.history_search_query.is_empty() || app.input_mode == InputMode::HistorySearch;
+
+    if has_filter {
+        let filter_line = Line::from(vec![
+            Span::styled(" 🔍 Filter: ", app.theme.muted_style()),
+            Span::styled(&app.history_search_query, app.theme.accent_style()),
+            Span::styled(
+                if app.input_mode == InputMode::HistorySearch {
+                    " █"
+                } else {
+                    ""
+                },
+                app.theme.accent_style(),
+            ),
+        ]);
+        let filter_area = Rect::new(inner_area.x, inner_area.y, inner_area.width, 1);
+        f.render_widget(Paragraph::new(filter_line), filter_area);
+    }
+
+    let table_area = Rect::new(
+        inner_area.x,
+        inner_area.y + if has_filter { 1 } else { 0 },
+        inner_area.width,
+        inner_area.height.saturating_sub(if has_filter { 1 } else { 0 }),
+    );
+
     let total_rows = app.visual_history.len();
-    let display_height = area.height.saturating_sub(4) as usize; 
+    let display_height = table_area.height.saturating_sub(2) as usize; // Header + 1 padding?
     let offset = calculate_list_offset(app.selected_history, total_rows, display_height);
 
     let rows = app
@@ -571,8 +669,6 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
             }
         });
 
-    let title = format!(" History [{}] ", app.history_filter.as_str());
-
     let table = Table::new(
         rows,
         [
@@ -582,17 +678,9 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(10),
         ],
     )
-    .header(header)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(app.theme.border_type)
-            .title(title)
-            .border_style(focus_style)
-            .style(app.theme.panel_style()),
-    );
+    .header(header);
 
-    f.render_widget(table, area);
+    f.render_widget(table, table_area);
 }
 
 fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRow) {
@@ -1258,6 +1346,13 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         InputMode::LogSearch => vec![
             key("Enter"), act("Search"), sep(),
             key("Esc"), act("Cancel"),
+        ],
+        InputMode::QueueSearch | InputMode::HistorySearch => vec![
+            key("Type"),
+            act("to filter"),
+            sep(),
+            key("Enter/Esc"),
+            act("Done"),
         ],
         InputMode::Filter => vec![
             key("Type"),

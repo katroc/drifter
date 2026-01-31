@@ -196,37 +196,39 @@ impl FilePicker {
     fn load_dir_recursive(&self, path: &Path) -> Result<Vec<FileEntry>> {
         let mut entries = Vec::new();
         let mut stack = vec![(path.to_path_buf(), 0)];
-        let max_files = 5000;
-        let max_depth = 10;
+        let max_files = 20000;
+        let max_depth = 20;
+
+        let skip_dirs = ["node_modules", ".git"];
 
         while let Some((curr_path, depth)) = stack.pop() {
             if entries.len() >= max_files || depth > max_depth {
                 continue;
             }
 
-            if let Ok(dir_entries) = fs::read_dir(curr_path) {
+            if let Ok(dir_entries) = fs::read_dir(&curr_path) {
                 for entry in dir_entries.flatten() {
-                        let p = entry.path();
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let metadata = fs::metadata(&p).ok();
-                        let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
-                        let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
-                        let modified = metadata.and_then(|m| m.modified().ok());
+                    let p = entry.path();
+                    let name = entry.file_name().to_string_lossy().to_string();
 
-                        entries.push(FileEntry {
-                            name,
-                            path: p.clone(),
-                            is_dir,
-                            is_parent: false,
-                            depth,
-                            size,
-                            modified,
-                        });
+                    let metadata = fs::metadata(&p).ok();
+                    let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                    let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                    let modified = metadata.and_then(|m| m.modified().ok());
 
-                        if is_dir {
-                            stack.push((p, depth + 1));
-                        }
+                    entries.push(FileEntry {
+                        name: name.clone(),
+                        path: p.clone(),
+                        is_dir,
+                        is_parent: false,
+                        depth,
+                        size,
+                        modified,
+                    });
 
+                    if is_dir && !skip_dirs.contains(&name.as_str()) {
+                        stack.push((p, depth + 1));
+                    }
                 }
             }
         }

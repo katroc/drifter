@@ -143,19 +143,7 @@ pub fn fuzzy_match(pattern: &str, text: &str) -> bool {
     }
     let pattern = pattern.to_lowercase();
     let text = text.to_lowercase();
-    let mut pattern_chars = pattern.chars();
-    let mut current_char = pattern_chars.next();
-
-    for c in text.chars() {
-        if let Some(p) = current_char {
-            if c == p {
-                current_char = pattern_chars.next();
-            }
-        } else {
-            return true;
-        }
-    }
-    current_char.is_none()
+    text.contains(&pattern)
 }
 
 pub fn status_kind(status: &str) -> StatusKind {
