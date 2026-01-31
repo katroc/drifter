@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use std::time::{Duration, Instant};
@@ -12,6 +12,7 @@ use crate::components::wizard::WizardState;
 use crate::core::config::Config;
 use crate::core::metrics::{MetricsCollector, HostMetricsSnapshot};
 use crate::app::settings::SettingsState;
+use crate::services::uploader::S3Object;
 use crate::utils::lock_mutex;
 use crate::ui::theme::Theme;
 use crate::services::watch::Watcher;
@@ -20,6 +21,8 @@ use crate::services::watch::Watcher;
 pub enum AppTab {
     Transfers,
     Quarantine,
+    Remote,
+    Logs,
     Settings,
 }
 
@@ -30,15 +33,18 @@ pub enum AppFocus {
     Queue,   // Only in Transfers tab
     History,
     Quarantine,       // Only in Quarantine tab
+    Remote,           // Only in Remote tab
+    Logs,             // Only in Logs tab
     SettingsCategory, // Switch categories
     SettingsFields,   // Edit fields
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModalAction {
     None,
     ClearHistory,
     CancelJob(i64),
+    DeleteRemoteObject(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,10 +65,18 @@ pub struct VisualItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
-    Browsing, // Actively navigating in Hopper
-    Filter,
-    Confirmation,
-    LayoutAdjust,
+    Browsing, // In File Picker
+    Filter,   // In File Picker Filter
+    LogSearch, // In Log Viewer Search
+    Confirmation, // Modal
+    LayoutAdjust, // Popout
+}
+
+#[derive(Debug)]
+pub enum AppEvent {
+    Notification(String),
+    RemoteFileList(Vec<S3Object>),
+    LogLine(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +127,10 @@ pub struct App {
     pub selected_history: usize,
     pub quarantine: Vec<JobRow>,
     pub selected_quarantine: usize,
+    
+    pub s3_objects: Vec<S3Object>,
+    pub selected_remote: usize,
+
     pub last_refresh: Instant,
     pub status_message: String,
     pub input_mode: InputMode,
@@ -132,14 +150,23 @@ pub struct App {
     pub progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
     pub cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
 
+    // Logs
+    pub logs: VecDeque<String>,
+    pub logs_scroll: usize,
+    pub logs_stick_to_bottom: bool,
+    pub log_search_active: bool,
+    pub log_search_query: String,
+    pub log_search_results: Vec<usize>, // Indicies of matching lines
+    pub log_search_current: usize, // Index in log_search_results
+
     // Visualization
     pub view_mode: ViewMode,
     pub visual_jobs: Vec<VisualItem>,
     pub visual_history: Vec<VisualItem>,
 
     // Async feedback channel
-    pub async_rx: mpsc::Receiver<String>,
-    pub async_tx: mpsc::Sender<String>,
+    pub async_rx: mpsc::Receiver<AppEvent>,
+    pub async_tx: mpsc::Sender<AppEvent>,
     // Wizard
     pub show_wizard: bool,
     pub wizard: WizardState,
@@ -189,6 +216,10 @@ impl App {
             selected: 0,
             selected_history: 0,
             selected_quarantine: 0,
+            
+            s3_objects: Vec::new(),
+            selected_remote: 0,
+            
             last_refresh: Instant::now() - Duration::from_secs(5),
             status_message: "Ready".to_string(),
             input_mode: InputMode::Normal,
@@ -226,6 +257,14 @@ impl App {
             last_click_pos: None,
             layout_adjust_target: None,
             layout_adjust_message: String::new(),
+
+            logs: VecDeque::new(),
+            logs_scroll: 0,
+            logs_stick_to_bottom: true,
+            log_search_active: false,
+            log_search_query: String::new(),
+            log_search_results: Vec::new(),
+            log_search_current: 0,
         };
 
         // ClamAV checker thread

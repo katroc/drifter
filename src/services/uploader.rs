@@ -25,6 +25,15 @@ impl Drop for TaskGuard {
     }
 }
 
+
+
+#[derive(Debug, Clone)]
+pub struct S3Object {
+    pub key: String,
+    pub size: i64,
+    pub last_modified: String,
+}
+
 pub struct Uploader {}
 
 impl Uploader {
@@ -32,11 +41,16 @@ impl Uploader {
         Self {}
     }
 
-    pub async fn check_connection(config: &Config) -> Result<String> {
+    async fn create_client(config: &Config) -> Result<(Client, String)> {
+        let bucket = config.s3_bucket.as_deref().unwrap_or_default();
         let region = config.s3_region.as_deref().unwrap_or("us-east-1").trim();
         let endpoint = config.s3_endpoint.as_deref();
         let access_key = config.s3_access_key.as_deref().map(|s| s.trim());
         let secret_key = config.s3_secret_key.as_deref().map(|s| s.trim());
+
+        if bucket.is_empty() {
+             return Err(anyhow::anyhow!("S3 bucket not configured"));
+        }
 
         #[allow(deprecated)]
         let mut config_loader = aws_config::from_env().region(aws_config::Region::new(region.to_string()));
@@ -45,7 +59,7 @@ impl Uploader {
              let creds = Credentials::new(ak.to_string(), sk.to_string(), None, None, "static");
              config_loader = config_loader.credentials_provider(SharedCredentialsProvider::new(creds));
         } else if access_key.is_some() || secret_key.is_some() {
-             return Err(anyhow::anyhow!("Credentials incomplete"));
+             return Err(anyhow::anyhow!("S3 Credentials incomplete: Both Access Key and Secret Key must be provided."));
         }
 
         let sdk_config = config_loader.load().await;
@@ -55,20 +69,105 @@ impl Uploader {
              client_builder = client_builder.endpoint_url(endpoint).force_path_style(true);
         }
         let client = Client::from_conf(client_builder.build());
+        Ok((client, bucket.to_string()))
+    }
 
-        // Try ListBuckets first
-        match client.list_buckets().send().await {
-            Ok(_) => Ok("Connected to S3 successfully (ListBuckets OK)".to_string()),
-            Err(e) => {
-                // If ListBuckets fails (e.g. permission), try HeadBucket if we have a bucket name
-                if let Some(bucket) = config.s3_bucket.as_deref() {
-                     match client.head_bucket().bucket(bucket).send().await {
-                         Ok(_) => Ok(format!("Connected to S3 successfully (Access to '{}' confirmed)", bucket)),
-                         Err(_) => Err(anyhow::anyhow!("S3 Connection Failed: {}", e))
-                     }
-                } else {
-                    Err(anyhow::anyhow!("S3 Connection Failed: {}", e))
+    pub async fn list_bucket_contents(config: &Config, prefix_filter: Option<&str>) -> Result<Vec<S3Object>> {
+        let (client, bucket) = Self::create_client(config).await?;
+        
+        let prefix = config.s3_prefix.as_deref().unwrap_or("");
+        // Combine config prefix with UI search filter if any? 
+        // For now, let's just use the config prefix as the base.
+        // User might want to browse different folders? 
+        // We will list everything under the configured prefix.
+        
+        let mut objects = Vec::new();
+        let mut continuation_token = None;
+
+        loop {
+            let mut req = client.list_objects_v2().bucket(&bucket);
+            if !prefix.is_empty() {
+                req = req.prefix(prefix);
+            }
+            if let Some(token) = continuation_token {
+                req = req.continuation_token(token);
+            }
+
+            let resp = req.send().await.context("Failed to list objects")?;
+            
+            let is_truncated = resp.is_truncated().unwrap_or(false);
+            let next_token = resp.next_continuation_token.clone();
+
+            if let Some(contents) = resp.contents {
+                for obj in contents {
+                    let key = obj.key().unwrap_or("").to_string();
+                    let size = obj.size().unwrap_or(0);
+                    let last_modified = obj.last_modified()
+                        .map(|d| d.to_string()) // Simplified date
+                        .unwrap_or_default();
+                    
+                    // Filter by user provided prefix/search if needed
+                    if let Some(filter) = prefix_filter {
+                        if !key.contains(filter) {
+                            continue;
+                        }
+                    }
+
+                    objects.push(S3Object {
+                        key,
+                        size,
+                        last_modified,
+                    });
                 }
+            }
+
+            if is_truncated {
+                continuation_token = next_token.map(|s| s.to_string());
+            } else {
+                break;
+            }
+        }
+        
+        Ok(objects)
+    }
+
+    pub async fn download_file(config: &Config, key: &str, dest: &Path) -> Result<()> {
+        let (client, bucket) = Self::create_client(config).await?;
+        
+        let resp = client.get_object().bucket(&bucket).key(key).send().await
+            .context("Failed to get object")?;
+            
+        let mut body = resp.body.into_async_read();
+        let mut file = tokio::fs::File::create(dest).await.context("Failed to create local file")?;
+        
+        tokio::io::copy(&mut body, &mut file).await.context("Failed to write to file")?;
+        Ok(())
+    }
+
+    pub async fn delete_file(config: &Config, key: &str) -> Result<()> {
+        let (client, bucket) = Self::create_client(config).await?;
+        
+        client.delete_object().bucket(&bucket).key(key).send().await
+            .context("Failed to delete object")?;
+        Ok(())
+    }
+
+    pub async fn check_connection(config: &Config) -> Result<String> {
+        // Use helper, but construct customized error messages?
+        // create_client checks basic config/creds.
+        let (client, bucket) = match Self::create_client(config).await {
+            Ok(c) => c,
+            Err(e) => return Err(e),
+        };
+
+        match client.list_buckets().send().await {
+            Ok(_) => Ok(format!("Connected to S3 successfully (Bucket: {})", bucket)),
+             Err(e) => {
+                // Try HeadBucket
+                 match client.head_bucket().bucket(&bucket).send().await {
+                     Ok(_) => Ok(format!("Connected to S3 successfully (Access to '{}' confirmed)", bucket)),
+                     Err(_) => Err(anyhow::anyhow!("S3 Connection Failed: {}", e))
+                 }
             }
         }
     }
@@ -84,54 +183,11 @@ impl Uploader {
         initial_upload_id: Option<String>,
         cancellation_token: Arc<AtomicBool>,
     ) -> Result<bool> {
-        let bucket = config.s3_bucket.as_deref().unwrap_or_default();
+        let (client, bucket) = Self::create_client(config).await?;
         let prefix = config.s3_prefix.as_deref().unwrap_or_default();
-        let region = config.s3_region.as_deref().unwrap_or("us-east-1").trim();
-        let endpoint = config.s3_endpoint.as_deref();
-        let access_key = config.s3_access_key.as_deref().map(|s| s.trim());
-        let secret_key = config.s3_secret_key.as_deref().map(|s| s.trim());
         let concurrency = config.concurrency_parts_per_file.max(1);
+        // create_client already checks bucket
 
-        // Notify UI of connection phase
-        {
-            let mut p = lock_mutex(&progress)?;
-            p.insert(job_id, ProgressInfo { 
-                percent: -1.0, 
-                details: "Connecting to S3...".to_string(),
-                parts_done: 0,
-                parts_total: 0,
-            });
-        }
-
-        if bucket.is_empty() {
-             return Err(anyhow::anyhow!("S3 bucket not configured"));
-        }
-
-        // Initialize Client
-        #[allow(deprecated)]
-        let mut config_loader = aws_config::from_env().region(aws_config::Region::new(region.to_string()));
-        
-        if let (Some(ak), Some(sk)) = (access_key, secret_key) {
-             let creds = Credentials::new(
-                 ak.to_string(),
-                 sk.to_string(),
-                 None,
-                 None,
-                 "static"
-             );
-             config_loader = config_loader.credentials_provider(SharedCredentialsProvider::new(creds));
-        } else if access_key.is_some() || secret_key.is_some() {
-             return Err(anyhow::anyhow!("S3 Credentials incomplete: Both Access Key and Secret Key must be provided. (Check if Secret Key is saved in Settings)"));
-        }
-
-        let sdk_config = config_loader.load().await;
-        
-        // Re-creating the client builder to properly set endpoint if needed
-        let mut client_builder = aws_sdk_s3::config::Builder::from(&sdk_config);
-        if let Some(endpoint) = endpoint {
-             client_builder = client_builder.endpoint_url(endpoint).force_path_style(true);
-        }
-        let client = Client::from_conf(client_builder.build());
 
         let file_path = Path::new(path);
         
@@ -178,7 +234,7 @@ impl Uploader {
 
             // List existing parts
             let list_parts_output = client.list_parts()
-                .bucket(bucket)
+                .bucket(&bucket)
                 .key(&key)
                 .upload_id(uid)
                 .send()
@@ -208,7 +264,7 @@ impl Uploader {
         if upload_id.is_none() {
             let create_output = client
                 .create_multipart_upload()
-                .bucket(bucket)
+                .bucket(&bucket)
                 .key(&key)
                 .send()
                 .await

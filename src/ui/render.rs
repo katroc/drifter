@@ -51,6 +51,8 @@ pub fn ui(f: &mut Frame, app: &App) {
     match app.current_tab {
         AppTab::Transfers => draw_transfers(f, app, main_layout[1]),
         AppTab::Quarantine => draw_quarantine(f, app, main_layout[1]),
+        AppTab::Remote => crate::ui::remote::render_remote(f, app, main_layout[1], &app.theme),
+        AppTab::Logs => crate::ui::logs::render_logs(f, app, main_layout[1], &app.theme),
         AppTab::Settings => draw_settings(f, app, main_layout[1]),
     }
 
@@ -126,7 +128,7 @@ fn draw_rail(f: &mut Frame, app: &App, area: Rect) {
         app.theme.border_style()
     };
 
-    let items = [" Transfers ", " Quarantine ", " Settings  "];
+    let items = [" Transfers ", " Quarantine ", " Remote    ", " Logs      ", " Settings  "];
     let rows: Vec<Row> = items
         .iter()
         .enumerate()
@@ -183,7 +185,8 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
         InputMode::Normal if is_focused => " Hopper (Press 'a' to browse) ",
         InputMode::Normal => " Hopper ",
         InputMode::Confirmation => " Hopper ",
-        InputMode::LayoutAdjust => " Hopper ",
+        InputMode::LayoutAdjust => " Layout ",
+        InputMode::LogSearch => " Search ",
     };
 
     let block = Block::default()
@@ -239,13 +242,12 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Paragraph::new(filter_line), filter_area);
     }
 
+    let has_filter = !app.input_buffer.is_empty() || app.input_mode == InputMode::Filter;
     let table_area = Rect::new(
         inner_area.x,
-        inner_area.y + if app.input_buffer.is_empty() { 1 } else { 2 },
+        inner_area.y + if has_filter { 2 } else { 1 },
         inner_area.width,
-        inner_area
-            .height
-            .saturating_sub(if app.input_buffer.is_empty() { 1 } else { 2 }),
+        inner_area.height.saturating_sub(if has_filter { 2 } else { 1 }),
     );
 
     // Live Filtering
@@ -1251,6 +1253,12 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let act = |a: &str| Span::styled(format!(" {}", a), app.theme.muted_style());
 
     let footer_spans = match app.input_mode {
+
+
+        InputMode::LogSearch => vec![
+            key("Enter"), act("Search"), sep(),
+            key("Esc"), act("Cancel"),
+        ],
         InputMode::Filter => vec![
             key("Type"),
             act("to filter"),
@@ -1306,7 +1314,17 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             key("q"),
             act("Cancel"),
         ],
-        InputMode::Normal => match app.focus {
+        InputMode::Normal => if app.current_tab == AppTab::Remote {
+             vec![
+                 key("r"), act("Refresh"), sep(),
+                 key("d"), act("Download"), sep(),
+                 key("x"), act("Delete"), sep(),
+                 key("Tab"), act("Nav"),
+             ]
+        } else { match app.focus {
+            AppFocus::Logs => vec![
+                key("q"), act("Back"),
+            ],
             AppFocus::Rail => vec![
                 key("Tab/→"),
                 act("Content"),
@@ -1341,9 +1359,12 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 act("Retry"),
                 sep(),
                 key("d"),
-                act("Delete"),
+                act("Rail"),
             ],
             AppFocus::History => vec![key("Tab"), act("Rail"), sep(), key("←"), act("Queue")],
+            AppFocus::Remote => vec![ // Handled by AppTab::Remote above mostly, but kept for completeness if needed
+                 key("Tab"), act("Rail"),
+            ],
             AppFocus::Quarantine => vec![
                 key("Tab"),
                 act("Rail"),
@@ -1419,6 +1440,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     act("Save"),
                 ],
             },
+        }
         },
     };
 

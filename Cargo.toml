@@ -21,3 +21,4 @@ serde_json = "1.0"
 tokio = { version = "1.38", features = ["full"] }
 toml = "0.8"
 sysinfo = "0.32"
+dirs = "6.0.0"
