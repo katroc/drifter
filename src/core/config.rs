@@ -77,7 +77,12 @@ pub struct Config {
     pub hopper_width_percent: u16,
     #[serde(default = "default_history_width")]
     pub history_width: u16,
+
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
 }
+
+fn default_log_level() -> String { "info".to_string() }
 
 fn default_scanner_enabled() -> bool { true }
 fn default_hopper_width_percent() -> u16 { 50 }
@@ -116,6 +121,7 @@ impl Default for Config {
             host_metrics_enabled: true,
             hopper_width_percent: 50,
             history_width: 60,
+            log_level: "info".to_string(),
         }
     }
 }
@@ -212,6 +218,7 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         host_metrics_enabled: get("host_metrics_enabled").map(|s| s == "true").unwrap_or(true),
         hopper_width_percent: get_u16("hopper_width_percent", 50),
         history_width: get_u16("history_width", 60),
+        log_level: get_or("log_level", "info"),
     })
 }
 
@@ -270,6 +277,7 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
 
     db::set_setting(conn, "hopper_width_percent", &cfg.hopper_width_percent.to_string())?;
     db::set_setting(conn, "history_width", &cfg.history_width.to_string())?;
+    db::set_setting(conn, "log_level", &cfg.log_level)?;
 
     // Save secret separately with obfuscation
     if let Some(ref secret) = cfg.s3_secret_key {

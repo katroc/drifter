@@ -4,6 +4,7 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use tracing::{info, error, debug};
 
 #[derive(Debug, Clone)]
 pub struct JobRow {
@@ -29,12 +30,15 @@ pub struct UploadPart {
 }
 
 pub fn init_db(state_dir: &str) -> Result<Connection> {
+    debug!("Initializing database in: {}", state_dir);
     if !Path::new(state_dir).exists() {
+        info!("Creating state directory: {}", state_dir);
         fs::create_dir_all(state_dir).context("create state dir")?;
     }
     let db_path = Path::new(state_dir).join("drifter.db");
-    let conn = Connection::open(db_path).context("open sqlite db")?;
-    conn.execute_batch(
+    let conn = Connection::open(&db_path).context("open sqlite db")?;
+    
+    if let Err(e) = conn.execute_batch(
         "
         PRAGMA journal_mode = WAL;
         PRAGMA foreign_keys = OFF;
@@ -90,12 +94,15 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
             value TEXT NOT NULL
         );
         ",
-    )
-    .context("create schema")?;
+    ) {
+        error!("Failed to initialize database schema: {}", e);
+        return Err(e.into());
+    }
 
     // Migration for existing databases
     let _ = conn.execute("ALTER TABLE jobs ADD COLUMN s3_upload_id TEXT", []);
 
+    info!("Database initialized successfully at {:?}", db_path);
     Ok(conn)
 }
 
@@ -189,7 +196,9 @@ pub fn create_job(conn: &Connection, source_path: &str, size_bytes: i64, s3_key:
         "INSERT INTO jobs (created_at, status, source_path, size_bytes, s3_key) VALUES (?, ?, ?, ?, ?)",
         params![now, "ingesting", source_path, size_bytes, s3_key],
     )?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    debug!("Created job ID {} for file: {}", id, source_path);
+    Ok(id)
 }
 
 pub fn update_job_staged(
@@ -214,6 +223,7 @@ pub fn update_job_error(conn: &Connection, job_id: i64, status: &str, error: &st
 }
 
 pub fn retry_job(conn: &Connection, job_id: i64) -> Result<()> {
+    info!("Retrying job ID {}", job_id);
     // Check if scan was already completed
     let mut scan_completed = false;
     let mut stmt = conn.prepare("SELECT scan_status FROM jobs WHERE id = ?")?;
@@ -229,6 +239,7 @@ pub fn retry_job(conn: &Connection, job_id: i64) -> Result<()> {
 
     if scan_completed {
         // Resume upload (skip scan)
+        debug!("Job {} scan already complete, resuming upload", job_id);
         conn.execute(
             "UPDATE jobs SET status = ?, error = NULL, upload_status = NULL WHERE id = ?",
             params!["scanned", job_id],
@@ -236,6 +247,7 @@ pub fn retry_job(conn: &Connection, job_id: i64) -> Result<()> {
         insert_event(conn, job_id, "retry", "job resumed (scan skipped)")?;
     } else {
         // Full retry
+        debug!("Job {} scan incomplete/failed, retrying from start", job_id);
         conn.execute(
             "UPDATE jobs SET status = ?, error = NULL, scan_status = NULL, upload_status = NULL WHERE id = ?",
             params!["queued", job_id],
@@ -246,6 +258,7 @@ pub fn retry_job(conn: &Connection, job_id: i64) -> Result<()> {
 }
 
 pub fn delete_job(conn: &Connection, job_id: i64) -> Result<()> {
+    info!("Deleting job ID {}", job_id);
     // Delete associated events first (foreign key constraint)
     conn.execute("DELETE FROM events WHERE job_id = ?", params![job_id])?;
     // Delete the job
@@ -254,6 +267,7 @@ pub fn delete_job(conn: &Connection, job_id: i64) -> Result<()> {
 }
 
 pub fn cancel_job(conn: &Connection, job_id: i64) -> Result<()> {
+    info!("Cancelling job ID {}", job_id);
     conn.execute(
         "UPDATE jobs SET status = 'cancelled', error = 'Cancelled by user' WHERE id = ?",
         params![job_id],

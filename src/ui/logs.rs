@@ -29,9 +29,14 @@ pub fn render_logs(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
          theme.text_style() 
     };
 
+    let title = format!(
+        " System Logs [Level: {}] (Scroll: arrows | 1-5: Level) ",
+        app.current_log_level.to_uppercase()
+    );
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" System Logs ")
+        .title(title)
         .border_style(block_style)
         .style(theme.panel_style());
 
@@ -43,21 +48,42 @@ pub fn render_logs(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         .map(|(i, line)| {
             // VecDeque access by index is O(1)
             let is_match = app.log_search_results.contains(&i);
-            // Current match is only highlighted if we have results and index matches
-            // However, typical 'less' behavior is to just scroll to it. 
-            // Better to highlight it distinctly.
+            
+            // Basic log level highlighting
+            let mut style = theme.text_style();
+            if line.contains("ERROR") {
+                style = style.fg(Color::Red);
+            } else if line.contains("WARN") {
+                style = style.fg(Color::Yellow);
+            } else if line.contains("INFO") {
+                 style = style.fg(Color::Cyan);
+            } else if line.contains("DEBUG") {
+                 style = style.fg(Color::Blue);
+            } else if line.contains("TRACE") {
+                 style = style.fg(Color::Magenta);
+            }
+
             let is_current = !app.log_search_results.is_empty() 
                  && app.log_search_results.get(app.log_search_current) == Some(&i);
 
-            let style = if is_current {
-                Style::default().fg(Color::Black).bg(Color::Yellow)
+            if is_current {
+                style = style.bg(Color::White).fg(Color::Black); // Explicit highlight
             } else if is_match {
-                Style::default().fg(Color::Yellow)
+               style = style.bg(Color::DarkGray); 
+            }
+
+            // Apply horizontal scroll safely
+            let display_text = if app.logs_scroll_x == 0 {
+                line.as_str()
             } else {
-                theme.text_style()
+                let start_byte = line.char_indices()
+                    .map(|(i, _)| i)
+                    .nth(app.logs_scroll_x)
+                    .unwrap_or(line.len());
+                &line[start_byte..]
             };
 
-            ListItem::new(Line::from(line.as_str()))
+            ListItem::new(Line::from(display_text))
                 .style(style)
         })
         .collect();

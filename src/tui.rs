@@ -46,6 +46,7 @@ pub fn run_tui(
     progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
     cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
     needs_wizard: bool,
+    log_handle: crate::logging::LogHandle,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -58,6 +59,7 @@ pub fn run_tui(
         cfg.clone(),
         progress,
         cancellation_tokens,
+        log_handle,
     )?;
     app.show_wizard = needs_wizard;
 
@@ -234,18 +236,22 @@ pub fn run_tui(
                                                 Ok(rt) => rt,
                                                 Err(e) => { let _ = tx.send(AppEvent::Notification(format!("(Runtime) {}", e))); return; }
                                             };
+                                            
+                                            // 1. Delete the file
                                             let res = rt.block_on(async {
                                                 crate::services::uploader::Uploader::delete_file(&config_clone, &key).await
                                             });
+                                            
                                             match res {
                                                 Ok(_) => {
                                                     let _ = tx.send(AppEvent::Notification(format!("Deleted {}", key)));
-                                                    // Trigger Refresh
-                                                    let rt = tokio::runtime::Runtime::new().unwrap();
-                                                    let res = rt.block_on(async {
+                                                    
+                                                    // 2. Refresh the list using the SAME runtime
+                                                    let res_list = rt.block_on(async {
                                                         crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await
                                                     });
-                                                    if let Ok(files) = res {
+                                                    
+                                                    if let Ok(files) = res_list {
                                                          let _ = tx.send(AppEvent::RemoteFileList(files));
                                                     }
                                                 }
@@ -1065,6 +1071,7 @@ pub fn run_tui(
                              }
                             _ => {}
                         },
+
                         AppFocus::SettingsCategory => {
                             match key.code {
                                 KeyCode::Up | KeyCode::Char('k') => {
@@ -1611,6 +1618,24 @@ pub fn run_tui(
                                                 app.focus = AppFocus::Rail;
                                             }
                                         }
+                                        
+                                        // Horizontal Scroll
+                                        KeyCode::Left | KeyCode::Char('h') => {
+                                            if app.logs_scroll_x > 0 {
+                                                app.logs_scroll_x = app.logs_scroll_x.saturating_sub(5);
+                                            }
+                                        }
+                                        KeyCode::Right | KeyCode::Char('l') => {
+                                            app.logs_scroll_x += 5;
+                                        }
+
+                                        // Log Levels
+                                        KeyCode::Char('1') => app.set_log_level("error"),
+                                        KeyCode::Char('2') => app.set_log_level("warn"),
+                                        KeyCode::Char('3') => app.set_log_level("info"),
+                                        KeyCode::Char('4') => app.set_log_level("debug"),
+                                        KeyCode::Char('5') => app.set_log_level("trace"),
+
                                         _ => {}
                                     }
                                 }

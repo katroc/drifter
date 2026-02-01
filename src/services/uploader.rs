@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use crate::utils::lock_mutex;
+use tracing::{info, error};
 use crate::coordinator::ProgressInfo;
 use rusqlite::Connection;
 use crate::db;
@@ -222,6 +223,7 @@ impl Uploader {
         // 1. Try to resume if upload_id exists
         if let Some(uid) = &upload_id {
             // Notify UI
+            info!("Resuming upload for job {} (Upload ID: {})", job_id, uid);
             {
                let mut p = lock_mutex(&progress)?;
                p.insert(job_id, ProgressInfo { 
@@ -273,10 +275,12 @@ impl Uploader {
                         Some(s) => format!("{}: {}", s.code().unwrap_or("Unknown"), s.message().unwrap_or("No message")),
                         None => e.to_string(),
                     };
+                    error!("Failed to create multipart upload: {} (Bucket: {}, Key: {})", service_err, bucket, key);
                     anyhow::anyhow!("Failed to create multipart upload: {} (Bucket: {}, Key: {})", service_err, bucket, key)
                 })?;
             
             let new_uid = create_output.upload_id().context("No upload ID")?.to_string();
+            info!("Created new multipart upload for job {}: {}", job_id, new_uid);
             
             // Save to DB
             {

@@ -4,10 +4,13 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::{info, warn, error, debug};
 
 pub fn ingest_path(conn: &Connection, staging_dir: &str, staging_mode: &StagingMode, path: &str) -> Result<usize> {
+    debug!("Ingesting path: {}", path);
     let root = PathBuf::from(path);
     if !root.exists() {
+        warn!("Path does not exist: {}", path);
         return Ok(0);
     }
     
@@ -30,7 +33,10 @@ pub fn ingest_path(conn: &Connection, staging_dir: &str, staging_mode: &StagingM
     for file_path in files {
         let metadata = match fs::metadata(&file_path) {
             Ok(m) => m,
-            Err(_) => continue,
+            Err(e) => {
+                warn!("Failed to read metadata for {:?}: {}", file_path, e);
+                continue;
+            }
         };
         if !metadata.is_file() {
             continue;
@@ -47,6 +53,8 @@ pub fn ingest_path(conn: &Connection, staging_dir: &str, staging_mode: &StagingM
         
         let size = metadata.len() as i64;
         let source_str = file_path.to_string_lossy().to_string();
+        debug!("Processing file: {} ({} bytes)", source_str, size);
+        
         let job_id = create_job(conn, &source_str, size, Some(&relative_path))?;
         
         // Stage file based on mode
@@ -72,13 +80,16 @@ pub fn ingest_path(conn: &Connection, staging_dir: &str, staging_mode: &StagingM
                 };
                 insert_event(conn, job_id, "stage", event_msg)?;
                 count += 1;
+                info!("Successfully ingested job {} for {}", job_id, source_str);
             }
             Err(err) => {
+                error!("Failed to stage job {}: {}", job_id, err);
                 update_job_error(conn, job_id, "failed", &err.to_string())?;
                 insert_event(conn, job_id, "stage", "staging failed")?;
             }
         }
     }
+    info!("Ingest complete. {} files processed.", count);
     Ok(count)
 }
 
@@ -114,6 +125,7 @@ fn stage_file(staging_dir: &str, job_id: i64, source: &Path) -> Result<String> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "data".to_string());
     let dest = job_dir.join(filename);
+    debug!("Copying {:?} to {:?}", source, dest);
     fs::copy(source, &dest)?;
     Ok(dest.to_string_lossy().to_string())
 }

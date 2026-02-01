@@ -151,15 +151,19 @@ pub struct App {
     pub clamav_status: Arc<Mutex<String>>,
     pub progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
     pub cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
+    pub conn: Arc<Mutex<Connection>>,
 
     // Logs
     pub logs: VecDeque<String>,
     pub logs_scroll: usize,
+    pub logs_scroll_x: usize,
     pub logs_stick_to_bottom: bool,
     pub log_search_active: bool,
     pub log_search_query: String,
     pub log_search_results: Vec<usize>, // Indicies of matching lines
     pub log_search_current: usize, // Index in log_search_results
+    pub log_handle: Option<crate::logging::LogHandle>,
+    pub current_log_level: String,
 
     // Queue & History Search
     pub queue_search_query: String,
@@ -202,11 +206,13 @@ impl App {
         config: Arc<Mutex<Config>>,
         progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
         cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
+        log_handle: crate::logging::LogHandle,
     ) -> Result<Self> {
         let cfg_guard = lock_mutex(&config)?;
         let watcher_cfg = cfg_guard.clone();
         let settings = SettingsState::from_config(&cfg_guard);
         let theme = Theme::from_name(&cfg_guard.theme);
+        let initial_log_level = cfg_guard.log_level.clone();
         drop(cfg_guard);
 
         let (tx, rx) = mpsc::channel();
@@ -266,13 +272,17 @@ impl App {
 
             logs: VecDeque::new(),
             logs_scroll: 0,
+            logs_scroll_x: 0,
             logs_stick_to_bottom: true,
             log_search_active: false,
             log_search_query: String::new(),
             log_search_results: Vec::new(),
             log_search_current: 0,
+            log_handle: Some(log_handle),
+            current_log_level: initial_log_level,
 
-            queue_search_query: String::new(),
+            conn: conn.clone(),
+        queue_search_query: String::new(),
             history_search_query: String::new(),
         };
 
@@ -312,6 +322,8 @@ impl App {
     }
 
     pub fn refresh_jobs(&mut self, conn: &Connection) -> Result<()> {
+        // Use trace! to avoid spamming logs every tick
+        // tracing::trace!("Refreshing jobs");
         self.jobs = list_active_jobs(conn, 100)?;
         let filter_str = if self.history_filter == HistoryFilter::All {
             None
@@ -321,7 +333,13 @@ impl App {
         self.history = list_history_jobs(conn, 100, filter_str)?;
         self.quarantine = list_quarantined_jobs(conn, 100)?;
 
+        let prev_visual_jobs_len = self.visual_jobs.len();
         self.rebuild_visual_lists();
+
+        if self.visual_jobs.len() != prev_visual_jobs_len {
+            // Log when list size changes significantly? 
+            // tracing::debug!("Job list updated: {} jobs visible", self.visual_jobs.len());
+        }
 
         // Auto-fix selected if out of bounds (using visual list size)
         if self.selected >= self.visual_jobs.len() {
@@ -735,6 +753,29 @@ impl App {
 
         if !filtered_indices.is_empty() && !filtered_indices.contains(&self.picker.selected) {
             self.picker.selected = filtered_indices[0];
+        }
+    }
+
+    pub fn set_log_level(&mut self, level: &str) {
+        if let Some(handle) = &self.log_handle {
+             use tracing_subscriber::EnvFilter;
+             let new_filter = EnvFilter::new(level);
+             if let Err(e) = handle.reload(new_filter) {
+                 self.status_message = format!("Failed to set log level: {}", e);
+             } else {
+                 self.current_log_level = level.to_string();
+                 self.status_message = format!("Log level set to: {}", level);
+                 
+                 // Persist to config and DB
+                 if let Ok(mut cfg) = self.config.lock() {
+                     cfg.log_level = level.to_string();
+                     if let Ok(conn) = self.conn.lock() {
+                         if let Err(e) = crate::config::save_config_to_db(&conn, &cfg) {
+                             tracing::error!("Failed to save log level to DB: {}", e);
+                         }
+                     }
+                 }
+             }
         }
     }
 }

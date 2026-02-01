@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use crate::core::config::{Config, ScanMode};
 use std::net::SocketAddr;
 use tokio::fs::File as TokioFile;
+use tracing::{info, warn, error};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt};
 use tokio::net::TcpStream;
 
@@ -28,13 +29,17 @@ impl Scanner {
     pub async fn scan_file(&self, path: &str) -> Result<bool> {
 
         match self.mode {
-            ScanMode::Skip => Ok(true),
+            ScanMode::Skip => {
+                info!("Scanning skipped for: {}", path);
+                Ok(true)
+            },
             ScanMode::Stream => self.scan_chunked(path).await,
             ScanMode::Full => self.scan_chunked(path).await,
         }
     }
 
     async fn scan_chunked(&self, path: &str) -> Result<bool> {
+        info!("Starting chunked scan for: {}", path);
         let chunk_size = (self.scan_chunk_size_mb * 1024 * 1024) as usize;
         let overlap = 1024 * 1024; // 1MB overlap
         let chunk_size = chunk_size.max(overlap + 1024);
@@ -72,15 +77,23 @@ impl Scanner {
                 match handle.await {
                     Ok(Ok(clean)) => {
                         if !clean {
+                            warn!("Infection detected in file: {}", path);
                             return Ok(false); // Infection found - stop scanning
                         }
                     }
-                    Ok(Err(e)) => return Err(e),
-                    Err(e) => return Err(anyhow::anyhow!("Scan task failed: {}", e)),
+                    Ok(Err(e)) => {
+                        error!("Scan chunk error: {}", e);
+                        return Err(e);
+                    }
+                    Err(e) => {
+                         error!("Scan task failed: {}", e);
+                         return Err(anyhow::anyhow!("Scan task failed: {}", e));
+                    }
                 }
             }
         }
         
+        info!("Scan complete (clean) for: {}", path);
         Ok(true)
     }
 
