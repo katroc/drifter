@@ -45,6 +45,7 @@ pub enum ModalAction {
     ClearHistory,
     CancelJob(i64),
     DeleteRemoteObject(String),
+
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +199,10 @@ pub struct App {
     // Layout Adjustment
     pub layout_adjust_target: Option<LayoutTarget>,
     pub layout_adjust_message: String,
+    
+
+
+
 }
 
 impl App {
@@ -284,6 +289,7 @@ impl App {
             conn: conn.clone(),
         queue_search_query: String::new(),
             history_search_query: String::new(),
+
         };
 
         // ClamAV checker thread
@@ -776,6 +782,107 @@ impl App {
                      }
                  }
              }
+        }
+    }
+
+    
+
+
+    pub fn toggle_pause_selected_job(&mut self) {
+        let job_id = if self.view_mode == ViewMode::Flat {
+             if self.selected < self.jobs.len() {
+                 self.jobs[self.selected].id
+             } else {
+                 return;
+             }
+        } else {
+             // Tree mode logic: find job ID from visual item
+             // Assuming simple mapping for now or finding from visual item
+             // VisualItem has index_in_jobs, which is index into self.jobs (if flattened first?)
+             // Actually self.visual_jobs[self.selected].index_in_jobs -> self.jobs[idx].id
+             if self.selected < self.visual_jobs.len() {
+                  if let Some(idx) = self.visual_jobs[self.selected].index_in_jobs {
+                      if idx < self.jobs.len() {
+                          self.jobs[idx].id
+                      } else { return; }
+                  } else {
+                      return; // Folder selected?
+                  }
+             } else {
+                 return;
+             }
+        };
+
+        let conn = if let Ok(c) = self.conn.lock() { c } else { return; };
+        
+        // Get current status
+        let status = if let Ok(Some(job)) = crate::db::get_job(&conn, job_id) {
+            job.status
+        } else {
+            return;
+        };
+
+        if status == "paused" {
+            if let Err(e) = crate::db::resume_job(&conn, job_id) {
+                self.status_message = format!("Failed to resume: {}", e);
+            } else {
+                self.status_message = format!("Resumed job {}", job_id);
+            }
+        } else if status == "uploading" || status == "scanning" || status == "queued" || status == "staged" || status == "ready" {
+            if let Err(e) = crate::db::pause_job(&conn, job_id) {
+                self.status_message = format!("Failed to pause: {}", e);
+            } else {
+                self.status_message = format!("Paused job {}", job_id);
+                // Trigger cancellation if running
+                if let Ok(tokens) = self.cancellation_tokens.lock() {
+                    if let Some(token) = tokens.get(&job_id) {
+                        token.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        } else {
+            self.status_message = "Cannot pause/resume this job (invalid state)".to_string();
+        }
+    }
+
+    pub fn change_selected_job_priority(&mut self, delta: i64) {
+        let job_id = if self.view_mode == ViewMode::Flat {
+             if self.selected < self.jobs.len() {
+                 self.jobs[self.selected].id
+             } else {
+                 return;
+             }
+        } else {
+             if self.selected < self.visual_jobs.len() {
+                  if let Some(idx) = self.visual_jobs[self.selected].index_in_jobs {
+                      if idx < self.jobs.len() {
+                          self.jobs[idx].id
+                      } else { return; }
+                  } else {
+                      return;
+                  }
+             } else {
+                 return;
+             }
+        };
+
+        let conn_arc = self.conn.clone();
+        let conn = if let Ok(c) = conn_arc.lock() { c } else { return; };
+        
+        if let Ok(Some(job)) = crate::db::get_job(&conn, job_id) {
+            let new_priority = job.priority + delta;
+            if let Err(e) = crate::db::set_job_priority(&conn, job_id, new_priority) {
+                self.status_message = format!("Failed to set priority: {}", e);
+            } else {
+                self.status_message = format!("Priority set to {}", new_priority);
+                let _ = self.refresh_jobs(&conn);
+                
+                if let Some(pos) = self.jobs.iter().position(|j| j.id == job_id) {
+                    if self.view_mode == ViewMode::Flat {
+                        self.selected = pos;
+                    }
+                }
+            }
         }
     }
 }

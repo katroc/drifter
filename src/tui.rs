@@ -383,15 +383,16 @@ pub fn run_tui(
                     }
 
                     // Determine if we are capturing input (e.g. editing settings, browsing, or in search)
-                    let capturing_input = match app.focus {
-                        AppFocus::SettingsFields => app.settings.editing,
-                        AppFocus::Browser => {
-                            app.input_mode == InputMode::Filter
-                                || app.input_mode == InputMode::Browsing
-                        }
-                        AppFocus::Logs => app.input_mode == InputMode::LogSearch,
-                        _ => false,
-                    };
+                    let capturing_input = app.input_mode == InputMode::Confirmation
+                        || match app.focus {
+                            AppFocus::SettingsFields => app.settings.editing,
+                            AppFocus::Browser => {
+                                app.input_mode == InputMode::Filter
+                                    || app.input_mode == InputMode::Browsing
+                            }
+                            AppFocus::Logs => app.input_mode == InputMode::LogSearch,
+                            _ => false,
+                        };
 
                     // Meta keys (Quit, Tab)
                     if !capturing_input {
@@ -486,6 +487,70 @@ pub fn run_tui(
                             continue;
                         }
                     }
+
+                    // Global Modal Handling (Confirmation & ProfileInput)
+                    if app.input_mode == InputMode::Confirmation {
+                         match key.code {
+                             KeyCode::Char('y') | KeyCode::Enter => {
+                                 match app.pending_action {
+                                     ModalAction::CancelJob(id) => {
+                                         let conn = lock_mutex(&conn_mutex)?;
+                                         let _ = crate::db::cancel_job(&conn, id);
+                                         let _ = app.refresh_jobs(&conn);
+                                          if let Ok(tokens) = app.cancellation_tokens.lock() {
+                                                if let Some(token) = tokens.get(&id) {
+                                                    token.store(true, std::sync::atomic::Ordering::Relaxed);
+                                                }
+                                          }
+                                         app.status_message = format!("Cancelled job {}", id);
+                                     }
+                                     ModalAction::DeleteRemoteObject(ref key) => {
+                                         let tx = app.async_tx.clone();
+                                         let config_clone = lock_mutex(&app.config)?.clone();
+                                         let key_clone = key.clone();
+                                         std::thread::spawn(move || {
+                                             let rt = match tokio::runtime::Runtime::new() {
+                                                  Ok(rt) => rt,
+                                                  Err(e) => { let _ = tx.send(AppEvent::Notification(format!("Runtime err: {}", e))); return; }
+                                             };
+                                             let res = rt.block_on(async {
+                                                 crate::services::uploader::Uploader::delete_file(&config_clone, &key_clone).await
+                                             });
+                                             match res {
+                                                 Ok(_) => { let _ = tx.send(AppEvent::Notification(format!("Deleted '{}'", key_clone))); }
+                                                 Err(e) => { let _ = tx.send(AppEvent::Notification(format!("Delete Failed: {}", e))); }
+                                             }
+
+                                         });
+                                         app.status_message = format!("Deleting {}...", key);
+                                     }
+                                     ModalAction::ClearHistory => {
+                                          let conn = lock_mutex(&conn_mutex)?;
+                                          match app.history_filter {
+                                              HistoryFilter::All => { let _ = conn.execute("DELETE FROM jobs WHERE status IN ('complete','cancelled','error')", []); }
+                                              HistoryFilter::Complete => { let _ = conn.execute("DELETE FROM jobs WHERE status = 'complete'", []); }
+                                              HistoryFilter::Quarantined => { let _ = conn.execute("DELETE FROM jobs WHERE scan_status = 'quarantined' OR status = 'quarantined'", []); }
+                                          }
+                                          let _ = app.refresh_jobs(&conn);
+                                          app.status_message = "History cleared".to_string();
+                                     }
+                                     _ => {}
+                                 }
+                                 app.input_mode = InputMode::Normal;
+                                 app.pending_action = ModalAction::None;
+                             }
+                             KeyCode::Char('n') | KeyCode::Esc => {
+                                 app.input_mode = InputMode::Normal;
+                                 app.pending_action = ModalAction::None;
+                                 app.status_message = "Cancelled".to_string();
+                             }
+                             _ => {}
+                         }
+                         continue;
+                    }
+
+
+
 
                     // Focus-specific handling
                     match app.focus {
@@ -747,10 +812,18 @@ pub fn run_tui(
                                                 ViewMode::Flat => ViewMode::Tree,
                                                 ViewMode::Tree => ViewMode::Flat,
                                             };
-                                            app.status_message =
-                                                format!("Switched to {:?} View", app.view_mode);
+                                            app.status_message = format!("Switched to {:?} View", app.view_mode);
                                             let conn = lock_mutex(&conn_mutex)?;
                                             let _ = app.refresh_jobs(&conn);
+                                        }
+                                        KeyCode::Char('p') => {
+                                            app.toggle_pause_selected_job();
+                                        }
+                                        KeyCode::Char('+') | KeyCode::Char('=') => {
+                                            app.change_selected_job_priority(1);
+                                        }
+                                        KeyCode::Char('-') => {
+                                            app.change_selected_job_priority(-1);
                                         }
                                         KeyCode::Char('/') => {
                                             app.input_mode = InputMode::QueueSearch;
@@ -1126,6 +1199,10 @@ pub fn run_tui(
                                 SettingsCategory::Performance => 6,
                                 SettingsCategory::Theme => 1,
                             };
+                            // Focus-specific rendering logic for fields is handled in render.rs,
+                            // input handling is primarily navigation here unless specific overrides needed.
+
+
                             match key.code {
                                 KeyCode::Enter => {
                                     // Special handling for Boolean Toggles

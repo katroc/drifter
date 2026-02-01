@@ -19,6 +19,7 @@ use crate::ui::util::{
     status_kind, extract_threat_name, calculate_list_offset
 };
 
+
 pub fn ui(f: &mut Frame, app: &App) {
     if app.show_wizard {
         draw_wizard(f, app);
@@ -501,9 +502,15 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
                     app.theme.progress_style()
                 };
 
+                let p_indicator = if job.priority != 0 {
+                    format!("[P:{}] ", job.priority)
+                } else {
+                    String::new()
+                };
+
                 Row::new(vec![
                     Cell::from(display_name),
-                    Cell::from(job.status.clone()).style(status_style),
+                    Cell::from(format!("{}{}", p_indicator, job.status)).style(status_style),
                     Cell::from(format_bytes(job.size_bytes as u64)),
                     Cell::from(p_str).style(progress_style),
                     Cell::from(time_str),
@@ -921,6 +928,9 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         .style(app.theme.panel_style());
     let sidebar = List::new(cat_items).block(sidebar_block);
     f.render_widget(sidebar, main_layout[0]);
+
+
+
 
     let fields_area = main_layout[1];
     let display_height = fields_area.height as usize;
@@ -1444,6 +1454,12 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 key("↑/↓"),
                 act("Select"),
                 sep(),
+                key("p"),
+                act("Pause/Resume"),
+                sep(),
+                key("+/-"),
+                act("Priority"),
+                sep(),
                 key("Enter"),
                 act("Details"),
                 sep(),
@@ -1453,8 +1469,11 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 key("r"),
                 act("Retry"),
                 sep(),
+                key("←/→"),
+                act("Nav"),
+                sep(),
                 key("d"),
-                act("Rail"),
+                act("Cancel"),
             ],
             AppFocus::History => vec![key("Tab"), act("Rail"), sep(), key("←"), act("Queue")],
             AppFocus::Remote => vec![ // Handled by AppTab::Remote above mostly, but kept for completeness if needed
@@ -1783,3 +1802,5 @@ fn draw_metrics_panel(f: &mut Frame, app: &App, area: Rect) {
     ];
     f.render_widget(Paragraph::new(net_content), chunks[1]);
 }
+
+
