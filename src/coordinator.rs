@@ -6,9 +6,8 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
-use std::thread;
 use std::time::Duration;
-use tokio::runtime::Runtime;
+use std::path::PathBuf;
 
 use std::collections::HashMap;
 use crate::utils::lock_mutex;
@@ -24,7 +23,6 @@ pub struct ProgressInfo {
 pub struct Coordinator {
     conn: Arc<Mutex<Connection>>,
     config: Arc<Mutex<Config>>,
-    runtime: Arc<Runtime>,
     scanner: Scanner,
     uploader: Uploader,
     progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
@@ -33,82 +31,91 @@ pub struct Coordinator {
 
 impl Coordinator {
     pub fn new(conn: Arc<Mutex<Connection>>, config: Arc<Mutex<Config>>, progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>, cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>) -> Result<Self> {
-        let runtime = Arc::new(Runtime::new()?);
         // We need lock to init scanner/uploader but they are just helpers now or cheap to init
         let cfg = lock_mutex(&config)?;
         let scanner = Scanner::new(&cfg);
         let uploader = Uploader::new(&cfg);
         drop(cfg);
         
-        Ok(Self { conn, config, runtime, scanner, uploader, progress, cancellation_tokens })
+        Ok(Self { conn, config, scanner, uploader, progress, cancellation_tokens })
     }
 
-    pub fn run(&self) {
+    pub async fn run(&self) {
         loop {
-            if let Err(e) = self.process_cycle() {
+            if let Err(e) = self.process_cycle().await {
                 eprintln!("Coordinator error: {}", e);
             }
-            thread::sleep(Duration::from_secs(1));
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
 
-    fn process_cycle(&self) -> Result<()> {
-        let conn = lock_mutex(&self.conn)?;
-        
-        // Find jobs in "queued" state
-        if let Some(job) = db::get_next_job(&conn, "queued")? {
-            let scanner_enabled = lock_mutex(&self.config)?.scanner_enabled;
-            if scanner_enabled {
-                // Move to scanning
-                db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
-                // Process scan
-                drop(conn); 
-                self.process_scan(&job)?;
+    async fn process_cycle(&self) -> Result<()> {
+        let (job, scanner_enabled) = {
+            let conn = lock_mutex(&self.conn)?;
+            
+            if let Some(job) = db::get_next_job(&conn, "queued")? {
+                let scanner_enabled = lock_mutex(&self.config)?.scanner_enabled;
+                (Some(job), scanner_enabled)
+            } else if let Some(job) = db::get_next_job(&conn, "scanned")? {
+                (Some(job), false) // scanner false means move to upload
             } else {
-                // Skip scan, move directly to uploading (or ready for upload)
-                // We fake a "clean" scan result but go straight to uploading to avoid UI flicker
-                db::update_upload_status(&conn, job.id, "uploading", "uploading")?;
-                db::insert_event(&conn, job.id, "scan", "scan skipped by policy")?;
-                
-                drop(conn);
-                self.process_upload(&job)?;
+                (None, false)
             }
-            return Ok(()); // Loop again
-        }
+        };
 
-        // Find jobs in "scanned" state -> move to "uploading"
-        if let Some(job) = db::get_next_job(&conn, "scanned")? {
-             db::update_upload_status(&conn, job.id, "uploading", "uploading")?;
-             drop(conn);
-             self.process_upload(&job)?;
-             return Ok(());
+        if let Some(job) = job {
+            if job.status == "queued" {
+                if scanner_enabled {
+                    {
+                        let conn = lock_mutex(&self.conn)?;
+                        db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
+                    }
+                    self.process_scan(&job).await?;
+                } else {
+                    {
+                        let conn = lock_mutex(&self.conn)?;
+                        db::update_upload_status(&conn, job.id, "uploading", "uploading")?;
+                        db::insert_event(&conn, job.id, "scan", "scan skipped by policy")?;
+                    }
+                    self.process_upload(&job).await?;
+                }
+            } else if job.status == "scanned" {
+                {
+                    let conn = lock_mutex(&self.conn)?;
+                    db::update_upload_status(&conn, job.id, "uploading", "uploading")?;
+                }
+                self.process_upload(&job).await?;
+            }
+            return Ok(());
         }
 
         Ok(())
     }
 
-    fn process_scan(&self, job: &JobRow) -> Result<()> {
+    async fn process_scan(&self, job: &JobRow) -> Result<()> {
         let path = match &job.staged_path {
             Some(p) => p,
             None => {
-                // Should not happen if queued
                  let conn = lock_mutex(&self.conn)?;
                  db::update_job_error(&conn, job.id, "failed", "no staged path")?;
                  return Ok(());
             }
         };
 
-        match self.runtime.block_on(self.scanner.scan_file(path)) {
+        match self.scanner.scan_file(path).await {
             Ok(true) => {
                  let conn = lock_mutex(&self.conn)?;
                  db::update_scan_status(&conn, job.id, "clean", "scanned")?;
                  db::insert_event(&conn, job.id, "scan", "scan completed")?;
             }
             Ok(false) => {
-                 let cfg = lock_mutex(&self.config)?;
-                 let quarantine_dir = std::path::Path::new(&cfg.quarantine_dir);
+                 let (quarantine_dir, _delete_source) = {
+                    let cfg = lock_mutex(&self.config)?;
+                    (PathBuf::from(&cfg.quarantine_dir), cfg.delete_source_after_upload)
+                 };
+                 
                  if !quarantine_dir.exists() {
-                     let _ = std::fs::create_dir_all(quarantine_dir);
+                     let _ = std::fs::create_dir_all(&quarantine_dir);
                  }
                  
                  let file_name = std::path::Path::new(path).file_name();
@@ -122,7 +129,6 @@ impl Coordinator {
                          quarantine_path_str = dest.to_string_lossy().to_string();
                      }
                  }
-                 drop(cfg);
 
                  let conn = lock_mutex(&self.conn)?;
                  db::update_scan_status(&conn, job.id, "infected", "quarantined")?;
@@ -139,18 +145,16 @@ impl Coordinator {
         Ok(())
     }
 
-    fn process_upload(&self, job: &JobRow) -> Result<()> {
+    async fn process_upload(&self, job: &JobRow) -> Result<()> {
         let path = match &job.staged_path {
-             Some(p) => p,
+             Some(p) => p.clone(),
              None => return Ok(()),
         };
         
-        let config_guard = lock_mutex(&self.config)?;
-        // Clone config to pass into async block or ...? 
-        // uploader.upload_file takes &Config. We can't hold mutex across await. 
-        // So we should clone the Config. Config is cloneable.
-        let config = config_guard.clone();
-        drop(config_guard);
+        let config = {
+            let config_guard = lock_mutex(&self.config)?;
+            config_guard.clone()
+        };
 
         // Set status to "uploading" BEFORE starting upload
         {
@@ -160,43 +164,46 @@ impl Coordinator {
 
         // Register cancellation token
         let cancel_token = Arc::new(AtomicBool::new(false));
-        lock_mutex(&self.cancellation_tokens)?.insert(job.id, cancel_token.clone());
+        {
+            lock_mutex(&self.cancellation_tokens)?.insert(job.id, cancel_token.clone());
+        }
 
-        let res = self.runtime.block_on(self.uploader.upload_file(
+        let res = self.uploader.upload_file(
             &config, 
-            path, 
+            &path, 
             job.id, 
             self.progress.clone(),
             self.conn.clone(),
             job.s3_upload_id.clone(),
             cancel_token
-        ));
+        ).await;
         
         // Remove token
-        lock_mutex(&self.cancellation_tokens)?.remove(&job.id);
+        {
+            lock_mutex(&self.cancellation_tokens)?.remove(&job.id);
+        }
+
         match res {
             Ok(true) => {
-                let conn = lock_mutex(&self.conn)?;
-                db::update_upload_status(&conn, job.id, "completed", "complete")?;
-                db::insert_event(&conn, job.id, "upload", "upload completed")?;
+                {
+                    let conn = lock_mutex(&self.conn)?;
+                    db::update_upload_status(&conn, job.id, "completed", "complete")?;
+                    db::insert_event(&conn, job.id, "upload", "upload completed")?;
+                }
                 
                 // Cleanup based on staging mode
                 use crate::config::StagingMode;
-                if let Some(staged) = &job.staged_path {
-                    let staged_path = std::path::Path::new(staged);
-                    match config.staging_mode {
-                        StagingMode::Copy => {
-                            // Copy mode: delete staged file and its parent directory
-                            let _ = std::fs::remove_file(staged_path);
-                            if let Some(parent) = staged_path.parent() {
-                                let _ = std::fs::remove_dir(parent); // Only removes if empty
-                            }
+                let staged_path = std::path::Path::new(&path);
+                match config.staging_mode {
+                    StagingMode::Copy => {
+                        let _ = std::fs::remove_file(staged_path);
+                        if let Some(parent) = staged_path.parent() {
+                            let _ = std::fs::remove_dir(parent); 
                         }
-                        StagingMode::Direct => {
-                            // Direct mode: only delete source if configured to do so
-                            if config.delete_source_after_upload {
-                                let _ = std::fs::remove_file(staged_path);
-                            }
+                    }
+                    StagingMode::Direct => {
+                        if config.delete_source_after_upload {
+                            let _ = std::fs::remove_file(staged_path);
                         }
                     }
                 }

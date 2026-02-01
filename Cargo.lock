@@ -878,11 +878,12 @@ dependencies = [
 
 [[package]]
 name = "drifter"
-version = "0.1.0"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "aws-config",
  "aws-sdk-s3",
+ "base64",
  "bytes",
  "chrono",
  "clamav-client",
@@ -895,6 +896,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "tokio",
  "toml",

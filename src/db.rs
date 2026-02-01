@@ -19,6 +19,8 @@ pub struct JobRow {
     pub s3_upload_id: Option<String>,
     pub s3_key: Option<String>,
     pub priority: i64,
+    pub checksum: Option<String>,
+    pub remote_checksum: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +30,7 @@ pub struct UploadPart {
     pub size_bytes: i64,
     pub status: String,
     pub etag: Option<String>,
+    pub checksum_sha256: Option<String>,
 }
 
 pub fn init_db(state_dir: &str) -> Result<Connection> {
@@ -55,6 +58,8 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
             s3_bucket TEXT,
             s3_key TEXT,
             s3_upload_id TEXT,
+            checksum TEXT,
+            remote_checksum TEXT,
             error TEXT
         );
         CREATE TABLE IF NOT EXISTS uploads (
@@ -72,6 +77,7 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
             upload_id INTEGER NOT NULL,
             part_number INTEGER NOT NULL,
             etag TEXT,
+            checksum_sha256 TEXT,
             size_bytes INTEGER NOT NULL,
             status TEXT NOT NULL,
             retries INTEGER NOT NULL DEFAULT 0,
@@ -105,6 +111,10 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
     let _ = conn.execute("ALTER TABLE jobs ADD COLUMN s3_upload_id TEXT", []);
     // Migration for priority
     let _ = conn.execute("ALTER TABLE jobs ADD COLUMN priority INTEGER DEFAULT 0", []);
+    // Migration for checksums
+    let _ = conn.execute("ALTER TABLE jobs ADD COLUMN checksum TEXT", []);
+    let _ = conn.execute("ALTER TABLE jobs ADD COLUMN remote_checksum TEXT", []);
+    let _ = conn.execute("ALTER TABLE parts ADD COLUMN checksum_sha256 TEXT", []);
 
     info!("Database initialized successfully at {:?}", db_path);
     Ok(conn)
@@ -112,7 +122,7 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
 
 pub fn list_active_jobs(conn: &Connection, limit: i64) -> Result<Vec<JobRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority FROM jobs 
+        "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum FROM jobs 
          WHERE status NOT IN ('complete', 'quarantined', 'quarantined_removed', 'cancelled') 
          OR datetime(created_at) > datetime('now', '-15 seconds')
          ORDER BY priority DESC, id DESC LIMIT ?",
@@ -131,6 +141,8 @@ pub fn list_active_jobs(conn: &Connection, limit: i64) -> Result<Vec<JobRow>> {
                 s3_upload_id: row.get(8)?,
                 s3_key: row.get(9)?,
                 priority: row.get(10).unwrap_or(0),
+                checksum: row.get(11)?,
+                remote_checksum: row.get(12)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -139,9 +151,9 @@ pub fn list_active_jobs(conn: &Connection, limit: i64) -> Result<Vec<JobRow>> {
 
 pub fn list_history_jobs(conn: &Connection, limit: i64, filter: Option<&str>) -> Result<Vec<JobRow>> {
     let sql = match filter {
-        Some("Complete") => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority FROM jobs WHERE status = 'complete' ORDER BY id DESC LIMIT ?",
-        Some("Quarantined") => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority FROM jobs WHERE status IN ('quarantined', 'quarantined_removed') ORDER BY id DESC LIMIT ?",
-        _ => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority FROM jobs WHERE status IN ('complete', 'quarantined', 'quarantined_removed', 'cancelled') ORDER BY id DESC LIMIT ?",
+        Some("Complete") => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum FROM jobs WHERE status = 'complete' ORDER BY id DESC LIMIT ?",
+        Some("Quarantined") => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum FROM jobs WHERE status IN ('quarantined', 'quarantined_removed') ORDER BY id DESC LIMIT ?",
+        _ => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum FROM jobs WHERE status IN ('complete', 'quarantined', 'quarantined_removed', 'cancelled') ORDER BY id DESC LIMIT ?",
     };
     
     let mut stmt = conn.prepare(sql)?;
@@ -159,6 +171,8 @@ pub fn list_history_jobs(conn: &Connection, limit: i64, filter: Option<&str>) ->
                 s3_upload_id: row.get(8)?,
                 s3_key: row.get(9)?,
                 priority: row.get(10).unwrap_or(0),
+                checksum: row.get(11)?,
+                remote_checksum: row.get(12)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -167,7 +181,7 @@ pub fn list_history_jobs(conn: &Connection, limit: i64, filter: Option<&str>) ->
 
 pub fn list_quarantined_jobs(conn: &Connection, limit: i64) -> Result<Vec<JobRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority FROM jobs WHERE status = 'quarantined' ORDER BY id DESC LIMIT ?",
+        "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum FROM jobs WHERE status = 'quarantined' ORDER BY id DESC LIMIT ?",
     )?;
     let rows = stmt
         .query_map(params![limit], |row| {
@@ -183,6 +197,8 @@ pub fn list_quarantined_jobs(conn: &Connection, limit: i64) -> Result<Vec<JobRow
                 s3_upload_id: row.get(8)?,
                 s3_key: row.get(9)?,
                 priority: row.get(10).unwrap_or(0),
+                checksum: row.get(11)?,
+                remote_checksum: row.get(12)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -406,9 +422,17 @@ pub fn update_upload_status(conn: &Connection, job_id: i64, status: &str, global
     Ok(())
 }
 
+pub fn update_job_checksums(conn: &Connection, job_id: i64, local: Option<&str>, remote: Option<&str>) -> Result<()> {
+    conn.execute(
+        "UPDATE jobs SET checksum = ?, remote_checksum = ? WHERE id = ?",
+        params![local, remote, job_id],
+    )?;
+    Ok(())
+}
+
 pub fn get_next_job(conn: &Connection, current_status: &str) -> Result<Option<JobRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority FROM jobs WHERE status = ? ORDER BY priority DESC, id ASC LIMIT 1",
+        "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum FROM jobs WHERE status = ? ORDER BY priority DESC, id ASC LIMIT 1",
     )?;
     let mut rows = stmt.query_map(params![current_status], |row| {
         Ok(JobRow {
@@ -423,6 +447,8 @@ pub fn get_next_job(conn: &Connection, current_status: &str) -> Result<Option<Jo
             s3_upload_id: row.get(8)?,
             s3_key: row.get(9)?,
             priority: row.get(10).unwrap_or(0),
+            checksum: row.get(11)?,
+            remote_checksum: row.get(12)?,
         })
     })?;
 
@@ -435,7 +461,7 @@ pub fn get_next_job(conn: &Connection, current_status: &str) -> Result<Option<Jo
 
 pub fn get_job(conn: &Connection, job_id: i64) -> Result<Option<JobRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority FROM jobs WHERE id = ?",
+        "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum FROM jobs WHERE id = ?",
     )?;
     let mut rows = stmt.query_map(params![job_id], |row| {
         Ok(JobRow {
@@ -450,6 +476,8 @@ pub fn get_job(conn: &Connection, job_id: i64) -> Result<Option<JobRow>> {
             s3_upload_id: row.get(8)?,
             s3_key: row.get(9)?,
             priority: row.get(10).unwrap_or(0),
+            checksum: row.get(11)?,
+            remote_checksum: row.get(12)?,
         })
     })?;
 

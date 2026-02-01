@@ -18,6 +18,9 @@ use rusqlite::Connection;
 use crate::db;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use sha2::{Sha256, Digest};
+use base64::{Engine as _, engine::general_purpose};
+
 pub struct TaskGuard(pub tokio::task::JoinHandle<()>);
 
 impl Drop for TaskGuard {
@@ -219,6 +222,8 @@ impl Uploader {
         let mut upload_id = initial_upload_id.clone();
         let mut completed_parts = Vec::new();
         let mut completed_indices = HashSet::new();
+        // Store raw hashes for local composite calculation: Map<PartNumber, Vec<u8>>
+        let part_hashes = Arc::new(Mutex::new(HashMap::<i32, Vec<u8>>::new()));
 
         // 1. Try to resume if upload_id exists
         if let Some(uid) = &upload_id {
@@ -249,7 +254,19 @@ impl Uploader {
                              if let Some(pn) = p.part_number
                                  && let Some(etag) = p.e_tag
                              {
-                                     completed_parts.push(CompletedPart::builder().part_number(pn).e_tag(etag).build());
+                                     let mut builder = CompletedPart::builder().part_number(pn).e_tag(etag);
+                                     
+                                     // If we have a checksum from S3, save it locally for the composite calc
+                                     if let Some(cs) = p.checksum_sha256 {
+                                         if let Ok(bytes) = general_purpose::STANDARD.decode(&cs) {
+                                             if let Ok(mut map) = part_hashes.lock() {
+                                                 map.insert(pn, bytes);
+                                             }
+                                         }
+                                         builder = builder.checksum_sha256(cs);
+                                     }
+
+                                     completed_parts.push(builder.build());
                                      completed_indices.insert(pn);
                              }
                         }
@@ -268,6 +285,7 @@ impl Uploader {
                 .create_multipart_upload()
                 .bucket(&bucket)
                 .key(&key)
+                .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::Sha256)
                 .send()
                 .await
                 .map_err(|e| {
@@ -290,7 +308,7 @@ impl Uploader {
             upload_id = Some(new_uid);
         }
         
-        let upload_id = upload_id.expect("Upload ID guaranteed by logic");
+        let upload_id = upload_id.ok_or_else(|| anyhow::anyhow!("Failed to obtain or create Upload ID"))?;
 
         let mut file = File::open(path).await.context("Failed to open file")?;
         let file_size = file.metadata().await?.len();
@@ -316,8 +334,6 @@ impl Uploader {
         let required_min_part = file_size.div_ceil(max_parts);
         part_size = part_size.max(required_min_part as usize);
 
-        // helper to align to nearest MB is nice but not required 
-        
         let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
         let uploaded_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
         
@@ -435,10 +451,18 @@ impl Uploader {
             let key = key.to_string();
             let uid_clone = upload_id.clone();
             let uploaded_bytes = uploaded_bytes.clone();
-            // We do NOT pass 'progress' to task anymore, Monitor handles it.
+            let part_hashes_clone = part_hashes.clone();
             
             let handle = tokio::spawn(async move {
                 let _permit = permit; // Hold permit until task completion
+
+                // Calculate SHA256 Checksum for this part (still needed for upload_part verify)
+                let mut hasher = Sha256::new();
+                hasher.update(&chunk);
+                let hash = hasher.finalize();
+                let hash_bytes = hash.to_vec();
+                let checksum_sha256 = general_purpose::STANDARD.encode(&hash_bytes);
+
                 let body = aws_sdk_s3::primitives::ByteStream::from(chunk);
                 
                 let upload_part_output = client
@@ -448,9 +472,15 @@ impl Uploader {
                     .upload_id(uid_clone)
                     .part_number(part_number)
                     .body(body)
+                    .checksum_sha256(checksum_sha256)
                     .send()
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to upload part {}: {}", part_number, e))?;
+
+                // Store hash for final composite calculation
+                if let Ok(mut map) = part_hashes_clone.lock() {
+                    map.insert(part_number, hash_bytes);
+                }
 
                 // Update Net Tracker
                 uploaded_bytes.fetch_add(bytes_read as u64, std::sync::atomic::Ordering::Relaxed);
@@ -459,6 +489,7 @@ impl Uploader {
                     Ok(CompletedPart::builder()
                         .e_tag(etag)
                         .part_number(part_number)
+                        .checksum_sha256(upload_part_output.checksum_sha256().unwrap_or_default())
                         .build())
                 } else {
                     Err(anyhow::anyhow!("No ETag"))
@@ -494,10 +525,10 @@ impl Uploader {
 
         // Complete Multipart Upload
         let completed_upload = CompletedMultipartUpload::builder()
-            .set_parts(Some(completed_parts))
+            .set_parts(Some(completed_parts.clone()))
             .build();
 
-        client.complete_multipart_upload()
+        let complete_output = client.complete_multipart_upload()
             .bucket(bucket)
             .key(&key)
             .upload_id(upload_id)
@@ -507,6 +538,40 @@ impl Uploader {
             .map_err(|e| anyhow::anyhow!("Failed complete: {}", e))?;
             
         // monitor_handle aborted by TaskGuard drop
+
+        // Store Checksums in DB
+        {
+            let conn = lock_mutex(&conn_mutex)?;
+            
+            // S3 for multipart with SHA256 usually returns a composite checksum 
+            // e.g., "checksum-parts_count". 
+            let remote_checksum = complete_output.checksum_sha256();
+            
+            // Calculate Local Composite Checksum (Tree Hash logic for S3)
+            // SHA256(HashPart1 + HashPart2 + ...)
+            let local_checksum = if let Ok(map) = part_hashes.lock() {
+                let mut parts: Vec<_> = map.iter().collect();
+                parts.sort_by_key(|(k, _)| **k); // Sort by part number
+                
+                let mut hasher = Sha256::new();
+                for (_, bytes) in parts {
+                    hasher.update(bytes);
+                }
+                let composite_hash = hasher.finalize();
+                let b64 = general_purpose::STANDARD.encode(composite_hash);
+                // Append -PartCount
+                let count = map.len();
+                if count > 0 {
+                     Some(format!("{}-{}", b64, count))
+                } else {
+                     None
+                }
+            } else {
+                None
+            };
+            
+            let _ = db::update_job_checksums(&conn, job_id, local_checksum.as_deref(), remote_checksum);
+        }
 
         // Cleanup DB
         {

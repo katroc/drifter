@@ -675,18 +675,23 @@ pub fn run_tui(
                                                     || key.code == KeyCode::Char('l')
                                                 {
                                                     // Only queue files on Enter or 'l', not Right arrow
-                                                    let conn = lock_mutex(&conn_mutex)?;
+                                                    let conn_clone = conn_mutex.clone();
                                                     let cfg_guard = lock_mutex(&cfg)?;
                                                     let staging = cfg_guard.staging_dir.clone();
                                                     let staging_mode =
                                                         cfg_guard.staging_mode.clone();
                                                     drop(cfg_guard);
-                                                    let _ = ingest_path(
-                                                        &conn,
-                                                        &staging,
-                                                        &staging_mode,
-                                                        &entry.path.to_string_lossy(),
-                                                    );
+                                                    let path = entry.path.to_string_lossy().to_string();
+                                                    
+                                                    tokio::spawn(async move {
+                                                        let _ = ingest_path(
+                                                            conn_clone,
+                                                            &staging,
+                                                            &staging_mode,
+                                                            &path,
+                                                        ).await;
+                                                    });
+
                                                     app.status_message =
                                                         "File added to queue".to_string();
                                                 }
@@ -718,24 +723,31 @@ pub fn run_tui(
                                             let paths: Vec<PathBuf> =
                                                 app.picker.selected_paths.iter().cloned().collect();
                                             if !paths.is_empty() {
-                                                let conn = lock_mutex(&conn_mutex)?;
+                                                let conn_clone = conn_mutex.clone();
                                                 let cfg_guard = lock_mutex(&cfg)?;
                                                 let staging = cfg_guard.staging_dir.clone();
                                                 let staging_mode = cfg_guard.staging_mode.clone();
                                                 drop(cfg_guard);
-                                                let mut total = 0;
-                                                for path in paths {
-                                                    if let Ok(count) = ingest_path(
-                                                        &conn,
-                                                        &staging,
-                                                        &staging_mode,
-                                                        &path.to_string_lossy(),
-                                                    ) {
-                                                        total += count;
+                                                
+                                                let paths_count = paths.len();
+                                                tokio::spawn(async move {
+                                                    let mut total = 0;
+                                                    for path in paths {
+                                                        if let Ok(count) = ingest_path(
+                                                            conn_clone.clone(),
+                                                            &staging,
+                                                            &staging_mode,
+                                                            &path.to_string_lossy(),
+                                                        ).await {
+                                                            total += count;
+                                                        }
                                                     }
-                                                }
+                                                    // We could send a notification here but app might have moved on
+                                                    tracing::info!("Bulk ingest complete: {} files", total);
+                                                });
+
                                                 app.status_message =
-                                                    format!("Ingested {} items", total);
+                                                    format!("Ingesting {} items in background", paths_count);
                                                 app.picker.clear_selected();
                                             }
                                         }
@@ -1839,9 +1851,20 @@ pub fn run_tui(
                                                                 if entry.is_parent { app.picker.go_parent(); }
                                                                 else { app.picker.try_set_cwd(entry.path); }
                                                             } else {
-                                                                let conn = lock_mutex(&conn_mutex)?;
-                                                                let cfg = lock_mutex(&app.config)?;
-                                                                let _ = ingest_path(&conn, &cfg.staging_dir, &cfg.staging_mode, &entry.path.to_string_lossy());
+                                                                let conn_clone = conn_mutex.clone();
+                                                                let cfg_handle = app.config.clone();
+                                                                let path = entry.path.to_string_lossy().to_string();
+                                                                tokio::spawn(async move {
+                                                                    let (staging, mode) = {
+                                                                        let cfg = match cfg_handle.lock() {
+                                                                            Ok(c) => c,
+                                                                            Err(_) => return,
+                                                                        };
+                                                                        (cfg.staging_dir.clone(), cfg.staging_mode.clone())
+                                                                    };
+
+                                                                    let _ = ingest_path(conn_clone, &staging, &mode, &path).await;
+                                                                });
                                                             }
                                                         }
                                                     }
