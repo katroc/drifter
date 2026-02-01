@@ -202,14 +202,17 @@ impl Coordinator {
                 }
             }
             Ok(false) => {
-                // Cancelled
+                // Cancelled or Paused
                 let conn = lock_mutex(&self.conn)?;
-                // We use update_job_error for now or a specific status?
-                // Actually cancel_job_to_history in db would set it to cancelled.
-                // But if we returned false, it means we detected cancellation flag.
-                // The TUI likely already updated the DB status to 'cancelled'.
-                // But we should ensure we log an event.
-                 db::insert_event(&conn, job.id, "upload", "upload cancelled")?;
+                let current_status = db::get_job(&conn, job.id)?
+                    .map(|j| j.status)
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                if current_status == "paused" {
+                     db::insert_event(&conn, job.id, "upload", "upload paused")?;
+                } else {
+                     db::insert_event(&conn, job.id, "upload", "upload cancelled")?;
+                }
             }
             Err(e) => {
                 let conn = lock_mutex(&self.conn)?;

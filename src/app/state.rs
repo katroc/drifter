@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use std::time::{Duration, Instant};
@@ -12,6 +12,7 @@ use crate::components::wizard::WizardState;
 use crate::core::config::Config;
 use crate::core::metrics::{MetricsCollector, HostMetricsSnapshot};
 use crate::app::settings::SettingsState;
+use crate::services::uploader::S3Object;
 use crate::utils::lock_mutex;
 use crate::ui::theme::Theme;
 use crate::services::watch::Watcher;
@@ -20,6 +21,8 @@ use crate::services::watch::Watcher;
 pub enum AppTab {
     Transfers,
     Quarantine,
+    Remote,
+    Logs,
     Settings,
 }
 
@@ -30,15 +33,19 @@ pub enum AppFocus {
     Queue,   // Only in Transfers tab
     History,
     Quarantine,       // Only in Quarantine tab
+    Remote,           // Only in Remote tab
+    Logs,             // Only in Logs tab
     SettingsCategory, // Switch categories
     SettingsFields,   // Edit fields
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModalAction {
     None,
     ClearHistory,
     CancelJob(i64),
+    DeleteRemoteObject(String),
+
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,10 +66,20 @@ pub struct VisualItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
-    Browsing, // Actively navigating in Hopper
-    Filter,
-    Confirmation,
-    LayoutAdjust,
+    Browsing, // In File Picker
+    Filter,   // In File Picker Filter
+    LogSearch, // In Log Viewer Search
+    Confirmation, // Modal
+    LayoutAdjust, // Popout
+    QueueSearch,  // In Transfer Queue
+    HistorySearch, // In Job History
+}
+
+#[derive(Debug)]
+pub enum AppEvent {
+    Notification(String),
+    RemoteFileList(Vec<S3Object>),
+    LogLine(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +130,10 @@ pub struct App {
     pub selected_history: usize,
     pub quarantine: Vec<JobRow>,
     pub selected_quarantine: usize,
+    
+    pub s3_objects: Vec<S3Object>,
+    pub selected_remote: usize,
+
     pub last_refresh: Instant,
     pub status_message: String,
     pub input_mode: InputMode,
@@ -131,6 +152,23 @@ pub struct App {
     pub clamav_status: Arc<Mutex<String>>,
     pub progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
     pub cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
+    pub conn: Arc<Mutex<Connection>>,
+
+    // Logs
+    pub logs: VecDeque<String>,
+    pub logs_scroll: usize,
+    pub logs_scroll_x: usize,
+    pub logs_stick_to_bottom: bool,
+    pub log_search_active: bool,
+    pub log_search_query: String,
+    pub log_search_results: Vec<usize>, // Indicies of matching lines
+    pub log_search_current: usize, // Index in log_search_results
+    pub log_handle: Option<crate::logging::LogHandle>,
+    pub current_log_level: String,
+
+    // Queue & History Search
+    pub queue_search_query: String,
+    pub history_search_query: String,
 
     // Visualization
     pub view_mode: ViewMode,
@@ -138,8 +176,8 @@ pub struct App {
     pub visual_history: Vec<VisualItem>,
 
     // Async feedback channel
-    pub async_rx: mpsc::Receiver<String>,
-    pub async_tx: mpsc::Sender<String>,
+    pub async_rx: mpsc::Receiver<AppEvent>,
+    pub async_tx: mpsc::Sender<AppEvent>,
     // Wizard
     pub show_wizard: bool,
     pub wizard: WizardState,
@@ -161,6 +199,10 @@ pub struct App {
     // Layout Adjustment
     pub layout_adjust_target: Option<LayoutTarget>,
     pub layout_adjust_message: String,
+    
+
+
+
 }
 
 impl App {
@@ -169,11 +211,13 @@ impl App {
         config: Arc<Mutex<Config>>,
         progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
         cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
+        log_handle: crate::logging::LogHandle,
     ) -> Result<Self> {
         let cfg_guard = lock_mutex(&config)?;
         let watcher_cfg = cfg_guard.clone();
         let settings = SettingsState::from_config(&cfg_guard);
         let theme = Theme::from_name(&cfg_guard.theme);
+        let initial_log_level = cfg_guard.log_level.clone();
         drop(cfg_guard);
 
         let (tx, rx) = mpsc::channel();
@@ -189,6 +233,10 @@ impl App {
             selected: 0,
             selected_history: 0,
             selected_quarantine: 0,
+            
+            s3_objects: Vec::new(),
+            selected_remote: 0,
+            
             last_refresh: Instant::now() - Duration::from_secs(5),
             status_message: "Ready".to_string(),
             input_mode: InputMode::Normal,
@@ -226,6 +274,22 @@ impl App {
             last_click_pos: None,
             layout_adjust_target: None,
             layout_adjust_message: String::new(),
+
+            logs: VecDeque::new(),
+            logs_scroll: 0,
+            logs_scroll_x: 0,
+            logs_stick_to_bottom: true,
+            log_search_active: false,
+            log_search_query: String::new(),
+            log_search_results: Vec::new(),
+            log_search_current: 0,
+            log_handle: Some(log_handle),
+            current_log_level: initial_log_level,
+
+            conn: conn.clone(),
+        queue_search_query: String::new(),
+            history_search_query: String::new(),
+
         };
 
         // ClamAV checker thread
@@ -264,6 +328,8 @@ impl App {
     }
 
     pub fn refresh_jobs(&mut self, conn: &Connection) -> Result<()> {
+        // Use trace! to avoid spamming logs every tick
+        // tracing::trace!("Refreshing jobs");
         self.jobs = list_active_jobs(conn, 100)?;
         let filter_str = if self.history_filter == HistoryFilter::All {
             None
@@ -273,7 +339,13 @@ impl App {
         self.history = list_history_jobs(conn, 100, filter_str)?;
         self.quarantine = list_quarantined_jobs(conn, 100)?;
 
+        let prev_visual_jobs_len = self.visual_jobs.len();
         self.rebuild_visual_lists();
+
+        if self.visual_jobs.len() != prev_visual_jobs_len {
+            // Log when list size changes significantly? 
+            // tracing::debug!("Job list updated: {} jobs visible", self.visual_jobs.len());
+        }
 
         // Auto-fix selected if out of bounds (using visual list size)
         if self.selected >= self.visual_jobs.len() {
@@ -291,15 +363,36 @@ impl App {
     }
 
     pub fn rebuild_visual_lists(&mut self) {
-        self.visual_jobs = self.build_visual_list(&self.jobs);
-        self.visual_history = self.build_visual_list(&self.history);
+        let q_query = self.queue_search_query.to_lowercase();
+        self.visual_jobs = self.build_visual_list(&self.jobs, &q_query);
+        let h_query = self.history_search_query.to_lowercase();
+        self.visual_history = self.build_visual_list(&self.history, &h_query);
     }
 
-    pub fn build_visual_list(&self, jobs: &[JobRow]) -> Vec<VisualItem> {
+    pub fn build_visual_list(&self, jobs: &[JobRow], filter_query: &str) -> Vec<VisualItem> {
+        let filtered_jobs: Vec<(usize, &JobRow)> = if filter_query.is_empty() {
+            jobs.iter().enumerate().collect()
+        } else {
+            jobs.iter()
+                .enumerate()
+                .filter(|(_, job)| {
+                    job.source_path.to_lowercase().contains(filter_query) ||
+                    Path::new(&job.source_path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_lowercase().contains(filter_query))
+                        .unwrap_or(false)
+                })
+                .collect()
+        };
+
+        let (jobs_to_process, original_indices): (Vec<&JobRow>, Vec<usize>) = filtered_jobs
+            .iter()
+            .map(|(idx, job)| (*job, *idx))
+            .unzip();
+
         match self.view_mode {
             ViewMode::Flat => {
-                jobs.iter()
-                    .enumerate()
+                filtered_jobs.into_iter()
                     .map(|(i, job)| {
                         // Extract filename for display
                         let name = Path::new(&job.source_path)
@@ -318,13 +411,13 @@ impl App {
                     .collect()
             }
             ViewMode::Tree => {
-                if jobs.is_empty() {
+                if jobs_to_process.is_empty() {
                     return Vec::new();
                 }
 
                 // 1. Calculate Common Prefix
                 // We must scan ALL paths since we aren't sorting anymore.
-                let paths: Vec<&Path> = jobs.iter().map(|j| Path::new(&j.source_path)).collect();
+                let paths: Vec<&Path> = jobs_to_process.iter().map(|j| Path::new(&j.source_path)).collect();
                 let p0 = paths[0];
                 let mut common_components: Vec<_> = p0.components().collect();
 
@@ -347,7 +440,7 @@ impl App {
 
                 // If common prefix is exactly a file path (e.g. single file in list),
                 // we should start "view" at its parent folder to show structure.
-                let common_is_file = jobs
+                let common_is_file = jobs_to_process
                     .iter()
                     .any(|j| Path::new(&j.source_path) == common_path_buf);
 
@@ -395,8 +488,9 @@ impl App {
                     children: Vec::new(),
                     files: Vec::new(),
                 };
-
-                for (idx, job) in jobs.iter().enumerate() {
+                
+                for (it_idx, job) in jobs_to_process.iter().enumerate() {
+                    let _orig_idx = original_indices[it_idx];
                     let full_path = Path::new(&job.source_path);
                     let rel_path = full_path.strip_prefix(&base_path_buf).unwrap_or(full_path);
 
@@ -428,13 +522,16 @@ impl App {
                                     fn check_collision(
                                         node: &TreeNode,
                                         path: &[String],
-                                        jobs: &[JobRow],
+                                        jobs_to_process: &[&JobRow],
                                     ) -> bool {
                                         if path.len() == 1 {
                                             // Path is just [filename]. Check node.files.
                                             let filename = &path[0];
                                             for &f_idx in &node.files {
-                                                let f_path = &jobs[f_idx].source_path;
+                                                // index_in_jobs logic: f_idx is a relative index in the filtered list if Tree traversal uses it
+                                                // Actually, current implementation pushes `idx` from loop over `jobs_to_process`
+                                                // which is an index into `jobs_to_process`.
+                                                let f_path = &jobs_to_process[f_idx].source_path;
                                                 let f_name = std::path::Path::new(f_path)
                                                     .file_name()
                                                     .unwrap_or_default()
@@ -450,12 +547,12 @@ impl App {
                                         if let Some(child) =
                                             node.children.iter().find(|c| c.name == *next_dir)
                                         {
-                                            return check_collision(child, &path[1..], jobs);
+                                            return check_collision(child, &path[1..], jobs_to_process);
                                         }
                                         false
                                     }
 
-                                    if !check_collision(last, remaining_for_file, jobs) {
+                                    if !check_collision(last, remaining_for_file, &jobs_to_process) {
                                         should_merge = true;
                                     }
 
@@ -475,7 +572,7 @@ impl App {
                         }
                     }
 
-                    current.files.push(idx);
+                    current.files.push(it_idx);
                 }
 
                 // 4. Flatten Tree
@@ -484,7 +581,8 @@ impl App {
                     node: &TreeNode,
                     depth: usize,
                     items: &mut Vec<VisualItem>,
-                    jobs: &[JobRow],
+                    jobs_to_process: &[&JobRow],
+                    original_indices: &[usize],
                 ) {
                     // Helper to find first file in a node
                     fn find_any_file(node: &TreeNode) -> Option<usize> {
@@ -509,12 +607,13 @@ impl App {
                             depth,
                             first_job_index: first_job,
                         });
-                        flatten(child, depth + 1, items, jobs);
+                        flatten(child, depth + 1, items, jobs_to_process, original_indices);
                     }
 
-                    // Files
-                    for &idx in &node.files {
-                        let job = &jobs[idx];
+                    // Files (Relative to jobs_to_process)
+                    for &it_idx in &node.files {
+                        let job = jobs_to_process[it_idx];
+                        let orig_idx = original_indices[it_idx];
                         let filename = std::path::Path::new(&job.source_path)
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
@@ -522,7 +621,7 @@ impl App {
 
                         items.push(VisualItem {
                             text: filename,
-                            index_in_jobs: Some(idx),
+                            index_in_jobs: Some(orig_idx),
                             is_folder: false,
                             depth,
                             first_job_index: None,
@@ -530,7 +629,7 @@ impl App {
                     }
                 }
 
-                flatten(&root, 0, &mut items, jobs);
+                flatten(&root, 0, &mut items, &jobs_to_process, &original_indices);
                 items
             }
         }
@@ -553,7 +652,18 @@ impl App {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.is_parent || e.name.to_lowercase().contains(&filter))
+            .filter(|(_, e)| {
+                if e.is_parent { return true; }
+                let matches_name = e.name.to_lowercase().contains(&filter);
+                if self.picker.search_recursive {
+                    let rel_path = e.path.strip_prefix(&self.picker.cwd)
+                        .map(|p| p.to_string_lossy().to_lowercase())
+                        .unwrap_or_else(|_| e.name.to_lowercase());
+                    matches_name || rel_path.contains(&filter)
+                } else {
+                    matches_name
+                }
+            })
             .map(|(i, _)| i)
             .collect();
 
@@ -587,7 +697,18 @@ impl App {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.is_parent || e.name.to_lowercase().contains(&filter))
+            .filter(|(_, e)| {
+                if e.is_parent { return true; }
+                let matches_name = e.name.to_lowercase().contains(&filter);
+                if self.picker.search_recursive {
+                    let rel_path = e.path.strip_prefix(&self.picker.cwd)
+                        .map(|p| p.to_string_lossy().to_lowercase())
+                        .unwrap_or_else(|_| e.name.to_lowercase());
+                    matches_name || rel_path.contains(&filter)
+                } else {
+                    matches_name
+                }
+            })
             .map(|(i, _)| i)
             .collect();
 
@@ -621,12 +742,147 @@ impl App {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.is_parent || e.name.to_lowercase().contains(&filter))
+            .filter(|(_, e)| {
+                if e.is_parent { return true; }
+                let matches_name = e.name.to_lowercase().contains(&filter);
+                if self.picker.search_recursive {
+                    let rel_path = e.path.strip_prefix(&self.picker.cwd)
+                        .map(|p| p.to_string_lossy().to_lowercase())
+                        .unwrap_or_else(|_| e.name.to_lowercase());
+                    matches_name || rel_path.contains(&filter)
+                } else {
+                    matches_name
+                }
+            })
             .map(|(i, _)| i)
             .collect();
 
         if !filtered_indices.is_empty() && !filtered_indices.contains(&self.picker.selected) {
             self.picker.selected = filtered_indices[0];
+        }
+    }
+
+    pub fn set_log_level(&mut self, level: &str) {
+        if let Some(handle) = &self.log_handle {
+             use tracing_subscriber::EnvFilter;
+             let new_filter = EnvFilter::new(level);
+             if let Err(e) = handle.reload(new_filter) {
+                 self.status_message = format!("Failed to set log level: {}", e);
+             } else {
+                 self.current_log_level = level.to_string();
+                 self.status_message = format!("Log level set to: {}", level);
+                 
+                 // Persist to config and DB
+                 if let Ok(mut cfg) = self.config.lock() {
+                     cfg.log_level = level.to_string();
+                     if let Ok(conn) = self.conn.lock() {
+                         if let Err(e) = crate::config::save_config_to_db(&conn, &cfg) {
+                             tracing::error!("Failed to save log level to DB: {}", e);
+                         }
+                     }
+                 }
+             }
+        }
+    }
+
+    
+
+
+    pub fn toggle_pause_selected_job(&mut self) {
+        let job_id = if self.view_mode == ViewMode::Flat {
+             if self.selected < self.jobs.len() {
+                 self.jobs[self.selected].id
+             } else {
+                 return;
+             }
+        } else {
+             // Tree mode logic: find job ID from visual item
+             // Assuming simple mapping for now or finding from visual item
+             // VisualItem has index_in_jobs, which is index into self.jobs (if flattened first?)
+             // Actually self.visual_jobs[self.selected].index_in_jobs -> self.jobs[idx].id
+             if self.selected < self.visual_jobs.len() {
+                  if let Some(idx) = self.visual_jobs[self.selected].index_in_jobs {
+                      if idx < self.jobs.len() {
+                          self.jobs[idx].id
+                      } else { return; }
+                  } else {
+                      return; // Folder selected?
+                  }
+             } else {
+                 return;
+             }
+        };
+
+        let conn = if let Ok(c) = self.conn.lock() { c } else { return; };
+        
+        // Get current status
+        let status = if let Ok(Some(job)) = crate::db::get_job(&conn, job_id) {
+            job.status
+        } else {
+            return;
+        };
+
+        if status == "paused" {
+            if let Err(e) = crate::db::resume_job(&conn, job_id) {
+                self.status_message = format!("Failed to resume: {}", e);
+            } else {
+                self.status_message = format!("Resumed job {}", job_id);
+            }
+        } else if status == "uploading" || status == "scanning" || status == "queued" || status == "staged" || status == "ready" {
+            if let Err(e) = crate::db::pause_job(&conn, job_id) {
+                self.status_message = format!("Failed to pause: {}", e);
+            } else {
+                self.status_message = format!("Paused job {}", job_id);
+                // Trigger cancellation if running
+                if let Ok(tokens) = self.cancellation_tokens.lock() {
+                    if let Some(token) = tokens.get(&job_id) {
+                        token.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        } else {
+            self.status_message = "Cannot pause/resume this job (invalid state)".to_string();
+        }
+    }
+
+    pub fn change_selected_job_priority(&mut self, delta: i64) {
+        let job_id = if self.view_mode == ViewMode::Flat {
+             if self.selected < self.jobs.len() {
+                 self.jobs[self.selected].id
+             } else {
+                 return;
+             }
+        } else {
+             if self.selected < self.visual_jobs.len() {
+                  if let Some(idx) = self.visual_jobs[self.selected].index_in_jobs {
+                      if idx < self.jobs.len() {
+                          self.jobs[idx].id
+                      } else { return; }
+                  } else {
+                      return;
+                  }
+             } else {
+                 return;
+             }
+        };
+
+        let conn_arc = self.conn.clone();
+        let conn = if let Ok(c) = conn_arc.lock() { c } else { return; };
+        
+        if let Ok(Some(job)) = crate::db::get_job(&conn, job_id) {
+            let new_priority = job.priority + delta;
+            if let Err(e) = crate::db::set_job_priority(&conn, job_id, new_priority) {
+                self.status_message = format!("Failed to set priority: {}", e);
+            } else {
+                self.status_message = format!("Priority set to {}", new_priority);
+                let _ = self.refresh_jobs(&conn);
+                
+                if let Some(pos) = self.jobs.iter().position(|j| j.id == job_id) {
+                    if self.view_mode == ViewMode::Flat {
+                        self.selected = pos;
+                    }
+                }
+            }
         }
     }
 }

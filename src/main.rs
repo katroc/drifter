@@ -7,6 +7,7 @@ mod db;
 mod coordinator;
 mod tui;
 mod utils;
+mod logging;
 
 use crate::coordinator::Coordinator;
 use crate::core::config;
@@ -18,9 +19,16 @@ use std::thread;
 use std::collections::HashMap;
 
 fn main() -> Result<()> {
+    // Initialize logging
+    let (_guard, log_handle) = logging::init();
+
+    tracing::info!("Starting Drifter application...");
+
     // Bootstrap: always use ./state for DB location
     let state_dir = "./state";
     std::fs::create_dir_all(state_dir)?;
+    
+
     
     let conn = init_db(state_dir)?;
     
@@ -36,6 +44,17 @@ fn main() -> Result<()> {
     // Load config from database
     let cfg = config::load_config_from_db(&conn)?;
     
+    // Apply persisted log level
+    if let Some(log_level) = &Some(&cfg.log_level) {
+        use tracing_subscriber::EnvFilter;
+        let new_filter = EnvFilter::new(log_level);
+        if let Err(e) = log_handle.reload(new_filter) {
+            eprintln!("Failed to apply persisted log level '{}': {}", log_level, e);
+        } else {
+            tracing::info!("Applied persisted log level: {}", log_level);
+        }
+    }
+
     // Ensure directories exist
     std::fs::create_dir_all(&cfg.staging_dir)?;
     std::fs::create_dir_all(&cfg.quarantine_dir)?;
@@ -63,6 +82,6 @@ fn main() -> Result<()> {
     });
 
     // Run TUI, passing wizard flag
-    tui::run_tui(conn, cfg, progress, cancellation_tokens, needs_wizard)?;
+    tui::run_tui(conn, cfg, progress, cancellation_tokens, needs_wizard, log_handle)?;
     Ok(())
 }

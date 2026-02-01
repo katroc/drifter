@@ -19,6 +19,7 @@ use crate::ui::util::{
     status_kind, extract_threat_name, calculate_list_offset
 };
 
+
 pub fn ui(f: &mut Frame, app: &App) {
     if app.show_wizard {
         draw_wizard(f, app);
@@ -51,6 +52,8 @@ pub fn ui(f: &mut Frame, app: &App) {
     match app.current_tab {
         AppTab::Transfers => draw_transfers(f, app, main_layout[1]),
         AppTab::Quarantine => draw_quarantine(f, app, main_layout[1]),
+        AppTab::Remote => crate::ui::remote::render_remote(f, app, main_layout[1], &app.theme),
+        AppTab::Logs => crate::ui::logs::render_logs(f, app, main_layout[1], &app.theme),
         AppTab::Settings => draw_settings(f, app, main_layout[1]),
     }
 
@@ -126,7 +129,7 @@ fn draw_rail(f: &mut Frame, app: &App, area: Rect) {
         app.theme.border_style()
     };
 
-    let items = [" Transfers ", " Quarantine ", " Settings  "];
+    let items = [" Transfers ", " Quarantine ", " Remote    ", " Logs      ", " Settings  "];
     let rows: Vec<Row> = items
         .iter()
         .enumerate()
@@ -183,7 +186,10 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
         InputMode::Normal if is_focused => " Hopper (Press 'a' to browse) ",
         InputMode::Normal => " Hopper ",
         InputMode::Confirmation => " Hopper ",
-        InputMode::LayoutAdjust => " Hopper ",
+        InputMode::LayoutAdjust => " Layout ",
+        InputMode::LogSearch => " Search ",
+        InputMode::QueueSearch => " Queue (Search) ",
+        InputMode::HistorySearch => " History (Search) ",
     };
 
     let block = Block::default()
@@ -239,13 +245,12 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Paragraph::new(filter_line), filter_area);
     }
 
+    let has_filter = !app.input_buffer.is_empty() || app.input_mode == InputMode::Filter;
     let table_area = Rect::new(
         inner_area.x,
-        inner_area.y + if app.input_buffer.is_empty() { 1 } else { 2 },
+        inner_area.y + if has_filter { 2 } else { 1 },
         inner_area.width,
-        inner_area
-            .height
-            .saturating_sub(if app.input_buffer.is_empty() { 1 } else { 2 }),
+        inner_area.height.saturating_sub(if has_filter { 2 } else { 1 }),
     );
 
     // Live Filtering
@@ -256,7 +261,26 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
         .entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.is_parent || filter.is_empty() || fuzzy_match(&filter, &e.name))
+        .filter(|(_, e)| {
+            if e.is_parent {
+                return true;
+            }
+            if filter.is_empty() {
+                return true;
+            }
+            
+            if fuzzy_match(&filter, &e.name) {
+                return true;
+            }
+            
+            if app.picker.search_recursive {
+                if let Ok(rel_path) = e.path.strip_prefix(&app.picker.cwd) {
+                    return fuzzy_match(&filter, &rel_path.to_string_lossy());
+                }
+            }
+            
+            false
+        })
         .collect();
 
     let total_rows = filtered_entries.len();
@@ -293,8 +317,18 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
                 ""
             };
 
+            let display_name = if app.picker.search_recursive && app.picker.is_searching {
+                if let Ok(rel_path) = entry.path.strip_prefix(&app.picker.cwd) {
+                    rel_path.to_string_lossy().to_string()
+                } else {
+                    entry.name.clone()
+                }
+            } else {
+                entry.name.clone()
+            };
+
             let name_styled =
-                format!("{}{}{}", "  ".repeat(entry.depth), expand, prefix) + &entry.name;
+                format!("{}{}{}", "  ".repeat(entry.depth), expand, prefix) + &display_name;
             let size_str = if entry.is_dir {
                 "-".to_string()
             } else {
@@ -359,8 +393,37 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
         .style(app.theme.header_style())
         .height(1);
 
+    let inner_area = Block::default()
+        .borders(Borders::ALL)
+        .inner(area);
+
+    let has_filter = !app.queue_search_query.is_empty() || app.input_mode == InputMode::QueueSearch;
+    
+    if has_filter {
+        let filter_line = Line::from(vec![
+            Span::styled(" 🔍 Filter: ", app.theme.muted_style()),
+            Span::styled(&app.queue_search_query, app.theme.accent_style()),
+            Span::styled(
+                if app.input_mode == InputMode::QueueSearch { " █" } else { "" },
+                app.theme.accent_style(),
+            ),
+        ]);
+        let filter_area = Rect::new(inner_area.x, inner_area.y, inner_area.width, 1);
+        f.render_widget(Paragraph::new(filter_line), filter_area);
+    }
+
+    let table_area = Rect::new(
+        inner_area.x,
+        inner_area.y + if has_filter { 1 } else { 0 },
+        inner_area.width,
+        inner_area.height.saturating_sub(if has_filter { 1 } else { 0 }),
+    );
+
     let total_rows = app.visual_jobs.len();
-    let display_height = area.height.saturating_sub(4) as usize; // Border + Header
+    let display_height = table_area.height.saturating_sub(2) as usize; // Header + 1 padding for table border?
+    // Actually, Ratatui Table.block handles its own border. 
+    // Wait, draw_jobs currently defines its own header row and creates a Table.
+    
     let offset = calculate_list_offset(app.selected, total_rows, display_height);
 
     let rows = app
@@ -439,9 +502,15 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
                     app.theme.progress_style()
                 };
 
+                let p_indicator = if job.priority != 0 {
+                    format!("[P:{}] ", job.priority)
+                } else {
+                    String::new()
+                };
+
                 Row::new(vec![
                     Cell::from(display_name),
-                    Cell::from(job.status.clone()).style(status_style),
+                    Cell::from(format!("{}{}", p_indicator, job.status)).style(status_style),
                     Cell::from(format_bytes(job.size_bytes as u64)),
                     Cell::from(p_str).style(progress_style),
                     Cell::from(time_str),
@@ -459,6 +528,15 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
             }
         });
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(app.theme.border_type)
+        .title(" Queue (Jobs) ")
+        .border_style(focus_style)
+        .style(app.theme.panel_style());
+
+    f.render_widget(block, area);
+
     let table = Table::new(
         rows,
         [
@@ -469,17 +547,9 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(10),
         ],
     )
-    .header(header)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(app.theme.border_type)
-            .title(" Queue (Jobs) ")
-            .border_style(focus_style)
-            .style(app.theme.panel_style()),
-    );
+    .header(header);
 
-    f.render_widget(table, area);
+    f.render_widget(table, table_area);
 }
 
 fn draw_history(f: &mut Frame, app: &App, area: Rect) {
@@ -496,8 +566,45 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
         .style(app.theme.header_style())
         .height(1);
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(app.theme.border_type)
+        .title(format!(" History [{}] ", app.history_filter.as_str()))
+        .border_style(focus_style)
+        .style(app.theme.panel_style());
+
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    let has_filter =
+        !app.history_search_query.is_empty() || app.input_mode == InputMode::HistorySearch;
+
+    if has_filter {
+        let filter_line = Line::from(vec![
+            Span::styled(" 🔍 Filter: ", app.theme.muted_style()),
+            Span::styled(&app.history_search_query, app.theme.accent_style()),
+            Span::styled(
+                if app.input_mode == InputMode::HistorySearch {
+                    " █"
+                } else {
+                    ""
+                },
+                app.theme.accent_style(),
+            ),
+        ]);
+        let filter_area = Rect::new(inner_area.x, inner_area.y, inner_area.width, 1);
+        f.render_widget(Paragraph::new(filter_line), filter_area);
+    }
+
+    let table_area = Rect::new(
+        inner_area.x,
+        inner_area.y + if has_filter { 1 } else { 0 },
+        inner_area.width,
+        inner_area.height.saturating_sub(if has_filter { 1 } else { 0 }),
+    );
+
     let total_rows = app.visual_history.len();
-    let display_height = area.height.saturating_sub(4) as usize; 
+    let display_height = table_area.height.saturating_sub(2) as usize; // Header + 1 padding?
     let offset = calculate_list_offset(app.selected_history, total_rows, display_height);
 
     let rows = app
@@ -569,8 +676,6 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
             }
         });
 
-    let title = format!(" History [{}] ", app.history_filter.as_str());
-
     let table = Table::new(
         rows,
         [
@@ -580,17 +685,9 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(10),
         ],
     )
-    .header(header)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(app.theme.border_type)
-            .title(title)
-            .border_style(focus_style)
-            .style(app.theme.panel_style()),
-    );
+    .header(header);
 
-    f.render_widget(table, area);
+    f.render_widget(table, table_area);
 }
 
 fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRow) {
@@ -831,6 +928,9 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         .style(app.theme.panel_style());
     let sidebar = List::new(cat_items).block(sidebar_block);
     f.render_widget(sidebar, main_layout[0]);
+
+
+
 
     let fields_area = main_layout[1];
     let display_height = fields_area.height as usize;
@@ -1251,6 +1351,19 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let act = |a: &str| Span::styled(format!(" {}", a), app.theme.muted_style());
 
     let footer_spans = match app.input_mode {
+
+
+        InputMode::LogSearch => vec![
+            key("Enter"), act("Search"), sep(),
+            key("Esc"), act("Cancel"),
+        ],
+        InputMode::QueueSearch | InputMode::HistorySearch => vec![
+            key("Type"),
+            act("to filter"),
+            sep(),
+            key("Enter/Esc"),
+            act("Done"),
+        ],
         InputMode::Filter => vec![
             key("Type"),
             act("to filter"),
@@ -1306,7 +1419,17 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             key("q"),
             act("Cancel"),
         ],
-        InputMode::Normal => match app.focus {
+        InputMode::Normal => if app.current_tab == AppTab::Remote {
+             vec![
+                 key("r"), act("Refresh"), sep(),
+                 key("d"), act("Download"), sep(),
+                 key("x"), act("Delete"), sep(),
+                 key("Tab"), act("Nav"),
+             ]
+        } else { match app.focus {
+            AppFocus::Logs => vec![
+                key("q"), act("Back"),
+            ],
             AppFocus::Rail => vec![
                 key("Tab/→"),
                 act("Content"),
@@ -1331,6 +1454,12 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 key("↑/↓"),
                 act("Select"),
                 sep(),
+                key("p"),
+                act("Pause/Resume"),
+                sep(),
+                key("+/-"),
+                act("Priority"),
+                sep(),
                 key("Enter"),
                 act("Details"),
                 sep(),
@@ -1340,10 +1469,16 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 key("r"),
                 act("Retry"),
                 sep(),
+                key("←/→"),
+                act("Nav"),
+                sep(),
                 key("d"),
-                act("Delete"),
+                act("Cancel"),
             ],
             AppFocus::History => vec![key("Tab"), act("Rail"), sep(), key("←"), act("Queue")],
+            AppFocus::Remote => vec![ // Handled by AppTab::Remote above mostly, but kept for completeness if needed
+                 key("Tab"), act("Rail"),
+            ],
             AppFocus::Quarantine => vec![
                 key("Tab"),
                 act("Rail"),
@@ -1419,6 +1554,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     act("Save"),
                 ],
             },
+        }
         },
     };
 
@@ -1666,3 +1802,5 @@ fn draw_metrics_panel(f: &mut Frame, app: &App, area: Rect) {
     ];
     f.render_widget(Paragraph::new(net_content), chunks[1]);
 }
+
+
