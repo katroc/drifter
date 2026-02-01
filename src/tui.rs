@@ -38,13 +38,15 @@ use crate::components::wizard::{WizardState, WizardStep};
 use crate::ui::util::{calculate_list_offset, fuzzy_match};
 use crate::utils::lock_mutex;
 
+use tokio::sync::Mutex as AsyncMutex;
 
 
-pub fn run_tui(
+
+pub async fn run_tui(
     conn_mutex: Arc<Mutex<Connection>>,
-    cfg: Arc<Mutex<Config>>,
-    progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
-    cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
+    cfg: Arc<AsyncMutex<Config>>,
+    progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>,
+    cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
     needs_wizard: bool,
     log_handle: crate::logging::LogHandle,
 ) -> Result<()> {
@@ -57,10 +59,10 @@ pub fn run_tui(
     let mut app = App::new(
         conn_mutex.clone(),
         cfg.clone(),
-        progress,
-        cancellation_tokens,
-        log_handle,
-    )?;
+        progress.clone(),
+        cancellation_tokens.clone(),
+        log_handle.clone(),
+    ).await?;
     app.show_wizard = needs_wizard;
 
     {
@@ -76,8 +78,18 @@ pub fn run_tui(
 
     let tick_rate = Duration::from_millis(200);
     loop {
+        // Update valid cached state for rendering (Pre-render sync)
+        {
+            let cfg = app.config.lock().await;
+            app.cached_config = cfg.clone();
+        }
+        {
+            let prog = app.progress.lock().await;
+            app.cached_progress = prog.clone();
+        }
+
         // Refresh metrics periodically (e.g. every 1s) if enabled
-        if lock_mutex(&app.config)?.host_metrics_enabled
+        if app.cached_config.host_metrics_enabled
             && app.last_metrics_refresh.elapsed() >= Duration::from_secs(1)
         {
                 app.last_metrics = app.metrics.refresh();
@@ -122,42 +134,42 @@ pub fn run_tui(
                         match key.code {
                             KeyCode::Char('1') => {
                                 app.layout_adjust_target = Some(LayoutTarget::Hopper);
-                                update_layout_message(&mut app, LayoutTarget::Hopper);
+                                update_layout_message(&mut app, LayoutTarget::Hopper).await;
                             }
                             KeyCode::Char('2') => {
                                 app.layout_adjust_target = Some(LayoutTarget::Queue);
-                                update_layout_message(&mut app, LayoutTarget::Queue);
+                                update_layout_message(&mut app, LayoutTarget::Queue).await;
                             }
                             KeyCode::Char('3') => {
                                 app.layout_adjust_target = Some(LayoutTarget::History);
-                                update_layout_message(&mut app, LayoutTarget::History);
+                                update_layout_message(&mut app, LayoutTarget::History).await;
                             }
                             KeyCode::Char('+') | KeyCode::Char('=') => {
                                 if let Some(target) = app.layout_adjust_target {
-                                    adjust_layout_dimension(&mut app.config, target, 1);
-                                    update_layout_message(&mut app, target);
+                                    adjust_layout_dimension(&app.config, target, 1).await;
+                                    update_layout_message(&mut app, target).await;
                                 }
                             }
                             KeyCode::Char('-') | KeyCode::Char('_') => {
                                 if let Some(target) = app.layout_adjust_target {
-                                    adjust_layout_dimension(&mut app.config, target, -1);
-                                    update_layout_message(&mut app, target);
+                                    adjust_layout_dimension(&app.config, target, -1).await;
+                                    update_layout_message(&mut app, target).await;
                                 }
                             }
                             KeyCode::Char('r') => {
                                 if let Some(target) = app.layout_adjust_target {
-                                    reset_layout_dimension(&mut app.config, target);
-                                    update_layout_message(&mut app, target);
+                                    reset_layout_dimension(&app.config, target).await;
+                                    update_layout_message(&mut app, target).await;
                                 }
                             }
                             KeyCode::Char('R') => {
-                                reset_all_layout_dimensions(&mut app.config);
+                                reset_all_layout_dimensions(&app.config).await;
                                 app.layout_adjust_message =
                                     "All dimensions reset to defaults".to_string();
                             }
                             KeyCode::Char('s') => {
                                 let conn = lock_mutex(&conn_mutex)?;
-                                let cfg_guard = lock_mutex(&app.config)?;
+                                let cfg_guard = app.config.lock().await;
                                 if let Err(e) = crate::config::save_config_to_db(
                                     &conn,
                                     &cfg_guard,
@@ -172,7 +184,7 @@ pub fn run_tui(
                             KeyCode::Esc | KeyCode::Char('q') => {
                                 let conn = lock_mutex(&conn_mutex)?;
                                 if let Ok(loaded_cfg) = crate::config::load_config_from_db(&conn) {
-                                    *lock_mutex(&app.config)? = loaded_cfg;
+                                    *app.config.lock().await = loaded_cfg;
                                     app.status_message = "Layout changes discarded".to_string();
                                 }
                                 app.input_mode = InputMode::Normal;
@@ -213,7 +225,7 @@ pub fn run_tui(
                                     ModalAction::CancelJob(id) => {
                                         // Trigger cancellation token
                                         if let Some(token) =
-                                            lock_mutex(&app.cancellation_tokens)?.get(&id)
+                                            app.cancellation_tokens.lock().await.get(&id)
                                         {
                                             token.store(true, Ordering::Relaxed);
                                         }
@@ -229,27 +241,18 @@ pub fn run_tui(
                                     ModalAction::DeleteRemoteObject(key) => {
                                         app.status_message = format!("Deleting {}...", key);
                                         let tx = app.async_tx.clone();
-                                        let config_clone = lock_mutex(&app.config)?.clone();
+                                        let config_clone = app.config.lock().await.clone();
                                         
-                                        std::thread::spawn(move || {
-                                            let rt = match tokio::runtime::Runtime::new() {
-                                                Ok(rt) => rt,
-                                                Err(e) => { let _ = tx.send(AppEvent::Notification(format!("(Runtime) {}", e))); return; }
-                                            };
-                                            
+                                        tokio::spawn(async move {
                                             // 1. Delete the file
-                                            let res = rt.block_on(async {
-                                                crate::services::uploader::Uploader::delete_file(&config_clone, &key).await
-                                            });
+                                            let res = crate::services::uploader::Uploader::delete_file(&config_clone, &key).await;
                                             
                                             match res {
                                                 Ok(_) => {
                                                     let _ = tx.send(AppEvent::Notification(format!("Deleted {}", key)));
                                                     
                                                     // 2. Refresh the list using the SAME runtime
-                                                    let res_list = rt.block_on(async {
-                                                        crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await
-                                                    });
+                                                    let res_list = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await;
                                                     
                                                     if let Ok(files) = res_list {
                                                          let _ = tx.send(AppEvent::RemoteFileList(files));
@@ -337,12 +340,12 @@ pub fn run_tui(
                                     let _ = std::fs::create_dir_all(&cfg.state_dir);
 
                                     // Update shared config
-                                    let mut shared_cfg = lock_mutex(&app.config)?;
+                                    let mut shared_cfg = app.config.lock().await;
                                     *shared_cfg = cfg;
                                     drop(shared_cfg);
 
                                     // Reload settings state
-                                    let cfg_guard = lock_mutex(&app.config)?;
+                                    let cfg_guard = app.config.lock().await;
                                     app.settings = SettingsState::from_config(&cfg_guard);
 
                                     app.show_wizard = false;
@@ -497,30 +500,21 @@ pub fn run_tui(
                                          let conn = lock_mutex(&conn_mutex)?;
                                          let _ = crate::db::cancel_job(&conn, id);
                                          let _ = app.refresh_jobs(&conn);
-                                          if let Ok(tokens) = app.cancellation_tokens.lock() {
-                                                if let Some(token) = tokens.get(&id) {
-                                                    token.store(true, std::sync::atomic::Ordering::Relaxed);
-                                                }
+                                          if let Some(token) = app.cancellation_tokens.lock().await.get(&id) {
+                                                token.store(true, std::sync::atomic::Ordering::Relaxed);
                                           }
                                          app.status_message = format!("Cancelled job {}", id);
                                      }
                                      ModalAction::DeleteRemoteObject(ref key) => {
                                          let tx = app.async_tx.clone();
-                                         let config_clone = lock_mutex(&app.config)?.clone();
+                                         let config_clone = app.config.lock().await.clone();
                                          let key_clone = key.clone();
-                                         std::thread::spawn(move || {
-                                             let rt = match tokio::runtime::Runtime::new() {
-                                                  Ok(rt) => rt,
-                                                  Err(e) => { let _ = tx.send(AppEvent::Notification(format!("Runtime err: {}", e))); return; }
-                                             };
-                                             let res = rt.block_on(async {
-                                                 crate::services::uploader::Uploader::delete_file(&config_clone, &key_clone).await
-                                             });
+                                         tokio::spawn(async move {
+                                             let res = crate::services::uploader::Uploader::delete_file(&config_clone, &key_clone).await;
                                              match res {
                                                  Ok(_) => { let _ = tx.send(AppEvent::Notification(format!("Deleted '{}'", key_clone))); }
                                                  Err(e) => { let _ = tx.send(AppEvent::Notification(format!("Delete Failed: {}", e))); }
                                              }
-
                                          });
                                          app.status_message = format!("Deleting {}...", key);
                                      }
@@ -567,15 +561,9 @@ pub fn run_tui(
                                 if app.current_tab == AppTab::Remote {
                                     // Auto-refresh
                                     let tx = app.async_tx.clone();
-                                    let config_clone = lock_mutex(&app.config)?.clone();
-                                    std::thread::spawn(move || {
-                                        let rt = match tokio::runtime::Runtime::new() {
-                                            Ok(rt) => rt,
-                                            Err(e) => { let _ = tx.send(AppEvent::Notification(format!("(Runtime) {}", e))); return; }
-                                        };
-                                        let res = rt.block_on(async {
-                                            crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await
-                                        });
+                                    let config_clone = app.config.lock().await.clone();
+                                    tokio::spawn(async move {
+                                        let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await;
                                         match res {
                                             Ok(files) => { let _ = tx.send(AppEvent::RemoteFileList(files)); }
                                             Err(e) => { let _ = tx.send(AppEvent::Notification(format!("List Failed: {}", e))); }
@@ -594,15 +582,9 @@ pub fn run_tui(
                                 if app.current_tab == AppTab::Remote {
                                     // Auto-refresh
                                     let tx = app.async_tx.clone();
-                                    let config_clone = lock_mutex(&app.config)?.clone();
-                                    std::thread::spawn(move || {
-                                        let rt = match tokio::runtime::Runtime::new() {
-                                            Ok(rt) => rt,
-                                            Err(e) => { let _ = tx.send(AppEvent::Notification(format!("(Runtime) {}", e))); return; }
-                                        };
-                                        let res = rt.block_on(async {
-                                            crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await
-                                        });
+                                    let config_clone = app.config.lock().await.clone();
+                                    tokio::spawn(async move {
+                                        let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await;
                                         match res {
                                             Ok(files) => { let _ = tx.send(AppEvent::RemoteFileList(files)); }
                                             Err(e) => { let _ = tx.send(AppEvent::Notification(format!("List Failed: {}", e))); }
@@ -676,7 +658,7 @@ pub fn run_tui(
                                                 {
                                                     // Only queue files on Enter or 'l', not Right arrow
                                                     let conn_clone = conn_mutex.clone();
-                                                    let cfg_guard = lock_mutex(&cfg)?;
+                                                    let cfg_guard = cfg.lock().await;
                                                     let staging = cfg_guard.staging_dir.clone();
                                                     let staging_mode =
                                                         cfg_guard.staging_mode.clone();
@@ -724,7 +706,7 @@ pub fn run_tui(
                                                 app.picker.selected_paths.iter().cloned().collect();
                                             if !paths.is_empty() {
                                                 let conn_clone = conn_mutex.clone();
-                                                let cfg_guard = lock_mutex(&cfg)?;
+                                                let cfg_guard = cfg.lock().await;
                                                 let staging = cfg_guard.staging_dir.clone();
                                                 let staging_mode = cfg_guard.staging_mode.clone();
                                                 drop(cfg_guard);
@@ -829,7 +811,7 @@ pub fn run_tui(
                                             let _ = app.refresh_jobs(&conn);
                                         }
                                         KeyCode::Char('p') => {
-                                            app.toggle_pause_selected_job();
+                                            app.toggle_pause_selected_job().await;
                                         }
                                         KeyCode::Char('+') | KeyCode::Char('=') => {
                                             app.change_selected_job_priority(1);
@@ -1090,18 +1072,9 @@ pub fn run_tui(
                             KeyCode::Char('r') => {
                                 app.status_message = "Refreshing S3 list...".to_string();
                                 let tx = app.async_tx.clone();
-                                let config_clone = lock_mutex(&app.config)?.clone();
-                                std::thread::spawn(move || {
-                                    let rt = match tokio::runtime::Runtime::new() {
-                                        Ok(rt) => rt,
-                                        Err(e) => {
-                                            let _ = tx.send(AppEvent::Notification(format!("(Runtime) {}", e)));
-                                            return;
-                                        }
-                                    };
-                                    let res = rt.block_on(async {
-                                        crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await
-                                    });
+                                let config_clone = app.config.lock().await.clone();
+                                tokio::spawn(async move {
+                                    let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await;
                                     match res {
                                         Ok(files) => {
                                             let _ = tx.send(AppEvent::RemoteFileList(files));
@@ -1117,7 +1090,7 @@ pub fn run_tui(
                                     let key = app.s3_objects[app.selected_remote].key.clone();
                                     app.status_message = format!("Downloading {}...", key);
                                     let tx = app.async_tx.clone();
-                                    let config_clone = lock_mutex(&app.config)?.clone();
+                                    let config_clone = app.config.lock().await.clone();
                                     
                                     // Default download location: ~/Downloads/Drifter or similar? 
                                     // For now, let's just download to current working dir or ~/Downloads
@@ -1126,14 +1099,8 @@ pub fn run_tui(
                                     let dest = download_dir.join(std::path::Path::new(&key).file_name().unwrap_or(std::ffi::OsStr::new("downloaded_file")));
                                     let dest_clone = dest.clone();
 
-                                    std::thread::spawn(move || {
-                                        let rt = match tokio::runtime::Runtime::new() {
-                                            Ok(rt) => rt,
-                                            Err(e) => { let _ = tx.send(AppEvent::Notification(format!("(Runtime) {}", e))); return; }
-                                        };
-                                        let res = rt.block_on(async {
-                                            crate::services::uploader::Uploader::download_file(&config_clone, &key, &dest_clone).await
-                                        });
+                                    tokio::spawn(async move {
+                                        let res = crate::services::uploader::Uploader::download_file(&config_clone, &key, &dest_clone).await;
                                         match res {
                                             Ok(_) => {
                                                 let _ = tx.send(AppEvent::Notification(format!("Downloaded to {:?}", dest_clone)));
@@ -1187,7 +1154,7 @@ pub fn run_tui(
                                     app.focus = AppFocus::SettingsFields;
                                 }
                                 KeyCode::Char('s') => {
-                                    let mut cfg = lock_mutex(&app.config)?;
+                                    let mut cfg = app.config.lock().await;
                                     app.settings.apply_to_config(&mut cfg);
 
                                     // Apply theme immediately
@@ -1283,7 +1250,7 @@ pub fn run_tui(
                                         }
 
                                         // Trigger Auto-Save logic immediately
-                                        let mut cfg = lock_mutex(&app.config)?;
+                                        let mut cfg = app.config.lock().await;
                                         app.settings.apply_to_config(&mut cfg);
                                         let conn = lock_mutex(&conn_mutex)?;
                                         if let Err(e) =
@@ -1307,7 +1274,7 @@ pub fn run_tui(
                                             app.settings.original_theme = None;
                                         }
 
-                                        let mut cfg = lock_mutex(&app.config)?;
+                                        let mut cfg = app.config.lock().await;
                                         app.settings.apply_to_config(&mut cfg);
 
                                         // Apply theme immediately
@@ -1528,7 +1495,7 @@ pub fn run_tui(
                                         app.settings.original_theme = None;
                                     }
 
-                                    let mut cfg = lock_mutex(&app.config)?;
+                                    let mut cfg = app.config.lock().await;
                                     app.settings.apply_to_config(&mut cfg);
 
                                     // Apply theme immediately
@@ -1557,28 +1524,19 @@ pub fn run_tui(
                                     {
                                         app.status_message = "Testing connection...".to_string();
                                         let tx = app.async_tx.clone();
-                                        let config_clone = lock_mutex(&app.config)?.clone();
+                                        let config_clone = app.config.lock().await.clone();
 
-                                        std::thread::spawn(move || {
-                                            let rt = match tokio::runtime::Runtime::new() {
-                                                Ok(rt) => rt,
-                                                Err(e) => {
-                                                    let _ = tx.send(AppEvent::Notification(format!("Runtime error: {}", e)));
-                                                    return;
-                                                }
-                                            };
-                                            let res = rt.block_on(async {
-                                                if cat == SettingsCategory::S3 {
-                                                    crate::services::uploader::Uploader::check_connection(
-                                                        &config_clone,
-                                                    )
+                                        tokio::spawn(async move {
+                                            let res = if cat == SettingsCategory::S3 {
+                                                crate::services::uploader::Uploader::check_connection(
+                                                    &config_clone,
+                                                )
+                                                .await
+                                            } else {
+                                                crate::services::scanner::Scanner::new(&config_clone)
+                                                    .check_connection()
                                                     .await
-                                                } else {
-                                                    crate::services::scanner::Scanner::new(&config_clone)
-                                                        .check_connection()
-                                                        .await
-                                                }
-                                            });
+                                            };
 
                                             let msg = match res {
                                                 Ok(s) => s,
@@ -1719,11 +1677,11 @@ pub fn run_tui(
                                         }
 
                                         // Log Levels
-                                        KeyCode::Char('1') => app.set_log_level("error"),
-                                        KeyCode::Char('2') => app.set_log_level("warn"),
-                                        KeyCode::Char('3') => app.set_log_level("info"),
-                                        KeyCode::Char('4') => app.set_log_level("debug"),
-                                        KeyCode::Char('5') => app.set_log_level("trace"),
+                                        KeyCode::Char('1') => app.set_log_level("error").await,
+                                        KeyCode::Char('2') => app.set_log_level("warn").await,
+                                        KeyCode::Char('3') => app.set_log_level("info").await,
+                                        KeyCode::Char('4') => app.set_log_level("debug").await,
+                                        KeyCode::Char('5') => app.set_log_level("trace").await,
 
                                         _ => {}
                                     }
@@ -1733,9 +1691,7 @@ pub fn run_tui(
                     }
                 }
                 Event::Mouse(mouse) => {
-                    let cfg_guard = if let Ok(c) = lock_mutex(&app.config) { c } else { continue };
-                    let history_width = cfg_guard.history_width;
-                    drop(cfg_guard);
+                    let history_width = app.cached_config.history_width;
 
                     if let Ok(size) = terminal.size() {
                         let main_layout = Layout::default()
@@ -1764,15 +1720,9 @@ pub fn run_tui(
                                         app.current_tab = AppTab::Remote;
                                         app.focus = AppFocus::Rail;
                                         let tx = app.async_tx.clone();
-                                        let config_clone = lock_mutex(&app.config)?.clone();
-                                        std::thread::spawn(move || {
-                                            let rt = match tokio::runtime::Runtime::new() {
-                                                Ok(rt) => rt,
-                                                Err(e) => { let _ = tx.send(AppEvent::Notification(format!("(Runtime) {}", e))); return; }
-                                            };
-                                            let res = rt.block_on(async {
-                                                crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await
-                                            });
+                                        let config_clone = app.config.lock().await.clone();
+                                        tokio::spawn(async move {
+                                            let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await;
                                             match res {
                                                 Ok(files) => { let _ = tx.send(AppEvent::RemoteFileList(files)); }
                                                 Err(e) => { let _ = tx.send(AppEvent::Notification(format!("List Failed: {}", e))); }
@@ -1801,7 +1751,7 @@ pub fn run_tui(
                                         }
                                     }
                                     AppTab::Transfers => {
-                                        let hopper_percent = lock_mutex(&app.config).map(|c| c.hopper_width_percent).unwrap_or(50);
+                                        let hopper_percent = app.cached_config.hopper_width_percent;
                                         let chunks = Layout::default()
                                             .direction(Direction::Horizontal)
                                             .constraints([
@@ -1856,10 +1806,7 @@ pub fn run_tui(
                                                                 let path = entry.path.to_string_lossy().to_string();
                                                                 tokio::spawn(async move {
                                                                     let (staging, mode) = {
-                                                                        let cfg = match cfg_handle.lock() {
-                                                                            Ok(c) => c,
-                                                                            Err(_) => return,
-                                                                        };
+                                                                        let cfg = cfg_handle.lock().await;
                                                                         (cfg.staging_dir.clone(), cfg.staging_mode.clone())
                                                                     };
 
@@ -1961,7 +1908,7 @@ pub fn run_tui(
                                                             
                                                             if is_double_click {
                                                                 app.settings.editing = false;
-                                                                let mut cfg = lock_mutex(&app.config)?;
+                                                                let mut cfg = app.config.lock().await;
                                                                 app.settings.apply_to_config(&mut cfg);
                                                                 let conn = lock_mutex(&conn_mutex)?;
                                                                 let _ = crate::config::save_config_to_db(&conn, &cfg);
@@ -2024,7 +1971,7 @@ pub fn run_tui(
                                                         (SettingsCategory::Performance, 5) => { app.settings.host_metrics_enabled = !app.settings.host_metrics_enabled; }
                                                         _ => {}
                                                      }
-                                                     let mut cfg = lock_mutex(&app.config)?;
+                                                     let mut cfg = app.config.lock().await;
                                                      app.settings.apply_to_config(&mut cfg);
                                                      let conn = lock_mutex(&conn_mutex)?;
                                                      let _ = crate::config::save_config_to_db(&conn, &cfg);
@@ -2101,7 +2048,7 @@ pub fn run_tui(
                                         }
                                     }
                                     AppTab::Transfers => {
-                                        let hopper_percent = lock_mutex(&app.config).map(|c| c.hopper_width_percent).unwrap_or(50);
+                                        let hopper_percent = app.cached_config.hopper_width_percent;
                                         let chunks = Layout::default()
                                             .direction(Direction::Horizontal)
                                             .constraints([
@@ -2218,8 +2165,8 @@ pub fn run_tui(
 
 
 
-fn adjust_layout_dimension(config: &mut Arc<Mutex<Config>>, target: LayoutTarget, delta: i16) {
-    let mut cfg = if let Ok(c) = lock_mutex(config) { c } else { return };
+async fn adjust_layout_dimension(config: &Arc<AsyncMutex<Config>>, target: LayoutTarget, delta: i16) {
+    let mut cfg = config.lock().await;
     match target {
         LayoutTarget::Hopper => {
             cfg.hopper_width_percent =
@@ -2236,27 +2183,25 @@ fn adjust_layout_dimension(config: &mut Arc<Mutex<Config>>, target: LayoutTarget
     }
 }
 
-fn reset_layout_dimension(config: &mut Arc<Mutex<Config>>, target: LayoutTarget) {
-    let mut cfg = if let Ok(c) = lock_mutex(config) { c } else { return };
+async fn reset_layout_dimension(config: &Arc<AsyncMutex<Config>>, target: LayoutTarget) {
+    let mut cfg = config.lock().await;
     match target {
         LayoutTarget::Hopper | LayoutTarget::Queue => cfg.hopper_width_percent = 50,
         LayoutTarget::History => cfg.history_width = 60,
     }
 }
 
-fn reset_all_layout_dimensions(config: &mut Arc<Mutex<Config>>) {
-    if let Ok(mut cfg) = lock_mutex(config) {
-        cfg.hopper_width_percent = 50;
-        cfg.history_width = 60;
-    }
+async fn reset_all_layout_dimensions(config: &Arc<AsyncMutex<Config>>) {
+    let mut cfg = config.lock().await;
+    cfg.hopper_width_percent = 50;
+    cfg.history_width = 60;
 }
 
-fn update_layout_message(app: &mut App, target: LayoutTarget) {
-    if let Ok(cfg) = lock_mutex(&app.config) {
-        app.layout_adjust_message = match target {
-            LayoutTarget::Hopper => format!("Hopper Width: {}% (20-80)", cfg.hopper_width_percent),
-            LayoutTarget::Queue => format!("Queue Width: {}% (20-80)", 100 - cfg.hopper_width_percent),
-            LayoutTarget::History => format!("History Width: {} chars (40-100)", cfg.history_width),
-        };
-    }
+async fn update_layout_message(app: &mut App, target: LayoutTarget) {
+    let cfg = app.config.lock().await;
+    app.layout_adjust_message = match target {
+        LayoutTarget::Hopper => format!("Hopper Width: {}% (20-80)", cfg.hopper_width_percent),
+        LayoutTarget::Queue => format!("Queue Width: {}% (20-80)", 100 - cfg.hopper_width_percent),
+        LayoutTarget::History => format!("History Width: {} chars (40-100)", cfg.history_width),
+    };
 }

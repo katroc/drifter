@@ -127,93 +127,70 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
     Ok(conn)
 }
 
+pub const JOB_COLUMNS: &str = "id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at";
+
+impl<'a> TryFrom<&'a rusqlite::Row<'a>> for JobRow {
+    type Error = rusqlite::Error;
+
+    fn try_from(row: &'a rusqlite::Row<'a>) -> Result<Self, Self::Error> {
+        Ok(JobRow {
+            id: row.get(0)?,
+            created_at: row.get(1)?,
+            status: row.get(2)?,
+            source_path: row.get(3)?,
+            size_bytes: row.get(4)?,
+            staged_path: row.get(5)?,
+            error: row.get(6)?,
+            scan_status: row.get(7)?,
+            s3_upload_id: row.get(8)?,
+            s3_key: row.get(9)?,
+            priority: row.get(10).unwrap_or(0),
+            checksum: row.get(11)?,
+            remote_checksum: row.get(12)?,
+            retry_count: row.get(13).unwrap_or(0),
+            next_retry_at: row.get(14)?,
+        })
+    }
+}
+
+// Helper to map a row to a JobRow
+fn map_job_row(row: &rusqlite::Row) -> rusqlite::Result<JobRow> {
+    JobRow::try_from(row)
+}
+
 pub fn list_active_jobs(conn: &Connection, limit: i64) -> Result<Vec<JobRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at FROM jobs 
+        &format!("SELECT {} FROM jobs 
          WHERE status NOT IN ('complete', 'quarantined', 'quarantined_removed', 'cancelled') 
          OR datetime(created_at) > datetime('now', '-15 seconds')
-         ORDER BY priority DESC, id DESC LIMIT ?",
+         ORDER BY priority DESC, id DESC LIMIT ?", JOB_COLUMNS),
     )?;
     let rows = stmt
-        .query_map(params![limit], |row| {
-            Ok(JobRow {
-                id: row.get(0)?,
-                created_at: row.get(1)?,
-                status: row.get(2)?,
-                source_path: row.get(3)?,
-                size_bytes: row.get(4)?,
-                staged_path: row.get(5)?,
-                error: row.get(6)?,
-                scan_status: row.get(7)?,
-                s3_upload_id: row.get(8)?,
-                s3_key: row.get(9)?,
-                priority: row.get(10).unwrap_or(0),
-                checksum: row.get(11)?,
-                remote_checksum: row.get(12)?,
-                retry_count: row.get(13).unwrap_or(0),
-                next_retry_at: row.get(14)?,
-            })
-        })?
+        .query_map(params![limit], map_job_row)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
 pub fn list_history_jobs(conn: &Connection, limit: i64, filter: Option<&str>) -> Result<Vec<JobRow>> {
     let sql = match filter {
-        Some("Complete") => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at FROM jobs WHERE status = 'complete' ORDER BY id DESC LIMIT ?",
-        Some("Quarantined") => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at FROM jobs WHERE status IN ('quarantined', 'quarantined_removed') ORDER BY id DESC LIMIT ?",
-        _ => "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at FROM jobs WHERE status IN ('complete', 'quarantined', 'quarantined_removed', 'cancelled') ORDER BY id DESC LIMIT ?",
+        Some("Complete") => format!("SELECT {} FROM jobs WHERE status = 'complete' ORDER BY id DESC LIMIT ?", JOB_COLUMNS),
+        Some("Quarantined") => format!("SELECT {} FROM jobs WHERE status IN ('quarantined', 'quarantined_removed') ORDER BY id DESC LIMIT ?", JOB_COLUMNS),
+        _ => format!("SELECT {} FROM jobs WHERE status IN ('complete', 'quarantined', 'quarantined_removed', 'cancelled') ORDER BY id DESC LIMIT ?", JOB_COLUMNS),
     };
     
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(params![limit], |row| {
-            Ok(JobRow {
-                id: row.get(0)?,
-                created_at: row.get(1)?,
-                status: row.get(2)?,
-                source_path: row.get(3)?,
-                size_bytes: row.get(4)?,
-                staged_path: row.get(5)?,
-                error: row.get(6)?,
-                scan_status: row.get(7)?,
-                s3_upload_id: row.get(8)?,
-                s3_key: row.get(9)?,
-                priority: row.get(10).unwrap_or(0),
-                checksum: row.get(11)?,
-                remote_checksum: row.get(12)?,
-                retry_count: row.get(13).unwrap_or(0),
-                next_retry_at: row.get(14)?,
-            })
-        })?
+        .query_map(params![limit], map_job_row)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
 pub fn list_quarantined_jobs(conn: &Connection, limit: i64) -> Result<Vec<JobRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at FROM jobs WHERE status = 'quarantined' ORDER BY id DESC LIMIT ?",
+        &format!("SELECT {} FROM jobs WHERE status = 'quarantined' ORDER BY id DESC LIMIT ?", JOB_COLUMNS),
     )?;
     let rows = stmt
-        .query_map(params![limit], |row| {
-            Ok(JobRow {
-                id: row.get(0)?,
-                created_at: row.get(1)?,
-                status: row.get(2)?,
-                source_path: row.get(3)?,
-                size_bytes: row.get(4)?,
-                staged_path: row.get(5)?,
-                error: row.get(6)?,
-                scan_status: row.get(7)?,
-                s3_upload_id: row.get(8)?,
-                s3_key: row.get(9)?,
-                priority: row.get(10).unwrap_or(0),
-                checksum: row.get(11)?,
-                remote_checksum: row.get(12)?,
-                retry_count: row.get(13).unwrap_or(0),
-                next_retry_at: row.get(14)?,
-            })
-        })?
+        .query_map(params![limit], map_job_row)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -229,30 +206,12 @@ pub fn update_job_retry_state(conn: &Connection, job_id: i64, retry_count: i64, 
 pub fn list_retryable_jobs(conn: &Connection) -> Result<Vec<JobRow>> {
     let now = Utc::now().to_rfc3339();
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at FROM jobs 
+        &format!("SELECT {} FROM jobs 
          WHERE status = 'retry_pending' AND next_retry_at <= ?
-         ORDER BY priority DESC, id ASC",
+         ORDER BY priority DESC, id ASC", JOB_COLUMNS),
     )?;
     let rows = stmt
-        .query_map(params![now], |row| {
-            Ok(JobRow {
-                id: row.get(0)?,
-                created_at: row.get(1)?,
-                status: row.get(2)?,
-                source_path: row.get(3)?,
-                size_bytes: row.get(4)?,
-                staged_path: row.get(5)?,
-                error: row.get(6)?,
-                scan_status: row.get(7)?,
-                s3_upload_id: row.get(8)?,
-                s3_key: row.get(9)?,
-                priority: row.get(10).unwrap_or(0),
-                checksum: row.get(11)?,
-                remote_checksum: row.get(12)?,
-                retry_count: row.get(13).unwrap_or(0),
-                next_retry_at: row.get(14)?,
-            })
-        })?
+        .query_map(params![now], map_job_row)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -484,27 +443,9 @@ pub fn update_job_checksums(conn: &Connection, job_id: i64, local: Option<&str>,
 
 pub fn get_next_job(conn: &Connection, current_status: &str) -> Result<Option<JobRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at FROM jobs WHERE status = ? ORDER BY priority DESC, id ASC LIMIT 1",
+        &format!("SELECT {} FROM jobs WHERE status = ? ORDER BY priority DESC, id ASC LIMIT 1", JOB_COLUMNS),
     )?;
-    let mut rows = stmt.query_map(params![current_status], |row| {
-        Ok(JobRow {
-            id: row.get(0)?,
-            created_at: row.get(1)?,
-            status: row.get(2)?,
-            source_path: row.get(3)?,
-            size_bytes: row.get(4)?,
-            staged_path: row.get(5)?,
-            error: row.get(6)?,
-            scan_status: row.get(7)?,
-            s3_upload_id: row.get(8)?,
-            s3_key: row.get(9)?,
-            priority: row.get(10).unwrap_or(0),
-            checksum: row.get(11)?,
-            remote_checksum: row.get(12)?,
-            retry_count: row.get(13).unwrap_or(0),
-            next_retry_at: row.get(14)?,
-        })
-    })?;
+    let mut rows = stmt.query_map(params![current_status], map_job_row)?;
 
     if let Some(row) = rows.next() {
         Ok(Some(row?))
@@ -515,27 +456,9 @@ pub fn get_next_job(conn: &Connection, current_status: &str) -> Result<Option<Jo
 
 pub fn get_job(conn: &Connection, job_id: i64) -> Result<Option<JobRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at FROM jobs WHERE id = ?",
+        &format!("SELECT {} FROM jobs WHERE id = ?", JOB_COLUMNS),
     )?;
-    let mut rows = stmt.query_map(params![job_id], |row| {
-        Ok(JobRow {
-            id: row.get(0)?,
-            created_at: row.get(1)?,
-            status: row.get(2)?,
-            source_path: row.get(3)?,
-            size_bytes: row.get(4)?,
-            staged_path: row.get(5)?,
-            error: row.get(6)?,
-            scan_status: row.get(7)?,
-            s3_upload_id: row.get(8)?,
-            s3_key: row.get(9)?,
-            priority: row.get(10).unwrap_or(0),
-            checksum: row.get(11)?,
-            remote_checksum: row.get(12)?,
-            retry_count: row.get(13).unwrap_or(0),
-            next_retry_at: row.get(14)?,
-        })
-    })?;
+    let mut rows = stmt.query_map(params![job_id], map_job_row)?;
 
     if let Some(row) = rows.next() {
         Ok(Some(row?))
@@ -629,6 +552,70 @@ pub fn load_all_settings(conn: &Connection) -> Result<HashMap<String, String>> {
 pub fn has_settings(conn: &Connection) -> Result<bool> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))?;
     Ok(count > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_job_columns_count() {
+        // Simple sanity check: update this if you add columns!
+        let count = JOB_COLUMNS.split(',').count();
+        // We have 15 columns currently
+        assert_eq!(count, 15, "JOB_COLUMNS should have 15 fields");
+    }
+
+    #[test]
+    fn test_job_row_mapping() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        
+        conn.execute(
+            "CREATE TABLE jobs (
+                id INTEGER PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                staged_path TEXT,
+                size_bytes INTEGER NOT NULL,
+                scan_status TEXT,
+                upload_status TEXT,
+                s3_upload_id TEXT,
+                s3_key TEXT,
+                priority INTEGER DEFAULT 0,
+                checksum TEXT,
+                remote_checksum TEXT,
+                error TEXT,
+                retry_count INTEGER DEFAULT 0,
+                next_retry_at TEXT
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "INSERT INTO jobs (
+                created_at, status, source_path, size_bytes, priority, retry_count
+            ) VALUES (
+                '2023-01-01', 'pending', '/tmp/test', 100, 10, 5
+            )",
+            [],
+        )?;
+
+        let mut stmt = conn.prepare(&format!("SELECT {} FROM jobs", JOB_COLUMNS))?;
+        let rows = stmt.query_map([], |row| JobRow::try_from(row))?;
+        
+        let jobs: Vec<JobRow> = rows.collect::<Result<_, _>>()?;
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        
+        assert_eq!(job.status, "pending");
+        assert_eq!(job.source_path, "/tmp/test");
+        assert_eq!(job.size_bytes, 100);
+        assert_eq!(job.priority, 10);
+        assert_eq!(job.retry_count, 5);
+        
+        Ok(())
+    }
 }
 
 

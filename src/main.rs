@@ -13,7 +13,8 @@ use crate::coordinator::Coordinator;
 use crate::core::config;
 use crate::db::init_db;
 use anyhow::Result;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::Mutex as AsyncMutex;
 use std::sync::atomic::AtomicBool;
 use std::collections::HashMap;
 
@@ -57,11 +58,11 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&cfg.staging_dir)?;
     std::fs::create_dir_all(&cfg.quarantine_dir)?;
 
-    let conn = Arc::new(Mutex::new(conn));
-    let cfg = Arc::new(Mutex::new(cfg));
+    let conn = Arc::new(StdMutex::new(conn));
+    let cfg = Arc::new(AsyncMutex::new(cfg));
 
-    let progress = Arc::new(Mutex::new(HashMap::new()));
-    let cancellation_tokens = Arc::new(Mutex::new(HashMap::<i64, Arc<AtomicBool>>::new()));
+    let progress = Arc::new(AsyncMutex::new(HashMap::new()));
+    let cancellation_tokens = Arc::new(AsyncMutex::new(HashMap::<i64, Arc<AtomicBool>>::new()));
 
     let coordinator_conn = conn.clone();
     let coordinator_cfg = cfg.clone();
@@ -80,7 +81,6 @@ async fn main() -> Result<()> {
     });
 
     // Run TUI, passing wizard flag
-    // run_tui is still synchronous for now, but it's running inside the tokio runtime thread.
-    tui::run_tui(conn, cfg, progress, cancellation_tokens, needs_wizard, log_handle)?;
+    tui::run_tui(conn, cfg, progress, cancellation_tokens, needs_wizard, log_handle).await?;
     Ok(())
 }
