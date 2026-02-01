@@ -558,9 +558,9 @@ pub fn run_tui(
                             KeyCode::Up | KeyCode::Char('k') => {
                                 app.current_tab = match app.current_tab {
                                     AppTab::Transfers => AppTab::Settings,
-                                    AppTab::Quarantine => AppTab::Transfers,
-                                    AppTab::Remote => AppTab::Quarantine,
-                                    AppTab::Logs => AppTab::Remote,
+                                    AppTab::Remote => AppTab::Transfers,
+                                    AppTab::Quarantine => AppTab::Remote,
+                                    AppTab::Logs => AppTab::Quarantine,
                                     AppTab::Settings => AppTab::Logs,
 
                                 };
@@ -585,9 +585,9 @@ pub fn run_tui(
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
                                 app.current_tab = match app.current_tab {
-                                    AppTab::Transfers => AppTab::Quarantine,
-                                    AppTab::Quarantine => AppTab::Remote,
-                                    AppTab::Remote => AppTab::Logs,
+                                    AppTab::Transfers => AppTab::Remote,
+                                    AppTab::Remote => AppTab::Quarantine,
+                                    AppTab::Quarantine => AppTab::Logs,
                                     AppTab::Logs => AppTab::Settings,
                                     AppTab::Settings => AppTab::Transfers,
                                 };

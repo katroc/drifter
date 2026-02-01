@@ -40,7 +40,7 @@ pub fn ui(f: &mut Frame, app: &App) {
     let main_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(14),
+            Constraint::Length(16),
             Constraint::Min(0),
             Constraint::Length(cfg_guard.history_width),
         ])
@@ -129,25 +129,40 @@ fn draw_rail(f: &mut Frame, app: &App, area: Rect) {
         app.theme.border_style()
     };
 
-    let items = [" Transfers ", " Quarantine ", " Remote    ", " Logs      ", " Settings  "];
+    let items = vec![
+        ("Transfers", AppTab::Transfers),
+        ("Remote", AppTab::Remote),
+        ("Quarantine", AppTab::Quarantine),
+        ("Logs", AppTab::Logs),
+        ("Settings", AppTab::Settings),
+    ];
+
     let rows: Vec<Row> = items
         .iter()
-        .enumerate()
-        .map(|(id, name)| {
-            let style = if app.current_tab as usize == id {
+        .map(|(label, tab)| {
+            let is_selected = app.current_tab == *tab;
+            let style = if is_selected {
                 app.theme.selection_style()
             } else {
                 app.theme.text_style()
             };
-            Row::new(vec![Cell::from(name.to_string())]).style(style)
+
+            // Add selection indicator prefix
+            let display_label = if is_selected {
+                format!("▌ {}", label)
+            } else {
+                format!("  {}", label)
+            };
+
+            Row::new(vec![Cell::from(display_label)]).style(style)
         })
         .collect();
 
-    let table = Table::new(rows, [Constraint::Length(12)]).block(
+    let table = Table::new(rows, [Constraint::Fill(1)]).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(app.theme.border_type)
-            .title("Nav")
+            .title(" Navigation ")
             .border_style(focus_style)
             .style(app.theme.panel_style()),
     );
@@ -180,7 +195,8 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
         app.theme.border_style()
     };
 
-    let title = match app.input_mode {
+    let path_str = app.picker.cwd.to_string_lossy();
+    let title_prefix = match app.input_mode {
         InputMode::Browsing => " Hopper (Browsing) ",
         InputMode::Filter => " Hopper (Filter) ",
         InputMode::Normal if is_focused => " Hopper (Press 'a' to browse) ",
@@ -191,6 +207,7 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
         InputMode::QueueSearch => " Queue (Search) ",
         InputMode::HistorySearch => " History (Search) ",
     };
+    let title = format!("{}{}", title_prefix, path_str);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -205,19 +222,6 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
     if inner_area.height < 3 {
         return;
     }
-
-    // Breadcrumbs
-    let path_str = app.picker.cwd.to_string_lossy().to_string();
-    let breadcrumbs = Line::from(vec![
-        Span::styled(" 📂 ", app.theme.accent_style()),
-        Span::styled(
-            path_str,
-            app.theme.text_style().add_modifier(Modifier::BOLD),
-        ),
-    ]);
-
-    let breadcrumb_area = Rect::new(inner_area.x, inner_area.y, inner_area.width, 1);
-    f.render_widget(Paragraph::new(breadcrumbs), breadcrumb_area);
 
     // Filter indicator
     if !app.input_buffer.is_empty() || app.input_mode == InputMode::Filter {
@@ -241,16 +245,16 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
                 app.theme.accent_style(),
             ),
         ]);
-        let filter_area = Rect::new(inner_area.x, inner_area.y + 1, inner_area.width, 1);
+        let filter_area = Rect::new(inner_area.x, inner_area.y, inner_area.width, 1);
         f.render_widget(Paragraph::new(filter_line), filter_area);
     }
 
     let has_filter = !app.input_buffer.is_empty() || app.input_mode == InputMode::Filter;
     let table_area = Rect::new(
         inner_area.x,
-        inner_area.y + if has_filter { 2 } else { 1 },
+        inner_area.y + if has_filter { 1 } else { 0 },
         inner_area.width,
-        inner_area.height.saturating_sub(if has_filter { 2 } else { 1 }),
+        inner_area.height.saturating_sub(if has_filter { 1 } else { 0 }),
     );
 
     // Live Filtering
