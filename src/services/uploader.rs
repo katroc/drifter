@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha2::{Sha256, Digest};
 use base64::{Engine as _, engine::general_purpose};
-
 pub struct TaskGuard(pub tokio::task::JoinHandle<()>);
 
 impl Drop for TaskGuard {
@@ -389,7 +388,7 @@ impl Uploader {
                             percent: pct, 
                             details, 
                             parts_done: parts_done as usize, 
-                            parts_total: m_total_parts
+                            parts_total: m_total_parts,
                         });
                     }
                 }
@@ -450,13 +449,13 @@ impl Uploader {
             let bucket = bucket.to_string();
             let key = key.to_string();
             let uid_clone = upload_id.clone();
-            let uploaded_bytes = uploaded_bytes.clone();
+            let uploaded_bytes = uploaded_bytes.clone(); // Still needed for fetch_add below
             let part_hashes_clone = part_hashes.clone();
             
             let handle = tokio::spawn(async move {
                 let _permit = permit; // Hold permit until task completion
 
-                // Calculate SHA256 Checksum for this part (still needed for upload_part verify)
+                // Calculate SHA256 Checksum for this part
                 let mut hasher = Sha256::new();
                 hasher.update(&chunk);
                 let hash = hasher.finalize();
@@ -472,7 +471,7 @@ impl Uploader {
                     .upload_id(uid_clone)
                     .part_number(part_number)
                     .body(body)
-                    .checksum_sha256(checksum_sha256)
+                    .checksum_sha256(checksum_sha256) 
                     .send()
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to upload part {}: {}", part_number, e))?;
@@ -482,7 +481,7 @@ impl Uploader {
                     map.insert(part_number, hash_bytes);
                 }
 
-                // Update Net Tracker
+                // Update Net Tracker manually (coarse progress)
                 uploaded_bytes.fetch_add(bytes_read as u64, std::sync::atomic::Ordering::Relaxed);
 
                 if let Some(etag) = upload_part_output.e_tag() {

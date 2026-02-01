@@ -27,3 +27,6 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
 tracing-appender = "0.2.4"
 sha2 = "0.10"
 base64 = "0.22"
+futures = "0.3"
+async-stream = "0.3"
+hyper = { version = "0.14", features = ["stream"] }

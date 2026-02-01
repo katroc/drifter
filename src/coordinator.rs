@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use std::collections::HashMap;
 use crate::utils::lock_mutex;
+use tracing::{info, error};
 
 #[derive(Debug, Clone)]
 pub struct ProgressInfo {
@@ -50,42 +51,64 @@ impl Coordinator {
     }
 
     async fn process_cycle(&self) -> Result<()> {
-        let (job, scanner_enabled) = {
+        // 1. Check for retryable jobs
+        {
             let conn = lock_mutex(&self.conn)?;
-            
+            if let Ok(retry_jobs) = db::list_retryable_jobs(&conn) {
+                for job in retry_jobs {
+                    let next_status = if job.scan_status.as_deref() == Some("clean") || job.scan_status.as_deref() == Some("scanned") {
+                        "scanned"
+                    } else {
+                        "queued"
+                    };
+                    
+                    info!("Retrying job {} (Attempt #{})", job.id, job.retry_count + 1);
+                    db::update_job_retry_state(&conn, job.id, job.retry_count + 1, None, next_status, "Retrying...")?;
+                    db::insert_event(&conn, job.id, "retry", &format!("Auto-retry attempt #{}", job.retry_count + 1))?;
+                }
+            }
+        }
+
+        // 2. Find jobs in "queued" state
+        let queued_job_action = {
+            let conn = lock_mutex(&self.conn)?;
             if let Some(job) = db::get_next_job(&conn, "queued")? {
                 let scanner_enabled = lock_mutex(&self.config)?.scanner_enabled;
-                (Some(job), scanner_enabled)
-            } else if let Some(job) = db::get_next_job(&conn, "scanned")? {
-                (Some(job), false) // scanner false means move to upload
+                if scanner_enabled {
+                    db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
+                    Some((job, true))
+                } else {
+                    db::update_upload_status(&conn, job.id, "uploading", "uploading")?;
+                    db::insert_event(&conn, job.id, "scan", "scan skipped by policy")?;
+                    Some((job, false))
+                }
             } else {
-                (None, false)
+                None
             }
         };
 
-        if let Some(job) = job {
-            if job.status == "queued" {
-                if scanner_enabled {
-                    {
-                        let conn = lock_mutex(&self.conn)?;
-                        db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
-                    }
-                    self.process_scan(&job).await?;
-                } else {
-                    {
-                        let conn = lock_mutex(&self.conn)?;
-                        db::update_upload_status(&conn, job.id, "uploading", "uploading")?;
-                        db::insert_event(&conn, job.id, "scan", "scan skipped by policy")?;
-                    }
-                    self.process_upload(&job).await?;
-                }
-            } else if job.status == "scanned" {
-                {
-                    let conn = lock_mutex(&self.conn)?;
-                    db::update_upload_status(&conn, job.id, "uploading", "uploading")?;
-                }
+        if let Some((job, is_scan)) = queued_job_action {
+            if is_scan {
+                self.process_scan(&job).await?;
+            } else {
                 self.process_upload(&job).await?;
             }
+            return Ok(());
+        }
+
+        // 3. Find jobs in "scanned" state -> move to "uploading"
+        let scanned_job = {
+            let conn = lock_mutex(&self.conn)?;
+            if let Some(job) = db::get_next_job(&conn, "scanned")? {
+                db::update_upload_status(&conn, job.id, "uploading", "uploading")?;
+                Some(job)
+            } else {
+                None
+            }
+        };
+
+        if let Some(job) = scanned_job {
+            self.process_upload(&job).await?;
             return Ok(());
         }
 
@@ -223,7 +246,30 @@ impl Coordinator {
             }
             Err(e) => {
                 let conn = lock_mutex(&self.conn)?;
-                db::update_job_error(&conn, job.id, "failed", &format!("upload error: {}", e))?;
+                let max_retries = 5;
+                
+                if job.retry_count < max_retries {
+                    // Exponential backoff: 5s, 10s, 20s, 40s, 80s
+                    let backoff_secs = 5 * (2_u64.pow(job.retry_count as u32));
+                    let next_retry = chrono::Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                    let next_retry_str = next_retry.to_rfc3339();
+                    
+                    error!("Upload failed for job {}: {}. Retrying in {}s...", job.id, e, backoff_secs);
+                    
+                    db::update_job_retry_state(
+                        &conn, 
+                        job.id, 
+                        job.retry_count, 
+                        Some(&next_retry_str), 
+                        "retry_pending", 
+                        &format!("Failed: {}. Retry pending.", e)
+                    )?;
+                    
+                    db::insert_event(&conn, job.id, "retry_scheduled", &format!("Scheduled retry in {}s", backoff_secs))?;
+                } else {
+                    error!("Upload failed for job {} after {} retries: {}", job.id, job.retry_count, e);
+                    db::update_job_error(&conn, job.id, "failed", &format!("Max retries exceeded. Error: {}", e))?;
+                }
             }
         }
         Ok(())
