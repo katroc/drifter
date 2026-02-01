@@ -730,40 +730,69 @@ fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRo
     // Show multipart upload progress if job is uploading
     if job.status == "uploading" {
         if let Ok(progress_map) = lock_mutex(&app.progress) {
-        if let Some(info) = progress_map.get(&job.id)
-            && info.parts_total > 0
-        {
-                let parts_done = info.parts_done;
-                let parts_total = info.parts_total;
-                let details = info.details.clone();
+            if let Some(info_ref) = progress_map.get(&job.id) {
+                // Clone the info so we can drop the lock
+                let info = info_ref.clone();
                 drop(progress_map);
+                
+                if info.parts_total > 0 {
+                    let parts_done = info.parts_done;
+                    let parts_total = info.parts_total;
+                    let details = info.details.clone();
 
-                text.push(Line::from(""));
-                text.push(Line::from(Span::styled(
-                    "MULTIPART UPLOAD:",
-                    app.theme
-                        .highlight_style()
-                        .add_modifier(Modifier::UNDERLINED),
-                )));
+                    text.push(Line::from(""));
+                    text.push(Line::from(Span::styled(
+                        "MULTIPART UPLOAD:",
+                        app.theme
+                            .highlight_style()
+                            .add_modifier(Modifier::UNDERLINED),
+                    )));
 
-                let bar_width = 20;
-                let filled = (parts_done * bar_width) / parts_total.max(1);
-                let bar = format!(
-                    "[{}{}] {}/{}",
-                    "█".repeat(filled),
-                    "░".repeat(bar_width - filled),
-                    parts_done,
-                    parts_total
-                );
-                text.push(Line::from(vec![
-                    Span::styled("Parts:  ", app.theme.highlight_style()),
-                    Span::styled(bar, app.theme.progress_style()),
-                ]));
-                text.push(Line::from(vec![
-                    Span::styled("Detail: ", app.theme.highlight_style()),
-                    Span::styled(details, app.theme.text_style()),
-                ]));
+                    let bar_width = 20;
+                    let filled = (parts_done * bar_width) / parts_total.max(1);
+                    let bar = format!(
+                        "[{}{}] {}/{}",
+                        "█".repeat(filled),
+                        "░".repeat(bar_width - filled),
+                        parts_done,
+                        parts_total
+                    );
+                    text.push(Line::from(vec![
+                        Span::styled("Parts:  ", app.theme.highlight_style()),
+                        Span::styled(bar, app.theme.progress_style()),
+                    ]));
+                    
+                    text.push(Line::from(vec![
+                        Span::styled("Detail: ", app.theme.highlight_style()),
+                        Span::styled(details, app.theme.text_style()),
+                    ]));
+                }
+            }
         }
+    } else if job.status == "retry_pending" {
+        text.push(Line::from(""));
+        text.push(Line::from(Span::styled(
+            "RETRY PENDING:",
+            app.theme
+                .status_style(StatusKind::Warning)
+                .add_modifier(Modifier::UNDERLINED),
+        )));
+        
+        if let Some(next_retry) = &job.next_retry_at {
+            if let Ok(target) = chrono::DateTime::parse_from_rfc3339(next_retry) {
+                let now = chrono::Utc::now();
+                let diff = target.signed_duration_since(now).num_seconds();
+                let wait_msg = if diff > 0 {
+                    format!("Retrying in {} seconds (Attempt {}/{})", diff, job.retry_count + 1, 5)
+                } else {
+                    "Retrying momentarily...".to_string()
+                };
+                
+                text.push(Line::from(vec![
+                    Span::styled("Status: ", app.theme.highlight_style()),
+                    Span::styled(wait_msg, app.theme.status_style(StatusKind::Warning)),
+                ]));
+            }
         }
     }
 
