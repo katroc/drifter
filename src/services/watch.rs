@@ -4,7 +4,7 @@ use notify::{Config as NotifyConfig, Event, EventKind, RecommendedWatcher, Recur
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tracing::{info, error, debug, warn};
+use tracing::{info, error, debug};
 
 #[allow(dead_code)]
 pub struct Watcher {
@@ -42,13 +42,16 @@ impl Watcher {
                                         info!("New file detected: {:?}", path);
                                         // Locking here inside the callback is safe as long as we don't deadlock.
                                         // ingest_path might take time, blocking notifier thread, but that's ok for now.
-                                        if let Ok(conn) = conn.lock() {
-                                            if let Err(e) = ingest_path(&conn, &staging_dir, &staging_mode, &path.to_string_lossy()) {
-                                                error!("Failed to ingest file {:?}: {}", path, e);
+                                        let conn_clone = conn.clone();
+                                        let staging_dir_clone = staging_dir.clone();
+                                        let staging_mode_clone = staging_mode.clone();
+                                        let path_str = path.to_string_lossy().to_string();
+                                        
+                                        tokio::spawn(async move {
+                                            if let Err(e) = ingest_path(conn_clone, &staging_dir_clone, &staging_mode_clone, &path_str).await {
+                                                error!("Failed to ingest file {}: {}", path_str, e);
                                             }
-                                        } else {
-                                            warn!("Failed to lock database for ingestion");
-                                        }
+                                        });
                                     }
                                 }
                             }

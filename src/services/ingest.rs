@@ -2,25 +2,24 @@ use crate::core::config::StagingMode;
 use crate::db::{create_job, insert_event, update_job_error, update_job_staged};
 use anyhow::Result;
 use rusqlite::Connection;
-use std::fs;
+use tokio::fs;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn, error, debug};
+use std::sync::{Arc, Mutex};
+use crate::utils::lock_mutex;
 
-pub fn ingest_path(conn: &Connection, staging_dir: &str, staging_mode: &StagingMode, path: &str) -> Result<usize> {
+pub async fn ingest_path(conn_mutex: Arc<Mutex<Connection>>, staging_dir: &str, staging_mode: &StagingMode, path: &str) -> Result<usize> {
     debug!("Ingesting path: {}", path);
     let root = PathBuf::from(path);
-    if !root.exists() {
+    if !fs::try_exists(&root).await.unwrap_or(false) {
         warn!("Path does not exist: {}", path);
         return Ok(0);
     }
     
     // Determine the base for relative paths
-    // We always want to be relative to the PARENT of the ingested path,
-    // so that the folder name itself is preserved in the S3 key.
     let base_path = root.parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| {
-             // If no parent (e.g. root is "/"), use root itself as base (preserving nothing more)
              if root == PathBuf::from("/") {
                  PathBuf::from("/")
              } else {
@@ -28,10 +27,10 @@ pub fn ingest_path(conn: &Connection, staging_dir: &str, staging_mode: &StagingM
              }
         });
     
-    let files = collect_files(&root)?;
+    let files = collect_files(&root).await?;
     let mut count = 0;
     for file_path in files {
-        let metadata = match fs::metadata(&file_path) {
+        let metadata = match fs::metadata(&file_path).await {
             Ok(m) => m,
             Err(e) => {
                 warn!("Failed to read metadata for {:?}: {}", file_path, e);
@@ -42,7 +41,6 @@ pub fn ingest_path(conn: &Connection, staging_dir: &str, staging_mode: &StagingM
             continue;
         }
         
-        // Compute relative path from the base
         let relative_path = file_path.strip_prefix(&base_path)
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| {
@@ -55,37 +53,45 @@ pub fn ingest_path(conn: &Connection, staging_dir: &str, staging_mode: &StagingM
         let source_str = file_path.to_string_lossy().to_string();
         debug!("Processing file: {} ({} bytes)", source_str, size);
         
-        let job_id = create_job(conn, &source_str, size, Some(&relative_path))?;
+        let job_id = {
+            let conn = lock_mutex(&conn_mutex)?;
+            create_job(&conn, &source_str, size, Some(&relative_path))?
+        };
         
         // Stage file based on mode
         let stage_result = match staging_mode {
             StagingMode::Direct => {
-                // Direct mode: use source path directly, no copy
-                insert_event(conn, job_id, "ingest", "using direct mode (no copy)")?;
+                let conn = lock_mutex(&conn_mutex)?;
+                insert_event(&conn, job_id, "ingest", "using direct mode (no copy)")?;
                 Ok(source_str.clone())
             }
             StagingMode::Copy => {
-                insert_event(conn, job_id, "ingest", "queued for staging")?;
-                stage_file(staging_dir, job_id, &file_path)
+                {
+                    let conn = lock_mutex(&conn_mutex)?;
+                    insert_event(&conn, job_id, "ingest", "queued for staging")?;
+                }
+                stage_file(staging_dir, job_id, &file_path).await
             }
         };
 
         match stage_result {
             Ok(staged_path) => {
-                update_job_staged(conn, job_id, &staged_path, "queued")?;
+                let conn = lock_mutex(&conn_mutex)?;
+                update_job_staged(&conn, job_id, &staged_path, "queued")?;
                 let event_msg = if *staging_mode == StagingMode::Direct {
                     "ready (direct mode)"
                 } else {
                     "staged locally"
                 };
-                insert_event(conn, job_id, "stage", event_msg)?;
+                insert_event(&conn, job_id, "stage", event_msg)?;
                 count += 1;
                 info!("Successfully ingested job {} for {}", job_id, source_str);
             }
             Err(err) => {
                 error!("Failed to stage job {}: {}", job_id, err);
-                update_job_error(conn, job_id, "failed", &err.to_string())?;
-                insert_event(conn, job_id, "stage", "staging failed")?;
+                let conn = lock_mutex(&conn_mutex)?;
+                update_job_error(&conn, job_id, "failed", &err.to_string())?;
+                insert_event(&conn, job_id, "stage", "staging failed")?;
             }
         }
     }
@@ -94,20 +100,20 @@ pub fn ingest_path(conn: &Connection, staging_dir: &str, staging_mode: &StagingM
 }
 
 
-fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
+async fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
-        let metadata = match fs::metadata(&path) {
+        let metadata = match fs::metadata(&path).await {
             Ok(m) => m,
             Err(_) => continue,
         };
         if metadata.is_dir() {
-            let entries = match fs::read_dir(&path) {
+            let mut entries = match fs::read_dir(&path).await {
                 Ok(e) => e,
                 Err(_) => continue,
             };
-            for entry in entries.flatten() {
+            while let Some(entry) = entries.next_entry().await? {
                 stack.push(entry.path());
             }
         } else if metadata.is_file() {
@@ -117,15 +123,15 @@ fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn stage_file(staging_dir: &str, job_id: i64, source: &Path) -> Result<String> {
+async fn stage_file(staging_dir: &str, job_id: i64, source: &Path) -> Result<String> {
     let job_dir = Path::new(staging_dir).join(job_id.to_string());
-    fs::create_dir_all(&job_dir)?;
+    fs::create_dir_all(&job_dir).await?;
     let filename = source
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "data".to_string());
     let dest = job_dir.join(filename);
     debug!("Copying {:?} to {:?}", source, dest);
-    fs::copy(source, &dest)?;
+    fs::copy(source, &dest).await?;
     Ok(dest.to_string_lossy().to_string())
 }

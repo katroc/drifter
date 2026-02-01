@@ -15,10 +15,10 @@ use crate::db::init_db;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
-use std::thread;
 use std::collections::HashMap;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     // Initialize logging
     let (_guard, log_handle) = logging::init();
 
@@ -27,8 +27,6 @@ fn main() -> Result<()> {
     // Bootstrap: always use ./state for DB location
     let state_dir = "./state";
     std::fs::create_dir_all(state_dir)?;
-    
-
     
     let conn = init_db(state_dir)?;
     
@@ -70,7 +68,7 @@ fn main() -> Result<()> {
     let coordinator_progress = progress.clone();
     let coordinator_tokens = cancellation_tokens.clone();
     
-    thread::spawn(move || {
+    tokio::spawn(async move {
         let coordinator = match Coordinator::new(coordinator_conn, coordinator_cfg, coordinator_progress, coordinator_tokens) {
             Ok(c) => c,
             Err(e) => {
@@ -78,10 +76,11 @@ fn main() -> Result<()> {
                 return;
             }
         };
-        coordinator.run();
+        coordinator.run().await;
     });
 
     // Run TUI, passing wizard flag
+    // run_tui is still synchronous for now, but it's running inside the tokio runtime thread.
     tui::run_tui(conn, cfg, progress, cancellation_tokens, needs_wizard, log_handle)?;
     Ok(())
 }

@@ -769,6 +769,32 @@ fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRo
 
     text.push(Line::from(""));
     text.push(Line::from(Span::styled(
+        "DATA INTEGRITY (SHA256):",
+        app.theme
+            .highlight_style()
+            .add_modifier(Modifier::UNDERLINED),
+    )));
+    
+    let local_checksum = job.checksum.as_deref().unwrap_or("Calculating...");
+    let remote_checksum = job.remote_checksum.as_deref().unwrap_or("Not uploaded");
+    
+    let remote_style = if job.status == "complete" && job.remote_checksum.is_some() {
+        app.theme.status_style(StatusKind::Success)
+    } else {
+        app.theme.text_style()
+    };
+
+    text.push(Line::from(vec![
+        Span::styled("Local:  ", app.theme.highlight_style()),
+        Span::styled(local_checksum, app.theme.text_style()),
+    ]));
+    text.push(Line::from(vec![
+        Span::styled("Remote: ", app.theme.highlight_style()),
+        Span::styled(remote_checksum, remote_style),
+    ]));
+
+    text.push(Line::from(""));
+    text.push(Line::from(Span::styled(
         "DETAILS / ERRORS:",
         app.theme
             .highlight_style()
