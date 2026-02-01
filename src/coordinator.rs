@@ -5,12 +5,13 @@ use crate::services::uploader::Uploader;
 use anyhow::Result;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as AsyncMutex;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use std::path::PathBuf;
 
 use std::collections::HashMap;
-use crate::utils::lock_mutex;
+use crate::utils::{lock_mutex, lock_async_mutex};
 use tracing::{info, error};
 
 #[derive(Debug, Clone)]
@@ -23,17 +24,25 @@ pub struct ProgressInfo {
 
 pub struct Coordinator {
     conn: Arc<Mutex<Connection>>,
-    config: Arc<Mutex<Config>>,
+    config: Arc<AsyncMutex<Config>>,
     scanner: Scanner,
     uploader: Uploader,
-    progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
-    cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
+    progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>,
+    cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
 }
 
 impl Coordinator {
-    pub fn new(conn: Arc<Mutex<Connection>>, config: Arc<Mutex<Config>>, progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>, cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>) -> Result<Self> {
+    pub fn new(conn: Arc<Mutex<Connection>>, config: Arc<AsyncMutex<Config>>, progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>, cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>) -> Result<Self> {
         // We need lock to init scanner/uploader but they are just helpers now or cheap to init
-        let cfg = lock_mutex(&config)?;
+        // Note: Initializing services might need config, but for now we assume they don't deep copy config state 
+        // OR we need to async lock here. But new() is sync.
+        // Scanner/Uploader::new take &Config.
+        // Block on the lock since we are in initialization phase (likely sync main) or create detached?
+        // Actually Uploader::new takes &Config but just creates Self {}. It doesn't use it.
+        // Scanner::new takes &Config and stores clamav host/port.
+        // We need to peek at config.
+        
+        let cfg = futures::executor::block_on(config.lock());
         let scanner = Scanner::new(&cfg);
         let uploader = Uploader::new(&cfg);
         drop(cfg);
@@ -70,10 +79,11 @@ impl Coordinator {
         }
 
         // 2. Find jobs in "queued" state
+        let scanner_enabled = lock_async_mutex(&self.config).await.scanner_enabled;
+        
         let queued_job_action = {
             let conn = lock_mutex(&self.conn)?;
             if let Some(job) = db::get_next_job(&conn, "queued")? {
-                let scanner_enabled = lock_mutex(&self.config)?.scanner_enabled;
                 if scanner_enabled {
                     db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
                     Some((job, true))
@@ -133,7 +143,7 @@ impl Coordinator {
             }
             Ok(false) => {
                  let (quarantine_dir, _delete_source) = {
-                    let cfg = lock_mutex(&self.config)?;
+                    let cfg = lock_async_mutex(&self.config).await;
                     (PathBuf::from(&cfg.quarantine_dir), cfg.delete_source_after_upload)
                  };
                  
@@ -175,7 +185,7 @@ impl Coordinator {
         };
         
         let config = {
-            let config_guard = lock_mutex(&self.config)?;
+            let config_guard = lock_async_mutex(&self.config).await;
             config_guard.clone()
         };
 
@@ -188,7 +198,7 @@ impl Coordinator {
         // Register cancellation token
         let cancel_token = Arc::new(AtomicBool::new(false));
         {
-            lock_mutex(&self.cancellation_tokens)?.insert(job.id, cancel_token.clone());
+            lock_async_mutex(&self.cancellation_tokens).await.insert(job.id, cancel_token.clone());
         }
 
         let res = self.uploader.upload_file(
@@ -203,7 +213,7 @@ impl Coordinator {
         
         // Remove token
         {
-            lock_mutex(&self.cancellation_tokens)?.remove(&job.id);
+            lock_async_mutex(&self.cancellation_tokens).await.remove(&job.id);
         }
 
         match res {
@@ -215,7 +225,7 @@ impl Coordinator {
                 }
                 
                 // Cleanup based on staging mode
-                use crate::config::StagingMode;
+                use crate::core::config::StagingMode;
                 let staged_path = std::path::Path::new(&path);
                 match config.staging_mode {
                     StagingMode::Copy => {

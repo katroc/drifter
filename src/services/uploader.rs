@@ -11,7 +11,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use crate::utils::lock_mutex;
+use tokio::sync::Mutex as AsyncMutex;
+use crate::utils::{lock_mutex, lock_async_mutex};
 use tracing::{info, error};
 use crate::coordinator::ProgressInfo;
 use rusqlite::Connection;
@@ -181,7 +182,7 @@ impl Uploader {
         config: &Config,
         path: &str,
         job_id: i64,
-        progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
+        progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>,
         conn_mutex: Arc<Mutex<Connection>>,
         initial_upload_id: Option<String>,
         cancellation_token: Arc<AtomicBool>,
@@ -229,7 +230,7 @@ impl Uploader {
             // Notify UI
             info!("Resuming upload for job {} (Upload ID: {})", job_id, uid);
             {
-               let mut p = lock_mutex(&progress)?;
+               let mut p = lock_async_mutex(&progress).await;
                p.insert(job_id, ProgressInfo { 
                    percent: -1.0, 
                    details: "Resuming: Listing parts...".to_string(),
@@ -383,14 +384,13 @@ impl Uploader {
                     parts_done, m_total_parts, part_size_display, elapsed_str);
                 
                 {
-                    if let Ok(mut p) = lock_mutex(&monitor_progress) {
-                        p.insert(m_job_id, ProgressInfo { 
-                            percent: pct, 
-                            details, 
-                            parts_done: parts_done as usize, 
-                            parts_total: m_total_parts,
-                        });
-                    }
+                    let mut p = lock_async_mutex(&monitor_progress).await;
+                    p.insert(m_job_id, ProgressInfo { 
+                        percent: pct, 
+                        details, 
+                        parts_done: parts_done as usize, 
+                        parts_total: m_total_parts,
+                    });
                 }
 
                 if n >= m_file_size as u64 {
@@ -403,7 +403,7 @@ impl Uploader {
 
         let mut handles: Vec<tokio::task::JoinHandle<Result<CompletedPart>>> = Vec::new();
         let mut part_number = 1;
-        let mut buffer = vec![0u8; part_size];
+
 
         loop {
             // Check cancellation
@@ -428,13 +428,16 @@ impl Uploader {
             // Acquire permit BEFORE reading to throttle memory usage
             let permit = semaphore.clone().acquire_owned().await.context("Semaphore closed")?;
 
+            // Allocate buffer strictly for this part (Zero-Copy logic: we read, then move the vec)
+            let mut chunk = vec![0u8; part_size];
+
             use std::io::SeekFrom;
             let offset = (part_number as u64 - 1) * (part_size as u64);
             file.seek(SeekFrom::Start(offset)).await?;
 
             let mut bytes_read = 0;
             while bytes_read < part_size {
-                let n = file.read(&mut buffer[bytes_read..]).await.context("Failed to read file chunk")?;
+                let n = file.read(&mut chunk[bytes_read..]).await.context("Failed to read file chunk")?;
                 if n == 0 { break; }
                 bytes_read += n;
             }
@@ -444,7 +447,8 @@ impl Uploader {
                 break;
             }
 
-            let chunk = buffer[..bytes_read].to_vec();
+            // Shrink vector to actual size (cheap pointer adjustment)
+            chunk.truncate(bytes_read);
             let client = client.clone();
             let bucket = bucket.to_string();
             let key = key.to_string();
@@ -512,7 +516,7 @@ impl Uploader {
         // Monitor aborted AFTER complete to keep showing stats (likely 0)
         // Update details to "Finalizing"
         {
-            let mut p = lock_mutex(&progress)?;
+            let mut p = lock_async_mutex(&progress).await;
             if let Some(mut info) = p.get(&job_id).cloned() {
                 info.details = "Finalizing S3...".to_string();
                 p.insert(job_id, info);
@@ -574,7 +578,7 @@ impl Uploader {
 
         // Cleanup DB
         {
-             let mut p = lock_mutex(&progress)?;
+             let mut p = lock_async_mutex(&progress).await;
              p.remove(&job_id);
              // Optionally clear s3_upload_id from DB now that it's done? 
              let conn = lock_mutex(&conn_mutex)?;

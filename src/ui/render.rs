@@ -36,7 +36,7 @@ pub fn ui(f: &mut Frame, app: &App) {
         ])
         .split(f.size());
 
-    let cfg_guard = if let Ok(c) = lock_mutex(&app.config) { c } else { return };
+    let cfg_guard = &app.cached_config;
     let main_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -45,7 +45,6 @@ pub fn ui(f: &mut Frame, app: &App) {
             Constraint::Length(cfg_guard.history_width),
         ])
         .split(root[0]);
-    drop(cfg_guard);
 
     draw_rail(f, app, main_layout[0]);
 
@@ -61,7 +60,7 @@ pub fn ui(f: &mut Frame, app: &App) {
     let right_panel_full = main_layout[2];
 
     // Check if metrics enabled
-    let metrics_enabled = lock_mutex(&app.config).map(|c| c.host_metrics_enabled).unwrap_or(false);
+    let metrics_enabled = app.cached_config.host_metrics_enabled;
     let (metrics_area, right_panel) = if metrics_enabled {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -170,7 +169,7 @@ fn draw_rail(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
-    let hopper_percent = lock_mutex(&app.config).map(|c| c.hopper_width_percent).unwrap_or(50);
+    let hopper_percent = app.cached_config.hopper_width_percent;
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -462,9 +461,9 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
 
                 let p_str = {
                     if job.status == "uploading" {
-                        if let Ok(p_map) = lock_mutex(&app.progress) {
+                        {
+                            let p_map = &app.cached_progress;
                             let entry = p_map.get(&job.id).cloned();
-                            drop(p_map);
                             if let Some(info) = entry {
                                 let bar_width = 10;
                                 let filled = (info.percent.clamp(0.0, 100.0) / 100.0
@@ -479,8 +478,6 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
                             } else {
                                 "░░░░░░░░░░ 0%".to_string()
                             }
-                        } else {
-                            "----------".to_string()
                         }
                     } else if job.status == "complete" {
                         "██████████ 100%".to_string()
@@ -729,11 +726,11 @@ fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRo
 
     // Show multipart upload progress if job is uploading
     if job.status == "uploading" {
-        if let Ok(progress_map) = lock_mutex(&app.progress) {
+        {
+            let progress_map = &app.cached_progress;
             if let Some(info_ref) = progress_map.get(&job.id) {
                 // Clone the info so we can drop the lock
                 let info = info_ref.clone();
-                drop(progress_map);
                 
                 if info.parts_total > 0 {
                     let parts_done = info.parts_done;
@@ -1709,7 +1706,7 @@ fn draw_layout_adjustment_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     let inner = block.inner(popup_area);
 
-    let cfg = if let Ok(c) = lock_mutex(&app.config) { c } else { return };
+    let cfg = &app.cached_config;
     let current = app.layout_adjust_target;
 
     let highlight = app.theme.selection_style();

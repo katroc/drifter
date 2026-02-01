@@ -14,8 +14,10 @@ use crate::core::metrics::{MetricsCollector, HostMetricsSnapshot};
 use crate::app::settings::SettingsState;
 use crate::services::uploader::S3Object;
 use crate::utils::lock_mutex;
+
 use crate::ui::theme::Theme;
 use crate::services::watch::Watcher;
+use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
@@ -148,10 +150,12 @@ pub struct App {
     pub current_tab: AppTab,
     pub focus: AppFocus,
     pub settings: SettingsState,
-    pub config: Arc<Mutex<Config>>,
+    pub config: Arc<AsyncMutex<Config>>,
+    pub cached_config: Config,
     pub clamav_status: Arc<Mutex<String>>,
-    pub progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
-    pub cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
+    pub progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>,
+    pub cached_progress: HashMap<i64, ProgressInfo>,
+    pub cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
     pub conn: Arc<Mutex<Connection>>,
 
     // Logs
@@ -206,15 +210,16 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(
+    pub async fn new(
         conn: Arc<Mutex<Connection>>,
-        config: Arc<Mutex<Config>>,
-        progress: Arc<Mutex<HashMap<i64, ProgressInfo>>>,
-        cancellation_tokens: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
+        config: Arc<AsyncMutex<Config>>,
+        progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>,
+        cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
         log_handle: crate::logging::LogHandle,
     ) -> Result<Self> {
-        let cfg_guard = lock_mutex(&config)?;
+        let cfg_guard = config.lock().await;
         let watcher_cfg = cfg_guard.clone();
+        let cached_config = cfg_guard.clone();
         let settings = SettingsState::from_config(&cfg_guard);
         let theme = Theme::from_name(&cfg_guard.theme);
         let initial_log_level = cfg_guard.log_level.clone();
@@ -222,10 +227,6 @@ impl App {
 
         let (tx, rx) = mpsc::channel();
 
-        // Need access to conn for Watcher
-        // The original code passed `conn` (Arc<Mutex>) to Watcher::new.
-        // `Watcher::new` takes `Arc<Mutex<Connection>>`.
-        
         let mut app = Self {
             jobs: Vec::new(),
             history: Vec::new(),
@@ -252,8 +253,10 @@ impl App {
             focus: AppFocus::Browser,
             settings,
             config: config.clone(),
+            cached_config,
             clamav_status: Arc::new(Mutex::new("Checking...".to_string())),
             progress: progress.clone(),
+            cached_progress: HashMap::new(),
             async_rx: rx,
             async_tx: tx,
             show_wizard: false,
@@ -287,28 +290,22 @@ impl App {
             current_log_level: initial_log_level,
 
             conn: conn.clone(),
-        queue_search_query: String::new(),
+            queue_search_query: String::new(),
             history_search_query: String::new(),
-
         };
 
-        // ClamAV checker thread
+        // ClamAV checker task (Tokio)
         let status_clone = app.clamav_status.clone();
         let config_clone = config.clone();
-        std::thread::spawn(move || {
+        tokio::spawn(async move {
             loop {
                 // Read config for host/port
-                let (host, port) = if let Ok(cfg) = lock_mutex(&config_clone) {
-                    (cfg.clamd_host.clone(), cfg.clamd_port)
-                } else {
-                    ("localhost".into(), 3310)
+                let (host, port) = {
+                     let cfg = config_clone.lock().await;
+                     (cfg.clamd_host.clone(), cfg.clamd_port)
                 };
                 let addr = format!("{}:{}", host, port);
-                let status = if std::net::TcpStream::connect_timeout(
-                    &addr.parse().unwrap_or_else(|_| "127.0.0.1:3310".parse().expect("Default address is valid")),
-                    Duration::from_secs(1),
-                )
-                .is_ok()
+                let status = if tokio::net::TcpStream::connect(&addr).await.is_ok()
                 {
                     "Connected"
                 } else {
@@ -318,7 +315,7 @@ impl App {
                 if let Ok(mut s) = lock_mutex(&status_clone) {
                     *s = status.to_string();
                 }
-                std::thread::sleep(Duration::from_secs(5));
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         });
 
@@ -762,7 +759,7 @@ impl App {
         }
     }
 
-    pub fn set_log_level(&mut self, level: &str) {
+    pub async fn set_log_level(&mut self, level: &str) {
         if let Some(handle) = &self.log_handle {
              use tracing_subscriber::EnvFilter;
              let new_filter = EnvFilter::new(level);
@@ -773,7 +770,8 @@ impl App {
                  self.status_message = format!("Log level set to: {}", level);
                  
                  // Persist to config and DB
-                 if let Ok(mut cfg) = self.config.lock() {
+                 {
+                     let mut cfg = self.config.lock().await;
                      cfg.log_level = level.to_string();
                      if let Ok(conn) = self.conn.lock() {
                          if let Err(e) = crate::config::save_config_to_db(&conn, &cfg) {
@@ -788,7 +786,7 @@ impl App {
     
 
 
-    pub fn toggle_pause_selected_job(&mut self) {
+    pub async fn toggle_pause_selected_job(&mut self) {
         let job_id = if self.view_mode == ViewMode::Flat {
              if self.selected < self.jobs.len() {
                  self.jobs[self.selected].id
@@ -834,7 +832,8 @@ impl App {
             } else {
                 self.status_message = format!("Paused job {}", job_id);
                 // Trigger cancellation if running
-                if let Ok(tokens) = self.cancellation_tokens.lock() {
+                {
+                    let tokens = self.cancellation_tokens.lock().await;
                     if let Some(token) = tokens.get(&job_id) {
                         token.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
