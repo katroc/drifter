@@ -9,6 +9,7 @@ use tracing::{info, error, debug};
 #[derive(Debug, Clone)]
 pub struct JobRow {
     pub id: i64,
+    pub session_id: String,
     pub created_at: String,
     pub status: String,
     pub source_path: String,
@@ -52,6 +53,7 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
         PRAGMA foreign_keys = OFF;
         CREATE TABLE IF NOT EXISTS jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL DEFAULT 'legacy',
             created_at TEXT NOT NULL,
             status TEXT NOT NULL,
             source_path TEXT NOT NULL,
@@ -114,6 +116,7 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
     }
 
     // Migration for existing databases
+    let _ = conn.execute("ALTER TABLE jobs ADD COLUMN session_id TEXT DEFAULT 'legacy'", []);
     let _ = conn.execute("ALTER TABLE jobs ADD COLUMN s3_upload_id TEXT", []);
     // Migration for priority
     let _ = conn.execute("ALTER TABLE jobs ADD COLUMN priority INTEGER DEFAULT 0", []);
@@ -132,7 +135,7 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
     Ok(conn)
 }
 
-pub const JOB_COLUMNS: &str = "id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at, scan_duration_ms, upload_duration_ms";
+pub const JOB_COLUMNS: &str = "id, session_id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at, scan_duration_ms, upload_duration_ms";
 
 impl<'a> TryFrom<&'a rusqlite::Row<'a>> for JobRow {
     type Error = rusqlite::Error;
@@ -140,22 +143,23 @@ impl<'a> TryFrom<&'a rusqlite::Row<'a>> for JobRow {
     fn try_from(row: &'a rusqlite::Row<'a>) -> Result<Self, Self::Error> {
         Ok(JobRow {
             id: row.get(0)?,
-            created_at: row.get(1)?,
-            status: row.get(2)?,
-            source_path: row.get(3)?,
-            size_bytes: row.get(4)?,
-            staged_path: row.get(5)?,
-            error: row.get(6)?,
-            scan_status: row.get(7)?,
-            s3_upload_id: row.get(8)?,
-            s3_key: row.get(9)?,
-            priority: row.get(10).unwrap_or(0),
-            checksum: row.get(11)?,
-            remote_checksum: row.get(12)?,
-            retry_count: row.get(13).unwrap_or(0),
-            next_retry_at: row.get(14)?,
-            scan_duration_ms: row.get(15)?,
-            upload_duration_ms: row.get(16)?,
+            session_id: row.get(1)?,
+            created_at: row.get(2)?,
+            status: row.get(3)?,
+            source_path: row.get(4)?,
+            size_bytes: row.get(5)?,
+            staged_path: row.get(6)?,
+            error: row.get(7)?,
+            scan_status: row.get(8)?,
+            s3_upload_id: row.get(9)?,
+            s3_key: row.get(10)?,
+            priority: row.get(11).unwrap_or(0),
+            checksum: row.get(12)?,
+            remote_checksum: row.get(13)?,
+            retry_count: row.get(14).unwrap_or(0),
+            next_retry_at: row.get(15)?,
+            scan_duration_ms: row.get(16)?,
+            upload_duration_ms: row.get(17)?,
         })
     }
 }
@@ -231,15 +235,34 @@ pub fn update_job_upload_id(conn: &Connection, job_id: i64, upload_id: &str) -> 
     Ok(())
 }
 
-pub fn create_job(conn: &Connection, source_path: &str, size_bytes: i64, s3_key: Option<&str>) -> Result<i64> {
+pub fn create_job(conn: &Connection, session_id: &str, source_path: &str, size_bytes: i64, s3_key: Option<&str>) -> Result<i64> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO jobs (created_at, status, source_path, size_bytes, s3_key, retry_count) VALUES (?, ?, ?, ?, ?, 0)",
-        params![now, "ingesting", source_path, size_bytes, s3_key],
+        "INSERT INTO jobs (session_id, created_at, status, source_path, size_bytes, s3_key, retry_count) VALUES (?, ?, ?, ?, ?, ?, 0)",
+        params![session_id, now, "ingesting", source_path, size_bytes, s3_key],
     )?;
     let id = conn.last_insert_rowid();
     debug!("Created job ID {} for file: {}", id, source_path);
     Ok(id)
+}
+
+pub fn get_session_jobs(conn: &Connection, session_id: &str) -> Result<Vec<JobRow>> {
+    let mut stmt = conn.prepare(
+        &format!("SELECT {} FROM jobs WHERE session_id = ? ORDER BY id ASC", JOB_COLUMNS),
+    )?;
+    let rows = stmt
+        .query_map(params![session_id], map_job_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn count_pending_session_jobs(conn: &Connection, session_id: &str) -> Result<i64> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE session_id = ? AND status NOT IN ('complete', 'quarantined', 'quarantined_removed', 'cancelled', 'failed', 'failed_retryable')",
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    Ok(count)
 }
 
 pub fn update_job_staged(
@@ -585,8 +608,8 @@ mod tests {
     fn test_job_columns_count() {
         // Simple sanity check: update this if you add columns!
         let count = JOB_COLUMNS.split(',').count();
-        // We have 15 columns currently
-        assert_eq!(count, 15, "JOB_COLUMNS should have 15 fields");
+        // We have 18 columns currently (including session_id and durations)
+        assert_eq!(count, 18, "JOB_COLUMNS should have 18 fields");
     }
 
     #[test]
@@ -596,6 +619,7 @@ mod tests {
         conn.execute(
             "CREATE TABLE jobs (
                 id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL DEFAULT 'legacy',
                 created_at TEXT NOT NULL,
                 status TEXT NOT NULL,
                 source_path TEXT NOT NULL,
@@ -610,16 +634,18 @@ mod tests {
                 remote_checksum TEXT,
                 error TEXT,
                 retry_count INTEGER DEFAULT 0,
-                next_retry_at TEXT
+                next_retry_at TEXT,
+                scan_duration_ms INTEGER,
+                upload_duration_ms INTEGER
             )",
             [],
         )?;
 
         conn.execute(
             "INSERT INTO jobs (
-                created_at, status, source_path, size_bytes, priority, retry_count
+                session_id, created_at, status, source_path, size_bytes, priority, retry_count
             ) VALUES (
-                '2023-01-01', 'pending', '/tmp/test', 100, 10, 5
+                'test-session', '2023-01-01', 'pending', '/tmp/test', 100, 10, 5
             )",
             [],
         )?;
@@ -631,6 +657,7 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         let job = &jobs[0];
         
+        assert_eq!(job.session_id, "test-session");
         assert_eq!(job.status, "pending");
         assert_eq!(job.source_path, "/tmp/test");
         assert_eq!(job.size_bytes, 100);

@@ -1,0 +1,11 @@
+Scan Report for Session: 62c2a4a0-c469-462c-8532-0bad6e784c15
+Generated: 2026-02-02T01:40:43.943458383+00:00
+----------------------------------------
+Total Files:    1
+Clean:          1
+Infected:       0
+Failed:         0
+Skipped:        0
+----------------------------------------
+Details:
+[CLEAN] /home/user/drifter-main/Cargo.toml - Checksum: AoCjq0AAyYfU20/FiAlwq6/OMduI6OlOgCv+o8dQ2pw=-1

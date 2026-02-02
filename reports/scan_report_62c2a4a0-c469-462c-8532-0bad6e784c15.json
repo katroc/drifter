@@ -1,0 +1,18 @@
+{
+  "session_id": "62c2a4a0-c469-462c-8532-0bad6e784c15",
+  "generated_at": "2026-02-02T01:40:43.943458383+00:00",
+  "total_files": 1,
+  "clean_files": 1,
+  "infected_files": 0,
+  "failed_files": 0,
+  "skipped_files": 0,
+  "files": [
+    {
+      "filename": "/home/user/drifter-main/Cargo.toml",
+      "status": "complete",
+      "scan_status": "clean",
+      "checksum": "AoCjq0AAyYfU20/FiAlwq6/OMduI6OlOgCv+o8dQ2pw=-1",
+      "error": null
+    }
+  ]
+}

@@ -2,6 +2,7 @@ use crate::core::config::Config;
 
 use crate::services::ingest::ingest_path;
 
+use uuid::Uuid;
 use crate::coordinator::ProgressInfo;
 use crate::ui::theme::Theme;
 
@@ -683,11 +684,13 @@ pub async fn run_tui(
                                                     let path = entry.path.to_string_lossy().to_string();
                                                     
                                                     tokio::spawn(async move {
+                                                        let session_id = Uuid::new_v4().to_string();
                                                         let _ = ingest_path(
                                                             conn_clone,
                                                             &staging,
                                                             &staging_mode,
                                                             &path,
+                                                            &session_id,
                                                         ).await;
                                                     });
 
@@ -730,6 +733,7 @@ pub async fn run_tui(
                                                 
                                                 let paths_count = paths.len();
                                                 tokio::spawn(async move {
+                                                    let session_id = Uuid::new_v4().to_string();
                                                     let mut total = 0;
                                                     for path in paths {
                                                         if let Ok(count) = ingest_path(
@@ -737,6 +741,7 @@ pub async fn run_tui(
                                                             &staging,
                                                             &staging_mode,
                                                             &path.to_string_lossy(),
+                                                            &session_id,
                                                         ).await {
                                                             total += count;
                                                         }
@@ -2016,8 +2021,9 @@ pub async fn run_tui(
                                                                         let cfg = cfg_handle.lock().await;
                                                                         (cfg.staging_dir.clone(), cfg.staging_mode.clone())
                                                                     };
-
-                                                                    let _ = ingest_path(conn_clone, &staging, &mode, &path).await;
+                                                                    
+                                                                    let session_id = Uuid::new_v4().to_string();
+                                                                    let _ = ingest_path(conn_clone, &staging, &mode, &path, &session_id).await;
                                                                 });
                                                             }
                                                         }

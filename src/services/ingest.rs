@@ -8,13 +8,16 @@ use tracing::{info, warn, error, debug};
 use std::sync::{Arc, Mutex};
 use crate::utils::lock_mutex;
 
-pub async fn ingest_path(conn_mutex: Arc<Mutex<Connection>>, staging_dir: &str, staging_mode: &StagingMode, path: &str) -> Result<usize> {
+pub async fn ingest_path(conn_mutex: Arc<Mutex<Connection>>, staging_dir: &str, staging_mode: &StagingMode, path: &str, session_id: &str) -> Result<usize> {
+    
     debug!("Ingesting path: {}", path);
     let root = PathBuf::from(path);
     if !fs::try_exists(&root).await.unwrap_or(false) {
         warn!("Path does not exist: {}", path);
         return Ok(0);
     }
+    
+    info!("Ingesting into session: {}", session_id);
     
     // Determine the base for relative paths
     let base_path = root.parent()
@@ -55,7 +58,7 @@ pub async fn ingest_path(conn_mutex: Arc<Mutex<Connection>>, staging_dir: &str, 
         
         let job_id = {
             let conn = lock_mutex(&conn_mutex)?;
-            create_job(&conn, &source_str, size, Some(&relative_path))?
+            create_job(&conn, &session_id, &source_str, size, Some(&relative_path))?
         };
         
         // Stage file based on mode

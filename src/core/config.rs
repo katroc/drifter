@@ -38,6 +38,8 @@ pub struct Config {
     pub staging_dir: String,
     #[serde(default = "default_quarantine_dir")]
     pub quarantine_dir: String,
+    #[serde(default = "default_reports_dir")]
+    pub reports_dir: String,
     #[serde(default = "default_state_dir")]
     pub state_dir: String,
     pub watch_dir: Option<String>,
@@ -93,6 +95,7 @@ impl Default for Config {
         Self {
             staging_dir: "./staging".to_string(),
             quarantine_dir: "./quarantine".to_string(),
+            reports_dir: "./reports".to_string(),
             state_dir: "./state".to_string(),
             watch_dir: None,
             staging_mode: StagingMode::Direct,
@@ -128,6 +131,7 @@ impl Default for Config {
 
 fn default_staging_dir() -> String { "./staging".to_string() }
 fn default_quarantine_dir() -> String { "./quarantine".to_string() }
+fn default_reports_dir() -> String { "./reports".to_string() }
 fn default_state_dir() -> String { "./state".to_string() }
 fn default_theme() -> String { Theme::default_name().to_string() }
 fn default_staging_mode() -> StagingMode { StagingMode::Direct }
@@ -188,6 +192,7 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
     Ok(Config {
         staging_dir: get_or("staging_dir", "./staging"),
         quarantine_dir: get_or("quarantine_dir", "./quarantine"),
+        reports_dir: get_or("reports_dir", "./reports"),
         state_dir: get_or("state_dir", "./state"),
         watch_dir: get("watch_dir"),
         staging_mode,
@@ -225,6 +230,7 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
 pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
     db::set_setting(conn, "staging_dir", &cfg.staging_dir)?;
     db::set_setting(conn, "quarantine_dir", &cfg.quarantine_dir)?;
+    db::set_setting(conn, "reports_dir", &cfg.reports_dir)?;
     db::set_setting(conn, "state_dir", &cfg.state_dir)?;
     db::set_setting(conn, "watch_dir", cfg.watch_dir.as_deref().unwrap_or(""))?;
     

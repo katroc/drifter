@@ -1,0 +1,18 @@
+{
+  "session_id": "58a0159e-fd63-4aae-a2d4-eaa1c074181c",
+  "generated_at": "2026-02-02T01:40:42.633571053+00:00",
+  "total_files": 1,
+  "clean_files": 1,
+  "infected_files": 0,
+  "failed_files": 0,
+  "skipped_files": 0,
+  "files": [
+    {
+      "filename": "/home/user/drifter-main/Cargo.lock",
+      "status": "complete",
+      "scan_status": "clean",
+      "checksum": "dldxaXuG1zwjbk7WrpE/Xg1ve4PferFeW/omBJG2Cj4=-1",
+      "error": null
+    }
+  ]
+}

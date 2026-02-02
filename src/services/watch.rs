@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::services::ingest::ingest_path;
+use uuid::Uuid;
 use notify::{Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher};
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -48,7 +49,8 @@ impl Watcher {
                                         let path_str = path.to_string_lossy().to_string();
                                         
                                         tokio::spawn(async move {
-                                            if let Err(e) = ingest_path(conn_clone, &staging_dir_clone, &staging_mode_clone, &path_str).await {
+                                            let session_id = Uuid::new_v4().to_string();
+                                            if let Err(e) = ingest_path(conn_clone, &staging_dir_clone, &staging_mode_clone, &path_str, &session_id).await {
                                                 error!("Failed to ingest file {}: {}", path_str, e);
                                             }
                                         });

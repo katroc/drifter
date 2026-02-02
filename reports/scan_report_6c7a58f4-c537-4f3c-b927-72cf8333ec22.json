@@ -1,0 +1,18 @@
+{
+  "session_id": "6c7a58f4-c537-4f3c-b927-72cf8333ec22",
+  "generated_at": "2026-02-02T01:40:41.106946982+00:00",
+  "total_files": 1,
+  "clean_files": 1,
+  "infected_files": 0,
+  "failed_files": 0,
+  "skipped_files": 0,
+  "files": [
+    {
+      "filename": "/home/user/drifter-main/debug.log",
+      "status": "complete",
+      "scan_status": "clean",
+      "checksum": "WI5pKZfIy+FVhXW2DPGPSNOYFvFabUlCkzSbY3xdu0k=-1",
+      "error": null
+    }
+  ]
+}

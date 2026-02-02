@@ -1,0 +1,18 @@
+{
+  "session_id": "298ed55f-d103-46cd-a3c3-c2874aad9e1f",
+  "generated_at": "2026-02-02T01:40:45.602699761+00:00",
+  "total_files": 1,
+  "clean_files": 1,
+  "infected_files": 0,
+  "failed_files": 0,
+  "skipped_files": 0,
+  "files": [
+    {
+      "filename": "/home/user/drifter-main/README.md",
+      "status": "complete",
+      "scan_status": "clean",
+      "checksum": "hVDztqWdCvrlRJhnGXjjbt4LBbyZh8FahlxPpXMHfHI=-1",
+      "error": null
+    }
+  ]
+}

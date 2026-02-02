@@ -59,6 +59,22 @@ impl Coordinator {
         }
     }
 
+    async fn check_and_report(&self, session_id: &str) -> Result<()> {
+        let pending = {
+            let conn = lock_mutex(&self.conn)?;
+            db::count_pending_session_jobs(&conn, session_id)?
+        };
+
+        if pending == 0 {
+            let config = lock_async_mutex(&self.config).await.clone();
+            let conn = lock_mutex(&self.conn)?;
+            info!("Session {} complete. Generating report.", session_id);
+            use crate::services::reporter::Reporter;
+            Reporter::generate_report(&conn, &config, session_id)?;
+        }
+        Ok(())
+    }
+
     async fn process_cycle(&self) -> Result<()> {
         // 1. Check for retryable jobs
         {
@@ -166,16 +182,22 @@ impl Coordinator {
                      }
                  }
 
-                 let conn = lock_mutex(&self.conn)?;
-                 db::update_scan_status(&conn, job.id, "infected", "quarantined")?;
-                 if !quarantine_path_str.is_empty() {
-                     let _ = db::update_job_staged(&conn, job.id, &quarantine_path_str, "quarantined");
+                 {
+                     let conn = lock_mutex(&self.conn)?;
+                     db::update_scan_status(&conn, job.id, "infected", "quarantined")?;
+                     if !quarantine_path_str.is_empty() {
+                         let _ = db::update_job_staged(&conn, job.id, &quarantine_path_str, "quarantined");
+                     }
+                     db::insert_event(&conn, job.id, "scan", "scan failed: infected (quarantined)")?;
                  }
-                 db::insert_event(&conn, job.id, "scan", "scan failed: infected (quarantined)")?;
+                 self.check_and_report(&job.session_id).await?;
             }
             Err(e) => {
-                 let conn = lock_mutex(&self.conn)?;
-                 db::update_job_error(&conn, job.id, "failed", &format!("scan error: {}", e))?;
+                 {
+                     let conn = lock_mutex(&self.conn)?;
+                     db::update_job_error(&conn, job.id, "failed", &format!("scan error: {}", e))?;
+                 }
+                 self.check_and_report(&job.session_id).await?;
             }
         }
         Ok(())
@@ -245,48 +267,65 @@ impl Coordinator {
                         }
                     }
                 }
+                
+                self.check_and_report(&job.session_id).await?;
             }
             Ok(false) => {
                 // Cancelled or Paused
-                let conn = lock_mutex(&self.conn)?;
-                let current_status = db::get_job(&conn, job.id)?
-                    .map(|j| j.status)
-                    .unwrap_or_else(|| "unknown".to_string());
+                {
+                    let conn = lock_mutex(&self.conn)?;
+                    let current_status = db::get_job(&conn, job.id)?
+                        .map(|j| j.status)
+                        .unwrap_or_else(|| "unknown".to_string());
 
-                if current_status == "paused" {
-                     db::insert_event(&conn, job.id, "upload", "upload paused")?;
-                } else {
-                     db::insert_event(&conn, job.id, "upload", "upload cancelled")?;
+                    if current_status == "paused" {
+                         db::insert_event(&conn, job.id, "upload", "upload paused")?;
+                    } else {
+                         db::insert_event(&conn, job.id, "upload", "upload cancelled")?;
+                    }
                 }
+                self.check_and_report(&job.session_id).await?;
             }
             Err(e) => {
-                let conn = lock_mutex(&self.conn)?;
                 let max_retries = 5;
-                
-                if job.retry_count < max_retries {
-                    // Exponential backoff: 5s, 10s, 20s, 40s, 80s
-                    let backoff_secs = 5 * (2_u64.pow(job.retry_count as u32));
-                    let next_retry = chrono::Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
-                    let next_retry_str = next_retry.to_rfc3339();
-                    
-                    error!("Upload failed for job {}: {}. Retrying in {}s...", job.id, e, backoff_secs);
-                    
-                    db::update_job_retry_state(
-                        &conn, 
-                        job.id, 
-                        job.retry_count, 
-                        Some(&next_retry_str), 
-                        "retry_pending", 
-                        &format!("Failed: {}. Retry pending.", e)
-                    )?;
-                    
-                    db::insert_event(&conn, job.id, "retry_scheduled", &format!("Scheduled retry in {}s", backoff_secs))?;
-                } else {
-                    error!("Upload failed for job {} after {} retries: {}", job.id, job.retry_count, e);
-                    db::update_job_error(&conn, job.id, "failed", &format!("Max retries exceeded. Error: {}", e))?;
+                let should_report = {
+                    let conn = lock_mutex(&self.conn)?;
+                    if job.retry_count < max_retries {
+                        // Exponential backoff: 5s, 10s, 20s, 40s, 80s
+                        let backoff_secs = 5 * (2_u64.pow(job.retry_count as u32));
+                        let next_retry = chrono::Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                        let next_retry_str = next_retry.to_rfc3339();
+                        
+                        error!("Upload failed for job {}: {}. Retrying in {}s...", job.id, e, backoff_secs);
+                        
+                        db::update_job_retry_state(
+                            &conn, 
+                            job.id, 
+                            job.retry_count, 
+                            Some(&next_retry_str), 
+                            "retry_pending", 
+                            &format!("Failed: {}. Retry pending.", e)
+                        )?;
+                        
+                        db::insert_event(&conn, job.id, "retry_scheduled", &format!("Scheduled retry in {}s", backoff_secs))?;
+                        false
+                    } else {
+                        error!("Upload failed for job {} after {} retries: {}", job.id, job.retry_count, e);
+                        db::update_job_error(&conn, job.id, "failed", &format!("Max retries exceeded. Error: {}", e))?;
+                        true
+                    }
+                };
+
+                if should_report {
+                    self.check_and_report(&job.session_id).await?;
                 }
             }
         }
+        
+        // Check for report if we failed permanently (max retries)
+        // We can't do it easily inside the match arm above without refactoring the if/else or using drop.
+        // But wait, I need to check report only on failure terminal state.
+        
         Ok(())
     }
 }
