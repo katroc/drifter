@@ -46,7 +46,7 @@ pub enum ModalAction {
     None,
     ClearHistory,
     CancelJob(i64),
-    DeleteRemoteObject(String),
+    DeleteRemoteObject(String, String), // key, current_path
 
 }
 
@@ -75,6 +75,7 @@ pub enum InputMode {
     LayoutAdjust, // Popout
     QueueSearch,  // In Transfer Queue
     HistorySearch, // In Job History
+    RemoteBrowsing, // For navigating S3 directories
 }
 
 #[derive(Debug)]
@@ -135,6 +136,7 @@ pub struct App {
     
     pub s3_objects: Vec<S3Object>,
     pub selected_remote: usize,
+    pub remote_current_path: String,
 
     pub last_refresh: Instant,
     pub status_message: String,
@@ -237,6 +239,7 @@ impl App {
             
             s3_objects: Vec::new(),
             selected_remote: 0,
+            remote_current_path: String::new(),
             
             last_refresh: Instant::now() - Duration::from_secs(5),
             status_message: "Ready".to_string(),

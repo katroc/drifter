@@ -205,6 +205,7 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
         InputMode::LogSearch => " Search ",
         InputMode::QueueSearch => " Queue (Search) ",
         InputMode::HistorySearch => " History (Search) ",
+        _ => " Hopper ",
     };
     let title = format!("{}{}", title_prefix, path_str);
 
@@ -1451,6 +1452,16 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             sep(),
             key("s"),
             act("Stage"),
+            sep(),
+            key("Esc"),
+            act("Exit"),
+        ],
+        InputMode::RemoteBrowsing => vec![
+            key("←/→"),
+            act("Navigate"),
+            sep(),
+            key("↑/↓"),
+            act("Select"),
             sep(),
             key("Esc"),
             act("Exit"),

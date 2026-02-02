@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState},
     Frame,
 };
-use crate::app::state::{App, AppFocus};
+use crate::app::state::{App, AppFocus, InputMode};
 use crate::ui::theme::Theme;
 use crate::ui::util::format_bytes;
 
@@ -23,16 +23,26 @@ pub fn render_remote(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let items: Vec<ListItem> = app.s3_objects
         .iter()
         .map(|obj| {
-            let style = if obj.key.ends_with('/') {
-                theme.text_style().add_modifier(Modifier::BOLD) 
+            let (icon, style) = if obj.is_dir {
+                ("📁", theme.text_style().fg(theme.info)) 
             } else {
-                theme.text_style()
+                ("📄", theme.text_style())
             };
             
-            let size_str = format_bytes(obj.size as u64);
-            // Just display key and size for now
+            let size_str = if obj.is_dir { 
+                "DIR".to_string() 
+            } else { 
+                format_bytes(obj.size as u64) 
+            };
+            
+            let display_name = if obj.is_dir && !obj.name.ends_with('/') {
+                 format!("{}/", obj.name)
+            } else {
+                 obj.name.clone()
+            };
+
             let content = Line::from(vec![
-                Span::styled(format!("{:<60}", obj.key), style),
+                Span::styled(format!("{} {:<60}", icon, display_name), style),
                 Span::styled(format!("{:>10}", size_str), theme.text_style().add_modifier(Modifier::DIM)),
                 Span::styled(format!("  {}", obj.last_modified), theme.text_style().add_modifier(Modifier::DIM)),
             ]);
@@ -41,12 +51,24 @@ pub fn render_remote(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         .collect();
 
     let border_style = if app.focus == AppFocus::Remote {
-         theme.border_active_style()
+         if app.input_mode == InputMode::RemoteBrowsing {
+             theme.highlight_style() // Indicate active browsing
+         } else {
+             theme.border_active_style()
+         }
     } else {
-         theme.border_style() // Use border_style instead of border_dim
+         theme.border_style() 
     };
 
-    let title = format!(" Remote (S3): {} items ", app.s3_objects.len());
+    let p = if app.remote_current_path.is_empty() { "Root".to_string() } else { app.remote_current_path.clone() };
+    
+    let mode_indicator = if app.input_mode == InputMode::RemoteBrowsing {
+        " [BROWSING]"
+    } else {
+        ""
+    };
+
+    let title = format!(" Remote (S3): {} [Path: {}]{} ", app.s3_objects.len(), p, mode_indicator);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)

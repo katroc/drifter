@@ -34,8 +34,10 @@ impl Drop for TaskGuard {
 #[derive(Debug, Clone)]
 pub struct S3Object {
     pub key: String,
+    pub name: String, // Relative display name
     pub size: i64,
     pub last_modified: String,
+    pub is_dir: bool,
 }
 
 pub struct Uploader {}
@@ -76,22 +78,30 @@ impl Uploader {
         Ok((client, bucket.to_string()))
     }
 
-    pub async fn list_bucket_contents(config: &Config, prefix_filter: Option<&str>) -> Result<Vec<S3Object>> {
+    pub async fn list_bucket_contents(config: &Config, subdir: Option<&str>) -> Result<Vec<S3Object>> {
         let (client, bucket) = Self::create_client(config).await?;
         
-        let prefix = config.s3_prefix.as_deref().unwrap_or("");
-        // Combine config prefix with UI search filter if any? 
-        // For now, let's just use the config prefix as the base.
-        // User might want to browse different folders? 
-        // We will list everything under the configured prefix.
+        // Base prefix from config (e.g. "uploads/")
+        let base_prefix = config.s3_prefix.as_deref().unwrap_or("");
+        
+        // Final prefix = base_prefix + subdir
+        // subdir might be "folder1/"
+        let prefix = if let Some(sub) = subdir {
+            format!("{}{}", base_prefix, sub)
+        } else {
+            base_prefix.to_string()
+        };
         
         let mut objects = Vec::new();
         let mut continuation_token = None;
 
         loop {
-            let mut req = client.list_objects_v2().bucket(&bucket);
+            let mut req = client.list_objects_v2()
+                .bucket(&bucket)
+                .delimiter("/"); // Enable directory mode
+            
             if !prefix.is_empty() {
-                req = req.prefix(prefix);
+                req = req.prefix(&prefix);
             }
             if let Some(token) = continuation_token {
                 req = req.continuation_token(token);
@@ -102,25 +112,56 @@ impl Uploader {
             let is_truncated = resp.is_truncated().unwrap_or(false);
             let next_token = resp.next_continuation_token.clone();
 
+            // 1. Handle Folders (CommonPrefixes)
+            if let Some(common_prefixes) = resp.common_prefixes {
+                for cp in common_prefixes {
+                    if let Some(key) = cp.prefix {
+                        // Calculate relative name
+                        let name = if key.starts_with(&prefix) {
+                            key[prefix.len()..].to_string()
+                        } else {
+                            key.clone()
+                        };
+
+                        objects.push(S3Object {
+                            key,
+                            name,
+                            size: 0,
+                            last_modified: String::new(),
+                            is_dir: true,
+                        });
+                    }
+                }
+            }
+
+            // 2. Handle Files (Contents)
             if let Some(contents) = resp.contents {
                 for obj in contents {
                     let key = obj.key().unwrap_or("").to_string();
+                    
+                    // S3 sometimes returns the prefix itself as an object if it was created explicitly (0 byte file)
+                    // If key == prefix, and we are browsing that prefix, it's the current dir, skip it.
+                    if key == prefix {
+                        continue;
+                    }
+
                     let size = obj.size().unwrap_or(0);
                     let last_modified = obj.last_modified()
-                        .map(|d| d.to_string()) // Simplified date
+                        .map(|d| d.to_string()) 
                         .unwrap_or_default();
                     
-                    // Filter by user provided prefix/search if needed
-                    if let Some(filter) = prefix_filter {
-                        if !key.contains(filter) {
-                            continue;
-                        }
-                    }
+                    let name = if key.starts_with(&prefix) {
+                        key[prefix.len()..].to_string()
+                    } else {
+                        key.clone()
+                    };
 
                     objects.push(S3Object {
                         key,
+                        name,
                         size,
                         last_modified,
+                        is_dir: false,
                     });
                 }
             }
@@ -132,6 +173,17 @@ impl Uploader {
             }
         }
         
+        // Sort: Folders first, then Files
+        objects.sort_by(|a, b| {
+            if a.is_dir && !b.is_dir {
+                std::cmp::Ordering::Less
+            } else if !a.is_dir && b.is_dir {
+                std::cmp::Ordering::Greater
+            } else {
+                a.name.cmp(&b.name)
+            }
+        });
+
         Ok(objects)
     }
 

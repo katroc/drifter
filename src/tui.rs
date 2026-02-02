@@ -238,7 +238,7 @@ pub async fn run_tui(
                                         // Refresh to update list
                                         let _ = app.refresh_jobs(&conn);
                                     }
-                                    ModalAction::DeleteRemoteObject(key) => {
+                                    ModalAction::DeleteRemoteObject(key, path_context) => {
                                         app.status_message = format!("Deleting {}...", key);
                                         let tx = app.async_tx.clone();
                                         let config_clone = app.config.lock().await.clone();
@@ -252,7 +252,8 @@ pub async fn run_tui(
                                                     let _ = tx.send(AppEvent::Notification(format!("Deleted {}", key)));
                                                     
                                                     // 2. Refresh the list using the SAME runtime
-                                                    let res_list = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await;
+                                                    let path_arg = if path_context.is_empty() { None } else { Some(path_context.as_str()) };
+                                                    let res_list = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, path_arg).await;
                                                     
                                                     if let Ok(files) = res_list {
                                                          let _ = tx.send(AppEvent::RemoteFileList(files));
@@ -394,6 +395,7 @@ pub async fn run_tui(
                                     || app.input_mode == InputMode::Browsing
                             }
                             AppFocus::Logs => app.input_mode == InputMode::LogSearch,
+                            AppFocus::Remote => app.input_mode == InputMode::RemoteBrowsing,
                             _ => false,
                         };
 
@@ -505,7 +507,7 @@ pub async fn run_tui(
                                           }
                                          app.status_message = format!("Cancelled job {}", id);
                                      }
-                                     ModalAction::DeleteRemoteObject(ref key) => {
+                                    ModalAction::DeleteRemoteObject(ref key, _) => {
                                          let tx = app.async_tx.clone();
                                          let config_clone = app.config.lock().await.clone();
                                          let key_clone = key.clone();
@@ -562,8 +564,10 @@ pub async fn run_tui(
                                     // Auto-refresh
                                     let tx = app.async_tx.clone();
                                     let config_clone = app.config.lock().await.clone();
+                                    let current_path = app.remote_current_path.clone();
                                     tokio::spawn(async move {
-                                        let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await;
+                                        let path_arg = if current_path.is_empty() { None } else { Some(current_path.as_str()) };
+                                        let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, path_arg).await;
                                         match res {
                                             Ok(files) => { let _ = tx.send(AppEvent::RemoteFileList(files)); }
                                             Err(e) => { let _ = tx.send(AppEvent::Notification(format!("List Failed: {}", e))); }
@@ -583,8 +587,10 @@ pub async fn run_tui(
                                     // Auto-refresh
                                     let tx = app.async_tx.clone();
                                     let config_clone = app.config.lock().await.clone();
+                                    let current_path = app.remote_current_path.clone();
                                     tokio::spawn(async move {
-                                        let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await;
+                                        let path_arg = if current_path.is_empty() { None } else { Some(current_path.as_str()) };
+                                        let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, path_arg).await;
                                         match res {
                                             Ok(files) => { let _ = tx.send(AppEvent::RemoteFileList(files)); }
                                             Err(e) => { let _ = tx.send(AppEvent::Notification(format!("List Failed: {}", e))); }
@@ -783,7 +789,7 @@ pub async fn run_tui(
                                     _ => {}
                                 },
                                 InputMode::LayoutAdjust => {},
-                                InputMode::LogSearch | InputMode::Confirmation | InputMode::QueueSearch | InputMode::HistorySearch => {},
+                                InputMode::LogSearch | InputMode::Confirmation | InputMode::QueueSearch | InputMode::HistorySearch | InputMode::RemoteBrowsing => {},
 
                             }
                         }
@@ -1058,71 +1064,215 @@ pub async fn run_tui(
                             }
                             _ => {}
                         },
-                        AppFocus::Remote => match key.code {
-                            KeyCode::Up | KeyCode::Char('k') => {
-                                if app.selected_remote > 0 {
-                                    app.selected_remote -= 1;
-                                }
-                            }
-                            KeyCode::Down | KeyCode::Char('j') => {
-                                if app.selected_remote + 1 < app.s3_objects.len() {
-                                    app.selected_remote += 1;
-                                }
-                            }
-                            KeyCode::Char('r') => {
-                                app.status_message = "Refreshing S3 list...".to_string();
-                                let tx = app.async_tx.clone();
-                                let config_clone = app.config.lock().await.clone();
-                                tokio::spawn(async move {
-                                    let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await;
-                                    match res {
-                                        Ok(files) => {
-                                            let _ = tx.send(AppEvent::RemoteFileList(files));
+                        AppFocus::Remote => {
+                            match app.input_mode {
+                                InputMode::Normal => {
+                                    match key.code {
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                            if app.selected_remote > 0 { app.selected_remote -= 1; }
                                         }
-                                        Err(e) => {
-                                            let _ = tx.send(AppEvent::Notification(format!("List Failed: {}", e)));
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                            if app.selected_remote + 1 < app.s3_objects.len() { app.selected_remote += 1; }
                                         }
+                                        KeyCode::Char('a') => {
+                                            app.input_mode = InputMode::RemoteBrowsing;
+                                            app.status_message = "Browsing Remote...".to_string();
+                                        }
+                                        KeyCode::Char('d') => {
+                                             if !app.s3_objects.is_empty() && app.selected_remote < app.s3_objects.len() {
+                                                let key = app.s3_objects[app.selected_remote].key.clone();
+                                                let is_dir = app.s3_objects[app.selected_remote].is_dir;
+                                                
+                                                if is_dir {
+                                                     app.status_message = "Cannot download directories yet.".to_string();
+                                                } else {
+                                                    app.status_message = format!("Downloading {}...", key);
+                                                    let tx = app.async_tx.clone();
+                                                    let config_clone = app.config.lock().await.clone();
+                                                    
+                                                    let download_dir = dirs::download_dir().unwrap_or(PathBuf::from("."));
+                                                    let dest = download_dir.join(std::path::Path::new(&key).file_name().unwrap_or(std::ffi::OsStr::new("downloaded_file")));
+                                                    let dest_clone = dest.clone();
+                
+                                                    tokio::spawn(async move {
+                                                        let res = crate::services::uploader::Uploader::download_file(&config_clone, &key, &dest_clone).await;
+                                                        match res {
+                                                            Ok(_) => {
+                                                                let _ = tx.send(AppEvent::Notification(format!("Downloaded to {:?}", dest_clone)));
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(AppEvent::Notification(format!("Download Failed: {}", e)));
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        KeyCode::Char('x') => {
+                                            if !app.s3_objects.is_empty() && app.selected_remote < app.s3_objects.len() {
+                                                let obj = &app.s3_objects[app.selected_remote];
+                                                let key = obj.key.clone();
+                                                
+                                                if obj.is_dir {
+                                                    app.status_message = "Cannot delete non-empty folders via UI safety check.".to_string();
+                                                } else {
+                                                    app.input_mode = InputMode::Confirmation;
+                                                    app.pending_action = ModalAction::DeleteRemoteObject(key.clone(), app.remote_current_path.clone());
+                                                    app.confirmation_msg = format!("Delete '{}'?", obj.name);
+                                                }
+                                            }
+                                        }
+                                        KeyCode::Char('r') => {
+                                            app.status_message = "Refreshing S3 list...".to_string();
+                                            let tx = app.async_tx.clone();
+                                            let config_clone = app.config.lock().await.clone();
+                                            let current_path = app.remote_current_path.clone();
+                                            tokio::spawn(async move {
+                                                let path_arg = if current_path.is_empty() { None } else { Some(current_path.as_str()) };
+                                                let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, path_arg).await;
+                                                match res {
+                                                    Ok(files) => {
+                                                        let _ = tx.send(AppEvent::RemoteFileList(files));
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = tx.send(AppEvent::Notification(format!("List Failed: {}", e)));
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        _ => {}
                                     }
-                                });
-                            }
-                            KeyCode::Char('d') => {
-                                if !app.s3_objects.is_empty() && app.selected_remote < app.s3_objects.len() {
-                                    let key = app.s3_objects[app.selected_remote].key.clone();
-                                    app.status_message = format!("Downloading {}...", key);
-                                    let tx = app.async_tx.clone();
-                                    let config_clone = app.config.lock().await.clone();
-                                    
-                                    // Default download location: ~/Downloads/Drifter or similar? 
-                                    // For now, let's just download to current working dir or ~/Downloads
-                                    // Let's assume ~/Downloads.
-                                    let download_dir = dirs::download_dir().unwrap_or(PathBuf::from("."));
-                                    let dest = download_dir.join(std::path::Path::new(&key).file_name().unwrap_or(std::ffi::OsStr::new("downloaded_file")));
-                                    let dest_clone = dest.clone();
-
-                                    tokio::spawn(async move {
-                                        let res = crate::services::uploader::Uploader::download_file(&config_clone, &key, &dest_clone).await;
-                                        match res {
-                                            Ok(_) => {
-                                                let _ = tx.send(AppEvent::Notification(format!("Downloaded to {:?}", dest_clone)));
-                                            }
-                                            Err(e) => {
-                                                let _ = tx.send(AppEvent::Notification(format!("Download Failed: {}", e)));
+                                }
+                                InputMode::RemoteBrowsing => {
+                                    match key.code {
+                                        KeyCode::Esc | KeyCode::Char('q') => {
+                                            app.input_mode = InputMode::Normal;
+                                            app.status_message = "Ready".to_string();
+                                        }
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                            if app.selected_remote > 0 {
+                                                app.selected_remote -= 1;
                                             }
                                         }
-                                    });
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                            if app.selected_remote + 1 < app.s3_objects.len() {
+                                                app.selected_remote += 1;
+                                            }
+                                        }
+                                        KeyCode::Right | KeyCode::Enter => {
+                                            if !app.s3_objects.is_empty() && app.selected_remote < app.s3_objects.len() {
+                                                let obj = &app.s3_objects[app.selected_remote];
+                                                if obj.is_dir {
+                                                    app.remote_current_path.push_str(&obj.name);
+                                                    app.selected_remote = 0;
+                                                    
+                                                    // Refresh
+                                                    let tx = app.async_tx.clone();
+                                                    let config_clone = app.config.lock().await.clone();
+                                                    let current_path = app.remote_current_path.clone();
+                                                    tokio::spawn(async move {
+                                                        let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, Some(&current_path)).await;
+                                                        match res {
+                                                            Ok(files) => { let _ = tx.send(AppEvent::RemoteFileList(files)); }
+                                                            Err(e) => { let _ = tx.send(AppEvent::Notification(format!("List Failed: {}", e))); }
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        KeyCode::Left | KeyCode::Backspace => {
+                                            if !app.remote_current_path.is_empty() {
+                                                let current = app.remote_current_path.trim_end_matches('/');
+                                                if let Some(idx) = current.rfind('/') {
+                                                    app.remote_current_path.truncate(idx + 1);
+                                                } else {
+                                                    app.remote_current_path.clear();
+                                                }
+                                                app.selected_remote = 0;
+            
+                                                // Refresh
+                                                let tx = app.async_tx.clone();
+                                                let config_clone = app.config.lock().await.clone();
+                                                let current_path = app.remote_current_path.clone();
+                                                tokio::spawn(async move {
+                                                    let path_arg = if current_path.is_empty() { None } else { Some(current_path.as_str()) };
+                                                    let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, path_arg).await;
+                                                    match res {
+                                                        Ok(files) => { let _ = tx.send(AppEvent::RemoteFileList(files)); }
+                                                        Err(e) => { let _ = tx.send(AppEvent::Notification(format!("List Failed: {}", e))); }
+                                                    }
+                                                });
+                                            }
+                                        }
+                                        // Allow downloading/deleting in browsing mode too
+                                        KeyCode::Char('d') => {
+                                             if !app.s3_objects.is_empty() && app.selected_remote < app.s3_objects.len() {
+                                                let key = app.s3_objects[app.selected_remote].key.clone();
+                                                let is_dir = app.s3_objects[app.selected_remote].is_dir;
+                                                
+                                                if is_dir {
+                                                     app.status_message = "Cannot download directories yet.".to_string();
+                                                } else {
+                                                    app.status_message = format!("Downloading {}...", key);
+                                                    let tx = app.async_tx.clone();
+                                                    let config_clone = app.config.lock().await.clone();
+                                                    
+                                                    let download_dir = dirs::download_dir().unwrap_or(PathBuf::from("."));
+                                                    let dest = download_dir.join(std::path::Path::new(&key).file_name().unwrap_or(std::ffi::OsStr::new("downloaded_file")));
+                                                    let dest_clone = dest.clone();
+                
+                                                    tokio::spawn(async move {
+                                                        let res = crate::services::uploader::Uploader::download_file(&config_clone, &key, &dest_clone).await;
+                                                        match res {
+                                                            Ok(_) => {
+                                                                let _ = tx.send(AppEvent::Notification(format!("Downloaded to {:?}", dest_clone)));
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(AppEvent::Notification(format!("Download Failed: {}", e)));
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        KeyCode::Char('x') => {
+                                            if !app.s3_objects.is_empty() && app.selected_remote < app.s3_objects.len() {
+                                                let obj = &app.s3_objects[app.selected_remote];
+                                                let key = obj.key.clone();
+                                                
+                                                if obj.is_dir {
+                                                    app.status_message = "Cannot delete non-empty folders via UI safety check.".to_string();
+                                                } else {
+                                                    app.input_mode = InputMode::Confirmation;
+                                                    app.pending_action = ModalAction::DeleteRemoteObject(key.clone(), app.remote_current_path.clone());
+                                                    app.confirmation_msg = format!("Delete '{}'?", obj.name);
+                                                }
+                                            }
+                                        }
+                                        KeyCode::Char('r') => {
+                                            app.status_message = "Refreshing S3 list...".to_string();
+                                            let tx = app.async_tx.clone();
+                                            let config_clone = app.config.lock().await.clone();
+                                            let current_path = app.remote_current_path.clone();
+                                            tokio::spawn(async move {
+                                                let path_arg = if current_path.is_empty() { None } else { Some(current_path.as_str()) };
+                                                let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, path_arg).await;
+                                                match res {
+                                                    Ok(files) => {
+                                                        let _ = tx.send(AppEvent::RemoteFileList(files));
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = tx.send(AppEvent::Notification(format!("List Failed: {}", e)));
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        _ => {}
+                                     }
                                 }
+                                _ => {}
                             }
-                             KeyCode::Char('x') => {
-                                // Delete
-                                if !app.s3_objects.is_empty() && app.selected_remote < app.s3_objects.len() {
-                                    let key = app.s3_objects[app.selected_remote].key.clone();
-                                    app.input_mode = InputMode::Confirmation;
-                                    app.pending_action = ModalAction::DeleteRemoteObject(key.clone());
-                                    app.confirmation_msg = format!("Delete '{}'?", key);
-                                }
-                             }
-                            _ => {}
-                        },
+                        }
 
                         AppFocus::SettingsCategory => {
                             match key.code {
@@ -1740,13 +1890,44 @@ pub async fn run_tui(
                                     AppTab::Remote => {
                                         app.focus = AppFocus::Remote;
                                         let inner_y = center_layout.y + 1;
-                                        if y > inner_y {
-                                            let relative_row = (y - inner_y - 1) as usize;
+                                        if y >= inner_y {
+                                            let relative_row = (y - inner_y) as usize;
                                             let display_height = center_layout.height.saturating_sub(2) as usize;
                                             let total_rows = app.s3_objects.len();
                                             let offset = calculate_list_offset(app.selected_remote, total_rows, display_height);
                                             if relative_row < display_height && offset + relative_row < total_rows {
-                                                app.selected_remote = offset + relative_row;
+                                                let new_idx = offset + relative_row;
+                                                app.selected_remote = new_idx;
+
+                                                // Double click to navigate
+                                                let now = Instant::now();
+                                                let is_double_click = if let (Some(last_time), Some(last_pos)) = (app.last_click_time, app.last_click_pos) {
+                                                    now.duration_since(last_time) < Duration::from_millis(500) && last_pos == (x, y)
+                                                } else { false };
+
+                                                if is_double_click {
+                                                    app.last_click_time = None;
+                                                    let obj = &app.s3_objects[new_idx];
+                                                    if obj.is_dir {
+                                                        app.remote_current_path.push_str(&obj.name);
+                                                        app.selected_remote = 0;
+                                                        app.input_mode = InputMode::RemoteBrowsing;
+                                                        
+                                                        let tx = app.async_tx.clone();
+                                                        let config_clone = app.config.lock().await.clone();
+                                                        let current_path = app.remote_current_path.clone();
+                                                        tokio::spawn(async move {
+                                                            let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, Some(&current_path)).await;
+                                                            match res {
+                                                                Ok(files) => { let _ = tx.send(AppEvent::RemoteFileList(files)); }
+                                                                Err(e) => { let _ = tx.send(AppEvent::Notification(format!("List Failed: {}", e))); }
+                                                            }
+                                                        });
+                                                    }
+                                                } else {
+                                                    app.last_click_time = Some(now);
+                                                    app.last_click_pos = Some((x, y));
+                                                }
                                             }
                                         }
                                     }
