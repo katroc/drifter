@@ -1,35 +1,38 @@
 use crate::core::config::StagingMode;
 use crate::db::{create_job, insert_event, update_job_error, update_job_staged};
+use crate::utils::lock_mutex;
 use anyhow::Result;
 use rusqlite::Connection;
-use tokio::fs;
 use std::path::{Path, PathBuf};
-use tracing::{info, warn, error, debug};
 use std::sync::{Arc, Mutex};
-use crate::utils::lock_mutex;
+use tokio::fs;
+use tracing::{debug, error, info, warn};
 
-pub async fn ingest_path(conn_mutex: Arc<Mutex<Connection>>, staging_dir: &str, staging_mode: &StagingMode, path: &str, session_id: &str) -> Result<usize> {
-    
+pub async fn ingest_path(
+    conn_mutex: Arc<Mutex<Connection>>,
+    staging_dir: &str,
+    staging_mode: &StagingMode,
+    path: &str,
+    session_id: &str,
+) -> Result<usize> {
     debug!("Ingesting path: {}", path);
     let root = PathBuf::from(path);
     if !fs::try_exists(&root).await.unwrap_or(false) {
         warn!("Path does not exist: {}", path);
         return Ok(0);
     }
-    
+
     info!("Ingesting into session: {}", session_id);
-    
+
     // Determine the base for relative paths
-    let base_path = root.parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| {
-             if root == PathBuf::from("/") {
-                 PathBuf::from("/")
-             } else {
-                 PathBuf::from(".")
-             }
-        });
-    
+    let base_path = root.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| {
+        if root == PathBuf::from("/") {
+            PathBuf::from("/")
+        } else {
+            PathBuf::from(".")
+        }
+    });
+
     let files = collect_files(&root).await?;
     let mut count = 0;
     for file_path in files {
@@ -43,24 +46,26 @@ pub async fn ingest_path(conn_mutex: Arc<Mutex<Connection>>, staging_dir: &str, 
         if !metadata.is_file() {
             continue;
         }
-        
-        let relative_path = file_path.strip_prefix(&base_path)
+
+        let relative_path = file_path
+            .strip_prefix(&base_path)
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| {
-                file_path.file_name()
+                file_path
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "file".to_string())
             });
-        
+
         let size = metadata.len() as i64;
         let source_str = file_path.to_string_lossy().to_string();
         debug!("Processing file: {} ({} bytes)", source_str, size);
-        
+
         let job_id = {
             let conn = lock_mutex(&conn_mutex)?;
-            create_job(&conn, &session_id, &source_str, size, Some(&relative_path))?
+            create_job(&conn, session_id, &source_str, size, Some(&relative_path))?
         };
-        
+
         // Stage file based on mode
         let stage_result = match staging_mode {
             StagingMode::Direct => {
@@ -102,7 +107,6 @@ pub async fn ingest_path(conn_mutex: Arc<Mutex<Connection>>, staging_dir: &str, 
     Ok(count)
 }
 
-
 async fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -142,30 +146,33 @@ async fn stage_file(staging_dir: &str, job_id: i64, source: &Path) -> Result<Str
 // Helper functions exposed for testing
 
 /// Calculate the base path for relative path calculations
+#[allow(dead_code)]
 pub fn calculate_base_path(root: &Path) -> PathBuf {
-    root.parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| {
-            if root == PathBuf::from("/") {
-                PathBuf::from("/")
-            } else {
-                PathBuf::from(".")
-            }
-        })
+    root.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| {
+        if root == PathBuf::from("/") {
+            PathBuf::from("/")
+        } else {
+            PathBuf::from(".")
+        }
+    })
 }
 
 /// Calculate relative path from base
+#[allow(dead_code)]
 pub fn calculate_relative_path(file_path: &Path, base_path: &Path) -> String {
-    file_path.strip_prefix(base_path)
+    file_path
+        .strip_prefix(base_path)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| {
-            file_path.file_name()
+            file_path
+                .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "file".to_string())
         })
 }
 
 /// Calculate staging destination path
+#[allow(dead_code)]
 pub fn calculate_staging_path(staging_dir: &str, job_id: i64, source: &Path) -> PathBuf {
     let job_dir = Path::new(staging_dir).join(job_id.to_string());
     let filename = source
@@ -329,7 +336,12 @@ mod tests {
         let test_cases = vec![
             ("/source/file.txt", "./staging", 1, "./staging/1/file.txt"),
             ("/source/image.png", "/tmp", 2, "/tmp/2/image.png"),
-            ("/source/archive.tar.gz", "./stage", 3, "./stage/3/archive.tar.gz"),
+            (
+                "/source/archive.tar.gz",
+                "./stage",
+                3,
+                "./stage/3/archive.tar.gz",
+            ),
         ];
 
         for (source, staging_dir, job_id, expected) in test_cases {
@@ -352,7 +364,10 @@ mod tests {
         let source = PathBuf::from("/source/my file (copy).txt");
         let staging_path = calculate_staging_path("./staging", 100, &source);
 
-        assert_eq!(staging_path, PathBuf::from("./staging/100/my file (copy).txt"));
+        assert_eq!(
+            staging_path,
+            PathBuf::from("./staging/100/my file (copy).txt")
+        );
     }
 
     #[test]

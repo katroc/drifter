@@ -1,5 +1,5 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use crate::ui::theme::StatusKind;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use std::time::SystemTime;
 
 pub fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
@@ -188,9 +188,9 @@ pub fn format_duration_ms(ms: i64) -> String {
         format!("{}ms", ms)
     } else if ms < 60_000 {
         format!("{}.{}s", ms / 1000, (ms % 1000) / 100)
-    } else if ms < 3600_000 {
+    } else if ms < 3_600_000 {
         format!("{}m {}s", ms / 60_000, (ms % 60_000) / 1000)
     } else {
-        format!("{}h {}m", ms / 3600_000, (ms % 3600_000) / 60_000)
+        format!("{}h {}m", ms / 3_600_000, (ms % 3_600_000) / 60_000)
     }
 }

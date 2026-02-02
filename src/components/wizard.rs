@@ -1,4 +1,3 @@
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WizardStep {
     Paths,
@@ -28,6 +27,12 @@ pub struct WizardState {
     // Performance
     pub part_size: String,
     pub concurrency: String,
+}
+
+impl Default for WizardState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WizardState {

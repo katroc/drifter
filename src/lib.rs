@@ -3,11 +3,11 @@
 
 pub mod app;
 pub mod components;
-pub mod core;
-pub mod services;
-pub mod ui;
-pub mod db;
 pub mod coordinator;
-pub mod tui;
-pub mod utils;
+pub mod core;
+pub mod db;
 pub mod logging;
+pub mod services;
+pub mod tui;
+pub mod ui;
+pub mod utils;

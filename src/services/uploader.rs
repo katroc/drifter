@@ -1,26 +1,26 @@
-use anyhow::{Context, Result};
 use crate::core::config::Config;
+use anyhow::{Context, Result};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};
-use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::error::ProvideErrorMetadata;
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use std::path::Path;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+use crate::coordinator::ProgressInfo;
+use crate::db;
+use crate::utils::{lock_async_mutex, lock_mutex};
+use rusqlite::Connection;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
-use crate::utils::{lock_mutex, lock_async_mutex};
-use tracing::{info, error};
-use crate::coordinator::ProgressInfo;
-use rusqlite::Connection;
-use crate::db;
-use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::{error, info};
 
-use sha2::{Sha256, Digest};
 use base64::{Engine as _, engine::general_purpose};
+use sha2::{Digest, Sha256};
 pub struct TaskGuard(pub tokio::task::JoinHandle<()>);
 
 impl Drop for TaskGuard {
@@ -28,8 +28,6 @@ impl Drop for TaskGuard {
         self.0.abort();
     }
 }
-
-
 
 #[derive(Debug, Clone)]
 pub struct S3Object {
@@ -56,35 +54,42 @@ impl Uploader {
         let secret_key = config.s3_secret_key.as_deref().map(|s| s.trim());
 
         if bucket.is_empty() {
-             return Err(anyhow::anyhow!("S3 bucket not configured"));
+            return Err(anyhow::anyhow!("S3 bucket not configured"));
         }
 
         #[allow(deprecated)]
-        let mut config_loader = aws_config::from_env().region(aws_config::Region::new(region.to_string()));
-        
+        let mut config_loader =
+            aws_config::from_env().region(aws_config::Region::new(region.to_string()));
+
         if let (Some(ak), Some(sk)) = (access_key, secret_key) {
-             let creds = Credentials::new(ak.to_string(), sk.to_string(), None, None, "static");
-             config_loader = config_loader.credentials_provider(SharedCredentialsProvider::new(creds));
+            let creds = Credentials::new(ak.to_string(), sk.to_string(), None, None, "static");
+            config_loader =
+                config_loader.credentials_provider(SharedCredentialsProvider::new(creds));
         } else if access_key.is_some() || secret_key.is_some() {
-             return Err(anyhow::anyhow!("S3 Credentials incomplete: Both Access Key and Secret Key must be provided."));
+            return Err(anyhow::anyhow!(
+                "S3 Credentials incomplete: Both Access Key and Secret Key must be provided."
+            ));
         }
 
         let sdk_config = config_loader.load().await;
-        
+
         let mut client_builder = aws_sdk_s3::config::Builder::from(&sdk_config);
         if let Some(endpoint) = endpoint {
-             client_builder = client_builder.endpoint_url(endpoint).force_path_style(true);
+            client_builder = client_builder.endpoint_url(endpoint).force_path_style(true);
         }
         let client = Client::from_conf(client_builder.build());
         Ok((client, bucket.to_string()))
     }
 
-    pub async fn list_bucket_contents(config: &Config, subdir: Option<&str>) -> Result<Vec<S3Object>> {
+    pub async fn list_bucket_contents(
+        config: &Config,
+        subdir: Option<&str>,
+    ) -> Result<Vec<S3Object>> {
         let (client, bucket) = Self::create_client(config).await?;
-        
+
         // Base prefix from config (e.g. "uploads/")
         let base_prefix = config.s3_prefix.as_deref().unwrap_or("");
-        
+
         // Final prefix = base_prefix + subdir
         // subdir might be "folder1/"
         let prefix = if let Some(sub) = subdir {
@@ -92,15 +97,13 @@ impl Uploader {
         } else {
             base_prefix.to_string()
         };
-        
+
         let mut objects = Vec::new();
         let mut continuation_token = None;
 
         loop {
-            let mut req = client.list_objects_v2()
-                .bucket(&bucket)
-                .delimiter("/"); // Enable directory mode
-            
+            let mut req = client.list_objects_v2().bucket(&bucket).delimiter("/"); // Enable directory mode
+
             if !prefix.is_empty() {
                 req = req.prefix(&prefix);
             }
@@ -109,7 +112,7 @@ impl Uploader {
             }
 
             let resp = req.send().await.context("Failed to list objects")?;
-            
+
             let is_truncated = resp.is_truncated().unwrap_or(false);
             let next_token = resp.next_continuation_token.clone();
 
@@ -139,7 +142,7 @@ impl Uploader {
             if let Some(contents) = resp.contents {
                 for obj in contents {
                     let key = obj.key().unwrap_or("").to_string();
-                    
+
                     // S3 sometimes returns the prefix itself as an object if it was created explicitly (0 byte file)
                     // If key == prefix, and we are browsing that prefix, it's the current dir, skip it.
                     if key == prefix {
@@ -147,10 +150,11 @@ impl Uploader {
                     }
 
                     let size = obj.size().unwrap_or(0);
-                    let last_modified = obj.last_modified()
-                        .map(|d| d.to_string()) 
+                    let last_modified = obj
+                        .last_modified()
+                        .map(|d| d.to_string())
                         .unwrap_or_default();
-                    
+
                     let name = if key.starts_with(&prefix) {
                         key[prefix.len()..].to_string()
                     } else {
@@ -173,7 +177,7 @@ impl Uploader {
                 break;
             }
         }
-        
+
         // Sort: Folders first, then Files
         objects.sort_by(|a, b| {
             if a.is_dir && !b.is_dir {
@@ -190,21 +194,35 @@ impl Uploader {
 
     pub async fn download_file(config: &Config, key: &str, dest: &Path) -> Result<()> {
         let (client, bucket) = Self::create_client(config).await?;
-        
-        let resp = client.get_object().bucket(&bucket).key(key).send().await
+
+        let resp = client
+            .get_object()
+            .bucket(&bucket)
+            .key(key)
+            .send()
+            .await
             .context("Failed to get object")?;
-            
+
         let mut body = resp.body.into_async_read();
-        let mut file = tokio::fs::File::create(dest).await.context("Failed to create local file")?;
-        
-        tokio::io::copy(&mut body, &mut file).await.context("Failed to write to file")?;
+        let mut file = tokio::fs::File::create(dest)
+            .await
+            .context("Failed to create local file")?;
+
+        tokio::io::copy(&mut body, &mut file)
+            .await
+            .context("Failed to write to file")?;
         Ok(())
     }
 
     pub async fn delete_file(config: &Config, key: &str) -> Result<()> {
         let (client, bucket) = Self::create_client(config).await?;
-        
-        client.delete_object().bucket(&bucket).key(key).send().await
+
+        client
+            .delete_object()
+            .bucket(&bucket)
+            .key(key)
+            .send()
+            .await
             .context("Failed to delete object")?;
         Ok(())
     }
@@ -219,12 +237,15 @@ impl Uploader {
 
         match client.list_buckets().send().await {
             Ok(_) => Ok(format!("Connected to S3 successfully (Bucket: {})", bucket)),
-             Err(e) => {
+            Err(e) => {
                 // Try HeadBucket
-                 match client.head_bucket().bucket(&bucket).send().await {
-                     Ok(_) => Ok(format!("Connected to S3 successfully (Access to '{}' confirmed)", bucket)),
-                     Err(_) => Err(anyhow::anyhow!("S3 Connection Failed: {}", e))
-                 }
+                match client.head_bucket().bucket(&bucket).send().await {
+                    Ok(_) => Ok(format!(
+                        "Connected to S3 successfully (Access to '{}' confirmed)",
+                        bucket
+                    )),
+                    Err(_) => Err(anyhow::anyhow!("S3 Connection Failed: {}", e)),
+                }
             }
         }
     }
@@ -245,27 +266,31 @@ impl Uploader {
         let concurrency = config.concurrency_upload_parts.max(1);
         // create_client already checks bucket
 
-
         let file_path = Path::new(path);
-        
+
         // Get the original source path or pre-calculated key from the job
         let s3_key_path = {
             let conn = lock_mutex(&conn_mutex)?;
             if let Ok(Some(job)) = db::get_job(&conn, job_id) {
                 // If ingest calculated a relative path, use it
                 if let Some(key) = job.s3_key {
-                     key
+                    key
                 } else {
                     // Fallback to source path filename
                     let source = Path::new(&job.source_path);
-                    source.file_name()
+                    source
+                        .file_name()
                         .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| file_path.file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "file".to_string()))
+                        .unwrap_or_else(|| {
+                            file_path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "file".to_string())
+                        })
                 }
             } else {
-                file_path.file_name()
+                file_path
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "file".to_string())
             }
@@ -283,17 +308,21 @@ impl Uploader {
             // Notify UI
             info!("Resuming upload for job {} (Upload ID: {})", job_id, uid);
             {
-               let mut p = lock_async_mutex(&progress).await;
-               p.insert(job_id, ProgressInfo { 
-                   percent: -1.0, 
-                   details: "Resuming: Listing parts...".to_string(),
-                   parts_done: 0,
-                   parts_total: 0,
-               });
+                let mut p = lock_async_mutex(&progress).await;
+                p.insert(
+                    job_id,
+                    ProgressInfo {
+                        percent: -1.0,
+                        details: "Resuming: Listing parts...".to_string(),
+                        parts_done: 0,
+                        parts_total: 0,
+                    },
+                );
             }
 
             // List existing parts
-            let list_parts_output = client.list_parts()
+            let list_parts_output = client
+                .list_parts()
                 .bucket(&bucket)
                 .key(&key)
                 .upload_id(uid)
@@ -304,24 +333,25 @@ impl Uploader {
                 Ok(output) => {
                     if let Some(parts) = output.parts {
                         for p in parts {
-                             if let Some(pn) = p.part_number
-                                 && let Some(etag) = p.e_tag
-                             {
-                                     let mut builder = CompletedPart::builder().part_number(pn).e_tag(etag);
-                                     
-                                     // If we have a checksum from S3, save it locally for the composite calc
-                                     if let Some(cs) = p.checksum_sha256 {
-                                         if let Ok(bytes) = general_purpose::STANDARD.decode(&cs) {
-                                             if let Ok(mut map) = part_hashes.lock() {
-                                                 map.insert(pn, bytes);
-                                             }
-                                         }
-                                         builder = builder.checksum_sha256(cs);
-                                     }
+                            if let Some(pn) = p.part_number
+                                && let Some(etag) = p.e_tag
+                            {
+                                let mut builder =
+                                    CompletedPart::builder().part_number(pn).e_tag(etag);
 
-                                     completed_parts.push(builder.build());
-                                     completed_indices.insert(pn);
-                             }
+                                // If we have a checksum from S3, save it locally for the composite calc
+                                if let Some(cs) = p.checksum_sha256 {
+                                    if let Ok(bytes) = general_purpose::STANDARD.decode(&cs)
+                                        && let Ok(mut map) = part_hashes.lock()
+                                    {
+                                        map.insert(pn, bytes);
+                                    }
+                                    builder = builder.checksum_sha256(cs);
+                                }
+
+                                completed_parts.push(builder.build());
+                                completed_indices.insert(pn);
+                            }
                         }
                     }
                 }
@@ -343,16 +373,34 @@ impl Uploader {
                 .await
                 .map_err(|e| {
                     let service_err = match e.as_service_error() {
-                        Some(s) => format!("{}: {}", s.code().unwrap_or("Unknown"), s.message().unwrap_or("No message")),
+                        Some(s) => format!(
+                            "{}: {}",
+                            s.code().unwrap_or("Unknown"),
+                            s.message().unwrap_or("No message")
+                        ),
                         None => e.to_string(),
                     };
-                    error!("Failed to create multipart upload: {} (Bucket: {}, Key: {})", service_err, bucket, key);
-                    anyhow::anyhow!("Failed to create multipart upload: {} (Bucket: {}, Key: {})", service_err, bucket, key)
+                    error!(
+                        "Failed to create multipart upload: {} (Bucket: {}, Key: {})",
+                        service_err, bucket, key
+                    );
+                    anyhow::anyhow!(
+                        "Failed to create multipart upload: {} (Bucket: {}, Key: {})",
+                        service_err,
+                        bucket,
+                        key
+                    )
                 })?;
-            
-            let new_uid = create_output.upload_id().context("No upload ID")?.to_string();
-            info!("Created new multipart upload for job {}: {}", job_id, new_uid);
-            
+
+            let new_uid = create_output
+                .upload_id()
+                .context("No upload ID")?
+                .to_string();
+            info!(
+                "Created new multipart upload for job {}: {}",
+                job_id, new_uid
+            );
+
             // Save to DB
             {
                 let conn = lock_mutex(&conn_mutex)?;
@@ -360,24 +408,27 @@ impl Uploader {
             }
             upload_id = Some(new_uid);
         }
-        
-        let upload_id = upload_id.ok_or_else(|| anyhow::anyhow!("Failed to obtain or create Upload ID"))?;
+
+        let upload_id =
+            upload_id.ok_or_else(|| anyhow::anyhow!("Failed to obtain or create Upload ID"))?;
 
         let mut file = File::open(path).await.context("Failed to open file")?;
         let file_size = file.metadata().await?.len();
-        
+
         // Dynamic Part Size Calculation
         let min_part_size = 5 * 1024 * 1024; // S3 Min: 5MB
         let max_parts = 10000; // S3 Max parts
-        
+
         // 1. Base config size (default 128MB)
         let config_part_size = (config.part_size_mb * 1024 * 1024) as usize;
-        
+
         // 2. Adjust for parallelism: Attempt to create enough parts for all threads
         // If file_size=100MB, concurrency=4 -> target part size ~25MB
-        let parallel_part_size = (file_size as usize).checked_div(concurrency).unwrap_or(file_size as usize);
-        
-        // 3. Select optimal size: 
+        let parallel_part_size = (file_size as usize)
+            .checked_div(concurrency)
+            .unwrap_or(file_size as usize);
+
+        // 3. Select optimal size:
         // Start with the SMALLER of config vs parallel (to encourage parallelism)
         // But clamp to min_part_size (5MB).
         let mut part_size = config_part_size.min(parallel_part_size).max(min_part_size);
@@ -389,10 +440,10 @@ impl Uploader {
 
         let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
         let uploaded_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        
-        // Initialize uploaded bytes with already completed parts size? 
-        // We lack part sizes in list_parts usually (it returns Part struct). 
-        // We can estimate or just track new uploads. For progress bar correctness on resume, 
+
+        // Initialize uploaded bytes with already completed parts size?
+        // We lack part sizes in list_parts usually (it returns Part struct).
+        // We can estimate or just track new uploads. For progress bar correctness on resume,
         let initial_bytes: u64 = completed_indices.len() as u64 * part_size as u64;
         uploaded_bytes.store(initial_bytes, std::sync::atomic::Ordering::Relaxed);
 
@@ -411,11 +462,11 @@ impl Uploader {
             let start_time = std::time::Instant::now();
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
-                
+
                 let n = monitor_net.load(std::sync::atomic::Ordering::Relaxed);
 
                 let pct = (n as f64 / m_file_size as f64) * 100.0;
-                
+
                 let part_size_display = if m_part_size >= 1024 * 1024 * 1024 {
                     format!("{:.2}GB", m_part_size as f64 / 1024.0 / 1024.0 / 1024.0)
                 } else {
@@ -432,18 +483,23 @@ impl Uploader {
 
                 // Calculate parts completed
                 let parts_done = n / m_part_size as u64;
-                
-                let details = format!("{}/{} parts, {} sized [{}]", 
-                    parts_done, m_total_parts, part_size_display, elapsed_str);
-                
+
+                let details = format!(
+                    "{}/{} parts, {} sized [{}]",
+                    parts_done, m_total_parts, part_size_display, elapsed_str
+                );
+
                 {
                     let mut p = lock_async_mutex(&monitor_progress).await;
-                    p.insert(m_job_id, ProgressInfo { 
-                        percent: pct, 
-                        details, 
-                        parts_done: parts_done as usize, 
-                        parts_total: m_total_parts,
-                    });
+                    p.insert(
+                        m_job_id,
+                        ProgressInfo {
+                            percent: pct,
+                            details,
+                            parts_done: parts_done as usize,
+                            parts_total: m_total_parts,
+                        },
+                    );
                 }
 
                 if n >= m_file_size as u64 {
@@ -457,12 +513,13 @@ impl Uploader {
         let mut handles: Vec<tokio::task::JoinHandle<Result<CompletedPart>>> = Vec::new();
         let mut part_number = 1;
 
-
         loop {
             // Check cancellation
             if cancellation_token.load(Ordering::Relaxed) {
                 // Guards will abort monitor and pending handles (if we wrapped handles? No, handles are just handles)
-                for h in handles { h.abort(); }
+                for h in handles {
+                    h.abort();
+                }
                 return Ok(false);
             }
 
@@ -470,8 +527,10 @@ impl Uploader {
             if completed_indices.contains(&part_number) {
                 use std::io::SeekFrom;
                 let current_pos = (part_number as u64 - 1) * part_size as u64;
-                file.seek(SeekFrom::Start(current_pos + part_size as u64)).await.unwrap_or(current_pos); 
-                
+                file.seek(SeekFrom::Start(current_pos + part_size as u64))
+                    .await
+                    .unwrap_or(current_pos);
+
                 part_number += 1;
                 // Update tracker
                 current_part.store(part_number as u64, std::sync::atomic::Ordering::Relaxed);
@@ -479,7 +538,11 @@ impl Uploader {
             }
 
             // Acquire permit BEFORE reading to throttle memory usage
-            let permit = semaphore.clone().acquire_owned().await.context("Semaphore closed")?;
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .context("Semaphore closed")?;
 
             // Allocate buffer strictly for this part (Zero-Copy logic: we read, then move the vec)
             let mut chunk = vec![0u8; part_size];
@@ -490,8 +553,13 @@ impl Uploader {
 
             let mut bytes_read = 0;
             while bytes_read < part_size {
-                let n = file.read(&mut chunk[bytes_read..]).await.context("Failed to read file chunk")?;
-                if n == 0 { break; }
+                let n = file
+                    .read(&mut chunk[bytes_read..])
+                    .await
+                    .context("Failed to read file chunk")?;
+                if n == 0 {
+                    break;
+                }
                 bytes_read += n;
             }
 
@@ -508,7 +576,7 @@ impl Uploader {
             let uid_clone = upload_id.clone();
             let uploaded_bytes = uploaded_bytes.clone(); // Still needed for fetch_add below
             let part_hashes_clone = part_hashes.clone();
-            
+
             let handle = tokio::spawn(async move {
                 let _permit = permit; // Hold permit until task completion
 
@@ -520,7 +588,7 @@ impl Uploader {
                 let checksum_sha256 = general_purpose::STANDARD.encode(&hash_bytes);
 
                 let body = aws_sdk_s3::primitives::ByteStream::from(chunk);
-                
+
                 let upload_part_output = client
                     .upload_part()
                     .bucket(bucket)
@@ -528,7 +596,7 @@ impl Uploader {
                     .upload_id(uid_clone)
                     .part_number(part_number)
                     .body(body)
-                    .checksum_sha256(checksum_sha256) 
+                    .checksum_sha256(checksum_sha256)
                     .send()
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to upload part {}: {}", part_number, e))?;
@@ -551,7 +619,7 @@ impl Uploader {
                     Err(anyhow::anyhow!("No ETag"))
                 }
             });
-            
+
             handles.push(handle);
             part_number += 1;
             current_part.store(part_number as u64, std::sync::atomic::Ordering::Relaxed);
@@ -560,12 +628,12 @@ impl Uploader {
         // Wait for all parts
         // `completed_parts` currently holds PRE-EXISTING parts.
         // We must append new ones.
-        
+
         for handle in handles {
             let part = handle.await??;
             completed_parts.push(part);
         }
-        
+
         // Monitor aborted AFTER complete to keep showing stats (likely 0)
         // Update details to "Finalizing"
         {
@@ -575,7 +643,7 @@ impl Uploader {
                 p.insert(job_id, info);
             }
         }
-        
+
         // Sort parts by number (important for S3)
         completed_parts.sort_by_key(|a| a.part_number());
 
@@ -584,7 +652,8 @@ impl Uploader {
             .set_parts(Some(completed_parts.clone()))
             .build();
 
-        let complete_output = client.complete_multipart_upload()
+        let complete_output = client
+            .complete_multipart_upload()
             .bucket(bucket)
             .key(&key)
             .upload_id(upload_id)
@@ -592,23 +661,23 @@ impl Uploader {
             .send()
             .await
             .map_err(|e| anyhow::anyhow!("Failed complete: {}", e))?;
-            
+
         // monitor_handle aborted by TaskGuard drop
 
         // Store Checksums in DB
         {
             let conn = lock_mutex(&conn_mutex)?;
-            
-            // S3 for multipart with SHA256 usually returns a composite checksum 
-            // e.g., "checksum-parts_count". 
+
+            // S3 for multipart with SHA256 usually returns a composite checksum
+            // e.g., "checksum-parts_count".
             let remote_checksum = complete_output.checksum_sha256();
-            
+
             // Calculate Local Composite Checksum (Tree Hash logic for S3)
             // SHA256(HashPart1 + HashPart2 + ...)
             let local_checksum = if let Ok(map) = part_hashes.lock() {
                 let mut parts: Vec<_> = map.iter().collect();
                 parts.sort_by_key(|(k, _)| **k); // Sort by part number
-                
+
                 let mut hasher = Sha256::new();
                 for (_, bytes) in parts {
                     hasher.update(bytes);
@@ -618,28 +687,32 @@ impl Uploader {
                 // Append -PartCount
                 let count = map.len();
                 if count > 0 {
-                     Some(format!("{}-{}", b64, count))
+                    Some(format!("{}-{}", b64, count))
                 } else {
-                     None
+                    None
                 }
             } else {
                 None
             };
-            
-            let _ = db::update_job_checksums(&conn, job_id, local_checksum.as_deref(), remote_checksum);
+
+            let _ =
+                db::update_job_checksums(&conn, job_id, local_checksum.as_deref(), remote_checksum);
         }
 
         // Cleanup DB
         {
-             let mut p = lock_async_mutex(&progress).await;
-             p.remove(&job_id);
-             // Optionally clear s3_upload_id from DB now that it's done? 
-             let conn = lock_mutex(&conn_mutex)?;
-             // We can set it to NULL or keep it as record. 
-             // Setting to NULL is good to indicate "done/no active upload".
-             let _ = conn.execute("UPDATE jobs SET s3_upload_id = NULL WHERE id = ?", rusqlite::params![job_id]);
+            let mut p = lock_async_mutex(&progress).await;
+            p.remove(&job_id);
+            // Optionally clear s3_upload_id from DB now that it's done?
+            let conn = lock_mutex(&conn_mutex)?;
+            // We can set it to NULL or keep it as record.
+            // Setting to NULL is good to indicate "done/no active upload".
+            let _ = conn.execute(
+                "UPDATE jobs SET s3_upload_id = NULL WHERE id = ?",
+                rusqlite::params![job_id],
+            );
         }
-        
+
         // monitor_handle aborted by TaskGuard
 
         Ok(true)
@@ -653,6 +726,7 @@ impl Uploader {
     /// - Parallelism (smaller parts for better concurrency)
     /// - S3 minimum part size (5MB)
     /// - S3 maximum parts limit (10,000)
+    #[allow(dead_code)]
     pub fn calculate_part_size(
         file_size: u64,
         config_part_size_mb: u64,
@@ -662,7 +736,9 @@ impl Uploader {
         let max_parts = 10000u64; // S3 Max parts
 
         let config_part_size = (config_part_size_mb * 1024 * 1024) as usize;
-        let parallel_part_size = (file_size as usize).checked_div(concurrency).unwrap_or(file_size as usize);
+        let parallel_part_size = (file_size as usize)
+            .checked_div(concurrency)
+            .unwrap_or(file_size as usize);
 
         let mut part_size = config_part_size.min(parallel_part_size).max(min_part_size);
 
@@ -674,6 +750,7 @@ impl Uploader {
     }
 
     /// Calculate SHA256 checksum for a byte slice
+    #[allow(dead_code)]
     pub fn calculate_checksum(data: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(data);
@@ -683,6 +760,7 @@ impl Uploader {
 
     /// Calculate composite checksum from multiple part hashes
     /// This matches S3's multipart checksum format: base64(SHA256(hash1+hash2+...))-partcount
+    #[allow(dead_code)]
     pub fn calculate_composite_checksum(part_hashes: Vec<Vec<u8>>) -> String {
         let count = part_hashes.len();
         let mut hasher = Sha256::new();
@@ -718,8 +796,8 @@ mod tests {
         // Normal file with standard config
         let part_size = Uploader::calculate_part_size(
             1024 * 1024 * 1024, // 1GB file
-            128,                 // 128MB config (default)
-            4,                   // 4 threads
+            128,                // 128MB config (default)
+            4,                  // 4 threads
         );
 
         // Should use config size since it's reasonable
@@ -731,8 +809,8 @@ mod tests {
         // Small file with high concurrency - should create smaller parts
         let part_size = Uploader::calculate_part_size(
             100 * 1024 * 1024, // 100MB file
-            128,                // 128MB config
-            8,                  // 8 threads
+            128,               // 128MB config
+            8,                 // 8 threads
         );
 
         // Should use smaller size for parallelism: 100MB/8 = 12.5MB (rounded to 12MB range)
@@ -746,32 +824,33 @@ mod tests {
         // Huge file that would exceed 10k parts with default size
         let file_size = 5_000_000_000_000u64; // 5TB
         let part_size = Uploader::calculate_part_size(
-            file_size,
-            128,  // 128MB config
+            file_size, 128, // 128MB config
             4,
         );
 
         // With 128MB parts, 5TB would need 40,960 parts (exceeds 10k limit)
         // So part size should be increased to: 5TB / 10000 = 500MB
         let required_min = (file_size / 10000) as usize;
-        assert!(part_size >= required_min,
+        assert!(
+            part_size >= required_min,
             "Part size {} should be at least {} to stay under 10k parts",
-            part_size, required_min);
+            part_size,
+            required_min
+        );
 
         let total_parts = (file_size as usize).div_ceil(part_size);
-        assert!(total_parts <= 10000,
-            "Should not exceed 10k parts, got {}", total_parts);
+        assert!(
+            total_parts <= 10000,
+            "Should not exceed 10k parts, got {}",
+            total_parts
+        );
     }
 
     #[test]
     fn test_calculate_part_size_edge_case_exact_10k_parts() {
         // File that's exactly 10k * 5MB = 50GB (minimum possible multipart)
         let file_size = 10000 * 5 * 1024 * 1024u64;
-        let part_size = Uploader::calculate_part_size(
-            file_size,
-            128,
-            4,
-        );
+        let part_size = Uploader::calculate_part_size(file_size, 128, 4);
 
         let total_parts = (file_size as usize).div_ceil(part_size);
         assert!(total_parts <= 10000);
@@ -781,7 +860,7 @@ mod tests {
     fn test_calculate_part_size_small_file() {
         // Very small file (1MB) should still work
         let part_size = Uploader::calculate_part_size(
-            1024 * 1024,  // 1MB
+            1024 * 1024, // 1MB
             128,
             4,
         );
@@ -815,7 +894,10 @@ mod tests {
         let checksum1 = Uploader::calculate_checksum(b"data1");
         let checksum2 = Uploader::calculate_checksum(b"data2");
 
-        assert_ne!(checksum1, checksum2, "Different inputs should produce different checksums");
+        assert_ne!(
+            checksum1, checksum2,
+            "Different inputs should produce different checksums"
+        );
     }
 
     #[test]
@@ -824,7 +906,10 @@ mod tests {
         let checksum1 = Uploader::calculate_checksum(data);
         let checksum2 = Uploader::calculate_checksum(data);
 
-        assert_eq!(checksum1, checksum2, "Same input should produce same checksum");
+        assert_eq!(
+            checksum1, checksum2,
+            "Same input should produce same checksum"
+        );
     }
 
     #[test]
@@ -857,7 +942,11 @@ mod tests {
 
         let composite = Uploader::calculate_composite_checksum(vec![hash1, hash2, hash3]);
 
-        assert!(composite.ends_with("-3"), "Should end with part count: {}", composite);
+        assert!(
+            composite.ends_with("-3"),
+            "Should end with part count: {}",
+            composite
+        );
 
         let parts: Vec<&str> = composite.split('-').collect();
         assert_eq!(parts.len(), 2);
@@ -889,7 +978,10 @@ mod tests {
         let composite2 = Uploader::calculate_composite_checksum(vec![hash2, hash1]);
 
         // Order of parts matters for checksum
-        assert_ne!(composite1, composite2, "Part order should affect composite checksum");
+        assert_ne!(
+            composite1, composite2,
+            "Part order should affect composite checksum"
+        );
     }
 
     #[test]
@@ -914,23 +1006,30 @@ mod tests {
     #[test]
     fn test_part_size_for_various_file_sizes() {
         let test_cases = vec![
-            (1024 * 1024, 128, 4, 5 * 1024 * 1024),           // 1MB file
-            (100 * 1024 * 1024, 128, 4, 25 * 1024 * 1024),    // 100MB file (parallelism)
-            (1024 * 1024 * 1024, 128, 4, 128 * 1024 * 1024),  // 1GB file (config)
+            (1024 * 1024, 128, 4, 5 * 1024 * 1024),          // 1MB file
+            (100 * 1024 * 1024, 128, 4, 25 * 1024 * 1024),   // 100MB file (parallelism)
+            (1024 * 1024 * 1024, 128, 4, 128 * 1024 * 1024), // 1GB file (config)
             (10 * 1024 * 1024 * 1024, 128, 4, 128 * 1024 * 1024), // 10GB file
         ];
 
         for (file_size, config_mb, concurrency, expected_min) in test_cases {
             let part_size = Uploader::calculate_part_size(file_size, config_mb, concurrency);
-            assert!(part_size >= expected_min,
+            assert!(
+                part_size >= expected_min,
                 "File size {} should have part size >= {}, got {}",
-                file_size, expected_min, part_size);
+                file_size,
+                expected_min,
+                part_size
+            );
 
             // Verify 10k parts constraint
             let total_parts = (file_size as usize).div_ceil(part_size);
-            assert!(total_parts <= 10000,
+            assert!(
+                total_parts <= 10000,
                 "File size {} created {} parts (exceeds 10k)",
-                file_size, total_parts);
+                file_size,
+                total_parts
+            );
         }
     }
 

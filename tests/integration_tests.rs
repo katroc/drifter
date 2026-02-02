@@ -6,13 +6,13 @@ use rusqlite::Connection;
 use tempfile::TempDir;
 
 // Import drifter modules
+use drifter::coordinator::Coordinator;
+use drifter::core::config::{Config, ScanMode, StagingMode};
 use drifter::db;
-use drifter::core::config::{Config, StagingMode, ScanMode};
-use drifter::services::uploader::Uploader;
-use drifter::services::scanner::Scanner;
 use drifter::services::ingest;
 use drifter::services::reporter::Reporter;
-use drifter::coordinator::Coordinator;
+use drifter::services::scanner::Scanner;
+use drifter::services::uploader::Uploader;
 
 // --- Integration Test Helpers ---
 
@@ -86,12 +86,25 @@ fn setup_test_db() -> Result<Connection> {
 }
 
 fn create_test_config(temp_dir: &TempDir) -> Config {
-    let mut config = Config::default();
-    config.staging_dir = temp_dir.path().join("staging").to_string_lossy().to_string();
-    config.quarantine_dir = temp_dir.path().join("quarantine").to_string_lossy().to_string();
-    config.reports_dir = temp_dir.path().join("reports").to_string_lossy().to_string();
-    config.state_dir = temp_dir.path().to_string_lossy().to_string();
-    config
+    Config {
+        staging_dir: temp_dir
+            .path()
+            .join("staging")
+            .to_string_lossy()
+            .to_string(),
+        quarantine_dir: temp_dir
+            .path()
+            .join("quarantine")
+            .to_string_lossy()
+            .to_string(),
+        reports_dir: temp_dir
+            .path()
+            .join("reports")
+            .to_string_lossy()
+            .to_string(),
+        state_dir: temp_dir.path().to_string_lossy().to_string(),
+        ..Config::default()
+    }
 }
 
 // --- Database and Config Integration ---
@@ -100,11 +113,13 @@ fn create_test_config(temp_dir: &TempDir) -> Config {
 fn test_config_roundtrip_with_secrets() -> Result<()> {
     let conn = setup_test_db()?;
 
-    let mut config = Config::default();
-    config.s3_bucket = Some("test-bucket".to_string());
-    config.s3_access_key = Some("AKIATEST".to_string());
-    config.s3_secret_key = Some("super-secret-key".to_string());
-    config.part_size_mb = 256;
+    let config = Config {
+        s3_bucket: Some("test-bucket".to_string()),
+        s3_access_key: Some("AKIATEST".to_string()),
+        s3_secret_key: Some("super-secret-key".to_string()),
+        part_size_mb: 256,
+        ..Config::default()
+    };
 
     // Save config
     drifter::core::config::save_config_to_db(&conn, &config)?;
@@ -124,7 +139,10 @@ fn test_config_roundtrip_with_secrets() -> Result<()> {
         ["s3_secret"],
         |row| row.get(0),
     )?;
-    assert_ne!(raw_secret, "super-secret-key", "Secret should be obfuscated");
+    assert_ne!(
+        raw_secret, "super-secret-key",
+        "Secret should be obfuscated"
+    );
 
     Ok(())
 }
@@ -134,7 +152,13 @@ fn test_job_lifecycle_state_transitions() -> Result<()> {
     let conn = setup_test_db()?;
 
     // Create job
-    let job_id = db::create_job(&conn, "test-session", "/tmp/file.txt", 1024, Some("file.txt"))?;
+    let job_id = db::create_job(
+        &conn,
+        "test-session",
+        "/tmp/file.txt",
+        1024,
+        Some("file.txt"),
+    )?;
 
     // Initial state
     let job = db::get_job(&conn, job_id)?.unwrap();
@@ -171,8 +195,9 @@ fn test_job_retry_workflow() -> Result<()> {
 
     // Schedule retry with backoff
     let retry_count = 1;
-    let backoff_secs = Coordinator::calculate_backoff_seconds(retry_count as i64);
-    let next_retry = (chrono::Utc::now() + chrono::Duration::seconds(backoff_secs as i64)).to_rfc3339();
+    let backoff_secs = Coordinator::calculate_backoff_seconds(retry_count);
+    let next_retry =
+        (chrono::Utc::now() + chrono::Duration::seconds(backoff_secs as i64)).to_rfc3339();
 
     db::update_job_retry_state(
         &conn,
@@ -275,7 +300,7 @@ fn test_composite_checksum_multipart() -> Result<()> {
     // Calculate individual checksums
     let mut hashes = Vec::new();
     for part in &[part1, part2, part3] {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(part);
         hashes.push(hasher.finalize().to_vec());
@@ -328,19 +353,23 @@ fn test_scanner_chunk_calculation_with_config() -> Result<()> {
 
 #[test]
 fn test_scan_mode_configuration() -> Result<()> {
-    let mut config = Config::default();
-
     // Test different scan modes
-    config.scan_mode = ScanMode::Skip;
-    let scanner_skip = Scanner::new(&config);
+    let scanner_skip = Scanner::new(&Config {
+        scan_mode: ScanMode::Skip,
+        ..Config::default()
+    });
     // Scanner should be created successfully
 
-    config.scan_mode = ScanMode::Stream;
-    let scanner_stream = Scanner::new(&config);
+    let scanner_stream = Scanner::new(&Config {
+        scan_mode: ScanMode::Stream,
+        ..Config::default()
+    });
     // Scanner should be created successfully
 
-    config.scan_mode = ScanMode::Full;
-    let scanner_full = Scanner::new(&config);
+    let scanner_full = Scanner::new(&Config {
+        scan_mode: ScanMode::Full,
+        ..Config::default()
+    });
     // Scanner should be created successfully
 
     // All scanners should be created without errors
@@ -360,7 +389,10 @@ fn test_path_workflow_end_to_end() -> Result<()> {
 
     // Calculate base path (as ingest does)
     let base = ingest::calculate_base_path(&source);
-    assert_eq!(base, std::path::PathBuf::from("/home/user/documents/2024/january"));
+    assert_eq!(
+        base,
+        std::path::PathBuf::from("/home/user/documents/2024/january")
+    );
 
     // Calculate relative path for S3 key
     let file = std::path::PathBuf::from("/home/user/documents/2024/january/report.pdf");
@@ -369,22 +401,29 @@ fn test_path_workflow_end_to_end() -> Result<()> {
 
     // Calculate staging path
     let staging_path = ingest::calculate_staging_path("./staging", 123, &source);
-    assert_eq!(staging_path, std::path::PathBuf::from("./staging/123/report.pdf"));
+    assert_eq!(
+        staging_path,
+        std::path::PathBuf::from("./staging/123/report.pdf")
+    );
 
     Ok(())
 }
 
 #[test]
 fn test_staging_mode_integration() -> Result<()> {
-    let mut config = Config::default();
-
     // Test Direct mode
-    config.staging_mode = StagingMode::Direct;
-    assert_eq!(config.staging_mode, StagingMode::Direct);
+    let config_direct = Config {
+        staging_mode: StagingMode::Direct,
+        ..Config::default()
+    };
+    assert_eq!(config_direct.staging_mode, StagingMode::Direct);
 
     // Test Copy mode
-    config.staging_mode = StagingMode::Copy;
-    assert_eq!(config.staging_mode, StagingMode::Copy);
+    let config_copy = Config {
+        staging_mode: StagingMode::Copy,
+        ..Config::default()
+    };
+    assert_eq!(config_copy.staging_mode, StagingMode::Copy);
 
     Ok(())
 }
@@ -400,25 +439,43 @@ fn test_report_generation_with_real_data() -> Result<()> {
     let session_id = "integration-test-session";
 
     // Create a realistic session with multiple jobs
-    let job1 = db::create_job(&conn, session_id, "/data/clean_file.txt", 1024, Some("clean_file.txt"))?;
+    let job1 = db::create_job(
+        &conn,
+        session_id,
+        "/data/clean_file.txt",
+        1024,
+        Some("clean_file.txt"),
+    )?;
     db::update_scan_status(&conn, job1, "clean", "scanned")?;
     db::update_job_checksums(&conn, job1, Some("abc123"), Some("abc123"))?;
     db::update_upload_status(&conn, job1, "completed", "complete")?;
 
-    let job2 = db::create_job(&conn, session_id, "/data/virus.exe", 2048, Some("virus.exe"))?;
+    let job2 = db::create_job(
+        &conn,
+        session_id,
+        "/data/virus.exe",
+        2048,
+        Some("virus.exe"),
+    )?;
     db::update_scan_status(&conn, job2, "infected", "quarantined")?;
 
-    let job3 = db::create_job(&conn, session_id, "/data/failed.dat", 512, Some("failed.dat"))?;
+    let job3 = db::create_job(
+        &conn,
+        session_id,
+        "/data/failed.dat",
+        512,
+        Some("failed.dat"),
+    )?;
     db::update_job_error(&conn, job3, "failed", "Network timeout")?;
 
     // Generate report
     Reporter::generate_report(&conn, &config, session_id)?;
 
     // Verify report files exist
-    let json_path = std::path::Path::new(&config.reports_dir)
-        .join(format!("scan_report_{}.json", session_id));
-    let txt_path = std::path::Path::new(&config.reports_dir)
-        .join(format!("scan_report_{}.txt", session_id));
+    let json_path =
+        std::path::Path::new(&config.reports_dir).join(format!("scan_report_{}.json", session_id));
+    let txt_path =
+        std::path::Path::new(&config.reports_dir).join(format!("scan_report_{}.txt", session_id));
 
     assert!(json_path.exists());
     assert!(txt_path.exists());
@@ -440,8 +497,8 @@ fn test_report_generation_with_real_data() -> Result<()> {
 #[test]
 fn test_exponential_backoff_progression() -> Result<()> {
     // Test the full backoff sequence as used by coordinator
-    let retries = vec![0, 1, 2, 3, 4];
-    let expected_delays = vec![5, 10, 20, 40, 80];
+    let retries = [0, 1, 2, 3, 4];
+    let expected_delays = [5, 10, 20, 40, 80];
 
     for (retry_count, expected) in retries.iter().zip(expected_delays.iter()) {
         let backoff = Coordinator::calculate_backoff_seconds(*retry_count);
@@ -449,7 +506,8 @@ fn test_exponential_backoff_progression() -> Result<()> {
     }
 
     // Calculate total wait time across all retries
-    let total: u64 = retries.iter()
+    let total: u64 = retries
+        .iter()
         .map(|&r| Coordinator::calculate_backoff_seconds(r))
         .sum();
 
@@ -487,25 +545,53 @@ fn test_priority_based_job_selection() -> Result<()> {
 
 #[test]
 fn test_config_validation_with_invalid_values() -> Result<()> {
-    let mut config = Config::default();
-
     // Test invalid part size
-    config.part_size_mb = 3; // Less than 5MB
-    assert!(config.validate().is_err());
+    assert!(
+        Config {
+            part_size_mb: 3, // Less than 5MB
+            ..Config::default()
+        }
+        .validate()
+        .is_err()
+    );
 
-    config.part_size_mb = 6000; // More than 5GB
-    assert!(config.validate().is_err());
+    assert!(
+        Config {
+            part_size_mb: 6000, // More than 5GB
+            ..Config::default()
+        }
+        .validate()
+        .is_err()
+    );
 
     // Test valid part size
-    config.part_size_mb = 128;
-    assert!(config.validate().is_ok());
+    assert!(
+        Config {
+            part_size_mb: 128,
+            ..Config::default()
+        }
+        .validate()
+        .is_ok()
+    );
 
     // Test invalid concurrency
-    config.concurrency_upload_global = 0;
-    assert!(config.validate().is_err());
+    assert!(
+        Config {
+            concurrency_upload_global: 0,
+            ..Config::default()
+        }
+        .validate()
+        .is_err()
+    );
 
-    config.concurrency_upload_global = 1;
-    assert!(config.validate().is_ok());
+    assert!(
+        Config {
+            concurrency_upload_global: 1,
+            ..Config::default()
+        }
+        .validate()
+        .is_ok()
+    );
 
     Ok(())
 }
@@ -520,7 +606,13 @@ fn test_complete_job_workflow_simulation() -> Result<()> {
     // Step 1: Ingest (create job)
     let source_path = "/data/important_file.pdf";
     let file_size = 5 * 1024 * 1024; // 5MB
-    let job_id = db::create_job(&conn, session_id, source_path, file_size as i64, Some("important_file.pdf"))?;
+    let job_id = db::create_job(
+        &conn,
+        session_id,
+        source_path,
+        file_size as i64,
+        Some("important_file.pdf"),
+    )?;
     db::insert_event(&conn, job_id, "ingest", "File ingested")?;
 
     // Step 2: Stage

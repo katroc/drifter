@@ -1,10 +1,10 @@
-use anyhow::{Context, Result};
 use crate::core::config::{Config, ScanMode};
+use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use tokio::fs::File as TokioFile;
-use tracing::{info, warn, error};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tracing::{error, info, warn};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScanResult {
@@ -33,12 +33,11 @@ impl Scanner {
     }
 
     pub async fn scan_file(&self, path: &str) -> Result<ScanResult> {
-
         match self.mode {
             ScanMode::Skip => {
                 info!("Scanning skipped for: {}", path);
                 Ok(ScanResult::Clean)
-            },
+            }
             ScanMode::Stream => self.scan_chunked(path).await,
             ScanMode::Full => self.scan_chunked(path).await,
         }
@@ -56,23 +55,23 @@ impl Scanner {
 
         // Calculate all chunk offsets
         let offsets = Self::calculate_chunk_offsets(file_len, self.scan_chunk_size_mb);
-        
+
         let mut join_set = JoinSet::new();
         let mut offsets_iter = offsets.into_iter();
-        
+
         // Fill initial queue
         for _ in 0..concurrency {
             if let Some(chunk_offset) = offsets_iter.next() {
                 let path = path.to_string();
                 let host = self.clamd_host.clone();
                 let port = self.clamd_port;
-                
+
                 join_set.spawn(async move {
                     scan_chunk_at_offset(&path, chunk_offset, chunk_size, &host, port).await
                 });
             }
         }
-        
+
         // Process results and spawn remaining
         while let Some(res) = join_set.join_next().await {
             match res {
@@ -83,13 +82,13 @@ impl Scanner {
                 }
                 Ok(Ok(ScanResult::Clean)) => {
                     // Clean, continue
-                    
+
                     // Spawn next chunk if available
                     if let Some(chunk_offset) = offsets_iter.next() {
                         let path = path.to_string();
                         let host = self.clamd_host.clone();
                         let port = self.clamd_port;
-                        
+
                         join_set.spawn(async move {
                             scan_chunk_at_offset(&path, chunk_offset, chunk_size, &host, port).await
                         });
@@ -101,13 +100,13 @@ impl Scanner {
                     return Err(e);
                 }
                 Err(e) => {
-                     error!("Scan task failed: {}", e);
-                     join_set.abort_all();
-                     return Err(anyhow::anyhow!("Scan task failed: {}", e));
+                    error!("Scan task failed: {}", e);
+                    join_set.abort_all();
+                    return Err(anyhow::anyhow!("Scan task failed: {}", e));
                 }
             }
         }
-        
+
         info!("Scan complete (clean) for: {}", path);
         Ok(ScanResult::Clean)
     }
@@ -115,18 +114,29 @@ impl Scanner {
     pub async fn check_connection(&self) -> Result<String> {
         let address = format!("{}:{}", self.clamd_host, self.clamd_port);
         let addr: SocketAddr = address.parse().context("Invalid clamd address")?;
-        
-        let mut stream = TcpStream::connect(addr).await.context("Failed to connect to clamd")?;
-        stream.write_all(b"PING").await.context("Failed to send PING")?;
-        
+
+        let mut stream = TcpStream::connect(addr)
+            .await
+            .context("Failed to connect to clamd")?;
+        stream
+            .write_all(b"PING")
+            .await
+            .context("Failed to send PING")?;
+
         let mut response = Vec::new();
-        stream.read_to_end(&mut response).await.context("Failed to read response")?;
+        stream
+            .read_to_end(&mut response)
+            .await
+            .context("Failed to read response")?;
         let response_str = String::from_utf8_lossy(&response);
-        
+
         if response_str.trim() == "PONG" {
             Ok("Connected to ClamAV successfully".to_string())
         } else {
-             Err(anyhow::anyhow!("Unexpected response from ClamAV: '{}'", response_str.trim()))
+            Err(anyhow::anyhow!(
+                "Unexpected response from ClamAV: '{}'",
+                response_str.trim()
+            ))
         }
     }
 }
@@ -160,50 +170,80 @@ impl Scanner {
 }
 
 /// Standalone function for parallel chunk scanning
-async fn scan_chunk_at_offset(path: &str, offset: u64, chunk_size: usize, host: &str, port: u16) -> Result<ScanResult> {
+async fn scan_chunk_at_offset(
+    path: &str,
+    offset: u64,
+    chunk_size: usize,
+    host: &str,
+    port: u16,
+) -> Result<ScanResult> {
     use std::io::SeekFrom;
-    
+
     let mut file = TokioFile::open(path).await.context("Failed to open file")?;
-    file.seek(SeekFrom::Start(offset)).await.context("Failed to seek")?;
-    
+    file.seek(SeekFrom::Start(offset))
+        .await
+        .context("Failed to seek")?;
+
     let mut buffer = vec![0u8; chunk_size];
     let mut bytes_read = 0;
-    
+
     while bytes_read < chunk_size {
-        let n = file.read(&mut buffer[bytes_read..]).await.context("Failed to read file")?;
-        if n == 0 { break; }
+        let n = file
+            .read(&mut buffer[bytes_read..])
+            .await
+            .context("Failed to read file")?;
+        if n == 0 {
+            break;
+        }
         bytes_read += n;
     }
-    
+
     if bytes_read == 0 {
         return Ok(ScanResult::Clean); // Empty chunk, nothing to scan
     }
-    
+
     // Send to ClamAV
     let address = format!("{}:{}", host, port);
     let addr: SocketAddr = address.parse().context("Invalid clamd address")?;
-    
-    let mut stream = TcpStream::connect(addr).await.context("Failed to connect to clamd")?;
-    stream.write_all(b"zINSTREAM\0").await.context("Failed to send zINSTREAM")?;
-    
+
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .context("Failed to connect to clamd")?;
+    stream
+        .write_all(b"zINSTREAM\0")
+        .await
+        .context("Failed to send zINSTREAM")?;
+
     let mut cursor = 0;
     while cursor < bytes_read {
         let end = (cursor + 32768).min(bytes_read);
         let chunk = &buffer[cursor..end];
         let len_bytes = (chunk.len() as u32).to_be_bytes();
-        
-        stream.write_all(&len_bytes).await.context("Failed to write chunk len")?;
-        stream.write_all(chunk).await.context("Failed to write chunk")?;
-        
+
+        stream
+            .write_all(&len_bytes)
+            .await
+            .context("Failed to write chunk len")?;
+        stream
+            .write_all(chunk)
+            .await
+            .context("Failed to write chunk")?;
+
         cursor = end;
     }
-    
-    stream.write_all(&[0u8; 4]).await.context("Failed to write stream end")?;
-    
+
+    stream
+        .write_all(&[0u8; 4])
+        .await
+        .context("Failed to write stream end")?;
+
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).await.context("Failed to read response")?;
+    stream
+        .read_to_end(&mut response)
+        .await
+        .context("Failed to read response")?;
     let response_str = String::from_utf8_lossy(&response);
-    
+
     if response_str.contains("FOUND") {
         // Parse virus name: "stream: Win.Test.EICAR_HDB-1 FOUND"
         let parts: Vec<&str> = response_str.split("FOUND").collect();
@@ -227,7 +267,11 @@ mod tests {
     fn test_calculate_effective_chunk_size_default() {
         // Default config is usually 10MB
         let chunk_size = Scanner::calculate_effective_chunk_size(10);
-        assert_eq!(chunk_size, 10 * 1024 * 1024, "10MB config should give 10MB chunks");
+        assert_eq!(
+            chunk_size,
+            10 * 1024 * 1024,
+            "10MB config should give 10MB chunks"
+        );
     }
 
     #[test]
@@ -298,8 +342,10 @@ mod tests {
         // Verify stride between chunks
         for i in 1..offsets.len() {
             let diff = offsets[i] - offsets[i - 1];
-            assert_eq!(diff, stride as u64,
-                "Chunks should be spaced by stride (chunk_size - overlap)");
+            assert_eq!(
+                diff, stride as u64,
+                "Chunks should be spaced by stride (chunk_size - overlap)"
+            );
         }
     }
 
@@ -314,12 +360,17 @@ mod tests {
 
         // Last chunk should start before file_size
         let last_offset = offsets.last().unwrap();
-        assert!(*last_offset < file_size, "Last chunk should start before EOF");
+        assert!(
+            *last_offset < file_size,
+            "Last chunk should start before EOF"
+        );
 
         // Last chunk should cover end of file
         let last_chunk_end = last_offset + effective_chunk_size as u64;
-        assert!(last_chunk_end >= file_size,
-            "Last chunk should cover end of file");
+        assert!(
+            last_chunk_end >= file_size,
+            "Last chunk should cover end of file"
+        );
     }
 
     #[test]
@@ -354,8 +405,11 @@ mod tests {
         // Formula: ceil(file_size / stride)
         let expected_chunks = ((file_size as f64) / (stride as f64)).ceil() as usize;
 
-        assert_eq!(offsets.len(), expected_chunks,
-            "Large file should have correct number of chunks");
+        assert_eq!(
+            offsets.len(),
+            expected_chunks,
+            "Large file should have correct number of chunks"
+        );
     }
 
     #[test]
@@ -372,13 +426,20 @@ mod tests {
             let prev_chunk_end = offsets[i - 1] + effective_chunk_size as u64;
             let current_chunk_start = offsets[i];
 
-            assert!(prev_chunk_end > current_chunk_start,
-                "Chunks {} and {} should overlap", i - 1, i);
+            assert!(
+                prev_chunk_end > current_chunk_start,
+                "Chunks {} and {} should overlap",
+                i - 1,
+                i
+            );
 
             // Verify overlap is at least 1MB
             let overlap_size = prev_chunk_end - current_chunk_start;
-            assert!(overlap_size >= 1024 * 1024,
-                "Overlap should be at least 1MB, got {} bytes", overlap_size);
+            assert!(
+                overlap_size >= 1024 * 1024,
+                "Overlap should be at least 1MB, got {} bytes",
+                overlap_size
+            );
         }
     }
 
@@ -433,9 +494,12 @@ mod tests {
         // But should be positioned to cover the end
         let effective_chunk_size = Scanner::calculate_effective_chunk_size(chunk_size_mb);
         let last_chunk_end = last_offset + effective_chunk_size as u64;
-        assert!(last_chunk_end >= file_size,
+        assert!(
+            last_chunk_end >= file_size,
             "Last chunk should cover EOF: chunk_end={}, file_size={}",
-            last_chunk_end, file_size);
+            last_chunk_end,
+            file_size
+        );
     }
 
     // --- Scan Mode Tests ---
@@ -480,18 +544,22 @@ mod tests {
     fn test_scanner_effective_chunk_size_consistency() {
         // Test various config values
         let test_cases = vec![
-            (1, 1024 * 1024 + 1024),     // 1MB -> minimum enforced
-            (5, 5 * 1024 * 1024),        // 5MB -> normal
-            (10, 10 * 1024 * 1024),      // 10MB -> normal (default)
-            (50, 50 * 1024 * 1024),      // 50MB -> normal
-            (100, 100 * 1024 * 1024),    // 100MB -> normal
+            (1, 1024 * 1024 + 1024),  // 1MB -> minimum enforced
+            (5, 5 * 1024 * 1024),     // 5MB -> normal
+            (10, 10 * 1024 * 1024),   // 10MB -> normal (default)
+            (50, 50 * 1024 * 1024),   // 50MB -> normal
+            (100, 100 * 1024 * 1024), // 100MB -> normal
         ];
 
         for (config_mb, expected_min) in test_cases {
             let chunk_size = Scanner::calculate_effective_chunk_size(config_mb);
-            assert!(chunk_size >= expected_min,
+            assert!(
+                chunk_size >= expected_min,
                 "Config {}MB should produce chunk size >= {} bytes, got {}",
-                config_mb, expected_min, chunk_size);
+                config_mb,
+                expected_min,
+                chunk_size
+            );
         }
     }
 
@@ -509,7 +577,11 @@ mod tests {
 
         // With overlap, we expect 2 chunks even for file size = chunk size
         // This ensures the entire file is scanned with proper overlap
-        assert_eq!(offsets.len(), 2, "File equal to chunk size creates 2 chunks (for overlap)");
+        assert_eq!(
+            offsets.len(),
+            2,
+            "File equal to chunk size creates 2 chunks (for overlap)"
+        );
     }
 
     #[test]
@@ -521,7 +593,10 @@ mod tests {
 
         let offsets = Scanner::calculate_chunk_offsets(file_size, chunk_size_mb);
 
-        assert!(offsets.len() >= 2, "File slightly larger than chunk size should have 2+ chunks");
+        assert!(
+            offsets.len() >= 2,
+            "File slightly larger than chunk size should have 2+ chunks"
+        );
     }
 
     #[test]
@@ -534,9 +609,11 @@ mod tests {
         let effective_chunk_size = Scanner::calculate_effective_chunk_size(chunk_size_mb);
 
         // Verify reasonable number of chunks (should be around 10-11)
-        assert!(offsets.len() >= 10 && offsets.len() <= 15,
+        assert!(
+            offsets.len() >= 10 && offsets.len() <= 15,
             "500MB file with 50MB chunks should have 10-15 chunks, got {}",
-            offsets.len());
+            offsets.len()
+        );
 
         // Verify all chunks except last are evenly spaced
         let overlap = 1024 * 1024;
@@ -544,8 +621,10 @@ mod tests {
 
         for i in 1..offsets.len().min(3) {
             let actual_stride = offsets[i] - offsets[i - 1];
-            assert_eq!(actual_stride, expected_stride as u64,
-                "Chunks should be evenly spaced");
+            assert_eq!(
+                actual_stride, expected_stride as u64,
+                "Chunks should be evenly spaced"
+            );
         }
     }
 }

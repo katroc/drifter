@@ -1,10 +1,10 @@
+use crate::app::state::AppEvent;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
-use std::fs::File;
-use std::io::{BufReader, Seek, SeekFrom, BufRead};
-use crate::app::state::AppEvent;
 
 pub struct LogWatcher {
     path: PathBuf,
@@ -24,33 +24,36 @@ impl LogWatcher {
             } else {
                 0
             };
-            
-            loop {
-                if let Ok(file) = File::open(&self.path) {
-                    if let Ok(metadata) = file.metadata() {
-                        let current_size = metadata.len();
-                        
-                        if current_size < last_size {
-                            // File truncated or rotated
-                            last_size = 0;
-                        }
 
-                        if current_size > last_size {
-                            let mut reader = BufReader::new(file);
-                            if let Ok(_) = reader.seek(SeekFrom::Start(last_size)) {
-                                let mut line = String::new();
-                                // Read everything new since last_size
-                                while let Ok(n) = reader.read_line(&mut line) {
-                                    if n == 0 { break; }
-                                    let _ = self.tx.send(AppEvent::LogLine(line.trim_end().to_string()));
-                                    line.clear();
+            loop {
+                if let Ok(file) = File::open(&self.path)
+                    && let Ok(metadata) = file.metadata()
+                {
+                    let current_size = metadata.len();
+
+                    if current_size < last_size {
+                        // File truncated or rotated
+                        last_size = 0;
+                    }
+
+                    if current_size > last_size {
+                        let mut reader = BufReader::new(file);
+                        if reader.seek(SeekFrom::Start(last_size)).is_ok() {
+                            let mut line = String::new();
+                            // Read everything new since last_size
+                            while let Ok(n) = reader.read_line(&mut line) {
+                                if n == 0 {
+                                    break;
                                 }
-                                last_size = current_size;
+                                let _ =
+                                    self.tx.send(AppEvent::LogLine(line.trim_end().to_string()));
+                                line.clear();
                             }
+                            last_size = current_size;
                         }
                     }
                 }
-                
+
                 thread::sleep(Duration::from_millis(250)); // Slightly faster refresh
             }
         });

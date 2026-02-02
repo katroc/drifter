@@ -1,6 +1,6 @@
+use crate::ui::theme::Theme;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use crate::ui::theme::Theme;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,11 +85,19 @@ pub struct Config {
     pub log_level: String,
 }
 
-fn default_log_level() -> String { "info".to_string() }
+fn default_log_level() -> String {
+    "info".to_string()
+}
 
-fn default_scanner_enabled() -> bool { true }
-fn default_hopper_width_percent() -> u16 { 50 }
-fn default_history_width() -> u16 { 60 }
+fn default_scanner_enabled() -> bool {
+    true
+}
+fn default_hopper_width_percent() -> u16 {
+    50
+}
+fn default_history_width() -> u16 {
+    60
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -131,68 +139,91 @@ impl Default for Config {
     }
 }
 
-fn default_staging_dir() -> String { "./staging".to_string() }
-fn default_quarantine_dir() -> String { "./quarantine".to_string() }
-fn default_reports_dir() -> String { "./reports".to_string() }
-fn default_state_dir() -> String { "./state".to_string() }
-fn default_theme() -> String { Theme::default_name().to_string() }
-fn default_staging_mode() -> StagingMode { StagingMode::Direct }
+fn default_staging_dir() -> String {
+    "./staging".to_string()
+}
+fn default_quarantine_dir() -> String {
+    "./quarantine".to_string()
+}
+fn default_reports_dir() -> String {
+    "./reports".to_string()
+}
+fn default_state_dir() -> String {
+    "./state".to_string()
+}
+fn default_theme() -> String {
+    Theme::default_name().to_string()
+}
+fn default_staging_mode() -> StagingMode {
+    StagingMode::Direct
+}
 
 // --- Database-backed config ---
 
-use rusqlite::Connection;
 use crate::db;
+use rusqlite::Connection;
 
 pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
     let settings = db::load_all_settings(conn)?;
-    
-    let get = |key: &str| -> Option<String> {
-        settings.get(key).cloned().filter(|s| !s.is_empty())
-    };
-    
+
+    let get =
+        |key: &str| -> Option<String> { settings.get(key).cloned().filter(|s| !s.is_empty()) };
+
     let get_or = |key: &str, default: &str| -> String {
-        settings.get(key).cloned().unwrap_or_else(|| default.to_string())
+        settings
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| default.to_string())
     };
-    
+
     let get_u64 = |key: &str, default: u64| -> u64 {
-        settings.get(key).and_then(|s| s.parse().ok()).unwrap_or(default)
+        settings
+            .get(key)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
     };
-    
+
     let get_usize = |key: &str, default: usize| -> usize {
-        settings.get(key).and_then(|s| s.parse().ok()).unwrap_or(default)
+        settings
+            .get(key)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
     };
-    
+
     let get_u16 = |key: &str, default: u16| -> u16 {
-        settings.get(key).and_then(|s| s.parse().ok()).unwrap_or(default)
+        settings
+            .get(key)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
     };
-    
+
     let staging_mode = match settings.get("staging_mode").map(|s| s.as_str()) {
         Some("copy") => StagingMode::Copy,
         _ => StagingMode::Direct,
     };
-    
+
     let scan_mode = match settings.get("scan_mode").map(|s| s.as_str()) {
         Some("full") => ScanMode::Full,
         Some("skip") => ScanMode::Skip,
         _ => ScanMode::Stream,
     };
-    
+
     let s3_key_mode = match settings.get("s3_key_mode").map(|s| s.as_str()) {
         Some("template") => S3KeyMode::Template,
         _ => S3KeyMode::Original,
     };
-    
+
     let sse = match settings.get("sse").map(|s| s.as_str()) {
         Some("s3") => SseMode::S3,
         Some("kms") => SseMode::Kms,
         _ => SseMode::Off,
     };
-    
+
     // Load secret separately
     let s3_secret_key = db::get_secret(conn, "s3_secret")?;
-    
+
     let legacy_parts = get_usize("concurrency_parts_per_file", 4);
-    
+
     Ok(Config {
         staging_dir: get_or("staging_dir", "./staging"),
         quarantine_dir: get_or("quarantine_dir", "./quarantine"),
@@ -200,7 +231,9 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         state_dir: get_or("state_dir", "./state"),
         watch_dir: get("watch_dir"),
         staging_mode,
-        delete_source_after_upload: get("delete_source_after_upload").map(|s| s == "true").unwrap_or(false),
+        delete_source_after_upload: get("delete_source_after_upload")
+            .map(|s| s == "true")
+            .unwrap_or(false),
         scan_mode,
         scan_chunk_size_mb: get_u64("scan_chunk_size_mb", 24),
         max_scan_size_mb: get("max_scan_size_mb").and_then(|s| s.parse().ok()),
@@ -225,7 +258,9 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
             .unwrap_or(Theme::default_name())
             .to_string(),
         scanner_enabled: get("scanner_enabled").map(|s| s == "true").unwrap_or(true),
-        host_metrics_enabled: get("host_metrics_enabled").map(|s| s == "true").unwrap_or(true),
+        host_metrics_enabled: get("host_metrics_enabled")
+            .map(|s| s == "true")
+            .unwrap_or(true),
         hopper_width_percent: get_u16("hopper_width_percent", 50),
         history_width: get_u16("history_width", 60),
         log_level: get_or("log_level", "info"),
@@ -238,39 +273,73 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
     db::set_setting(conn, "reports_dir", &cfg.reports_dir)?;
     db::set_setting(conn, "state_dir", &cfg.state_dir)?;
     db::set_setting(conn, "watch_dir", cfg.watch_dir.as_deref().unwrap_or(""))?;
-    
+
     let staging_mode = match cfg.staging_mode {
         StagingMode::Copy => "copy",
         StagingMode::Direct => "direct",
     };
     db::set_setting(conn, "staging_mode", staging_mode)?;
-    db::set_setting(conn, "delete_source_after_upload", if cfg.delete_source_after_upload { "true" } else { "false" })?;
-    
+    db::set_setting(
+        conn,
+        "delete_source_after_upload",
+        if cfg.delete_source_after_upload {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
+
     let scan_mode = match cfg.scan_mode {
         ScanMode::Stream => "stream",
         ScanMode::Full => "full",
         ScanMode::Skip => "skip",
     };
     db::set_setting(conn, "scan_mode", scan_mode)?;
-    db::set_setting(conn, "scan_chunk_size_mb", &cfg.scan_chunk_size_mb.to_string())?;
-    db::set_setting(conn, "max_scan_size_mb", &cfg.max_scan_size_mb.map(|v| v.to_string()).unwrap_or_default())?;
+    db::set_setting(
+        conn,
+        "scan_chunk_size_mb",
+        &cfg.scan_chunk_size_mb.to_string(),
+    )?;
+    db::set_setting(
+        conn,
+        "max_scan_size_mb",
+        &cfg.max_scan_size_mb
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    )?;
     db::set_setting(conn, "clamd_host", &cfg.clamd_host)?;
     db::set_setting(conn, "clamd_port", &cfg.clamd_port.to_string())?;
-    db::set_setting(conn, "clamd_socket", cfg.clamd_socket.as_deref().unwrap_or(""))?;
-    
+    db::set_setting(
+        conn,
+        "clamd_socket",
+        cfg.clamd_socket.as_deref().unwrap_or(""),
+    )?;
+
     db::set_setting(conn, "s3_bucket", cfg.s3_bucket.as_deref().unwrap_or(""))?;
     db::set_setting(conn, "s3_prefix", cfg.s3_prefix.as_deref().unwrap_or(""))?;
     db::set_setting(conn, "s3_region", cfg.s3_region.as_deref().unwrap_or(""))?;
-    db::set_setting(conn, "s3_endpoint", cfg.s3_endpoint.as_deref().unwrap_or(""))?;
-    db::set_setting(conn, "s3_access_key", cfg.s3_access_key.as_deref().unwrap_or(""))?;
-    
+    db::set_setting(
+        conn,
+        "s3_endpoint",
+        cfg.s3_endpoint.as_deref().unwrap_or(""),
+    )?;
+    db::set_setting(
+        conn,
+        "s3_access_key",
+        cfg.s3_access_key.as_deref().unwrap_or(""),
+    )?;
+
     let s3_key_mode = match cfg.s3_key_mode {
         S3KeyMode::Original => "original",
         S3KeyMode::Template => "template",
     };
     db::set_setting(conn, "s3_key_mode", s3_key_mode)?;
-    db::set_setting(conn, "s3_key_template", cfg.s3_key_template.as_deref().unwrap_or(""))?;
-    
+    db::set_setting(
+        conn,
+        "s3_key_template",
+        cfg.s3_key_template.as_deref().unwrap_or(""),
+    )?;
+
     let sse = match cfg.sse {
         SseMode::Off => "off",
         SseMode::S3 => "s3",
@@ -278,16 +347,44 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
     };
     db::set_setting(conn, "sse", sse)?;
     db::set_setting(conn, "kms_key_id", cfg.kms_key_id.as_deref().unwrap_or(""))?;
-    
-    db::set_setting(conn, "part_size_mb", &cfg.part_size_mb.to_string())?;
-    db::set_setting(conn, "concurrency_upload_global", &cfg.concurrency_upload_global.to_string())?;
-    db::set_setting(conn, "concurrency_upload_parts", &cfg.concurrency_upload_parts.to_string())?;
-    db::set_setting(conn, "concurrency_scan_parts", &cfg.concurrency_scan_parts.to_string())?;
-    db::set_setting(conn, "theme", &cfg.theme)?;
-    db::set_setting(conn, "scanner_enabled", if cfg.scanner_enabled { "true" } else { "false" })?;
-    db::set_setting(conn, "host_metrics_enabled", if cfg.host_metrics_enabled { "true" } else { "false" })?;
 
-    db::set_setting(conn, "hopper_width_percent", &cfg.hopper_width_percent.to_string())?;
+    db::set_setting(conn, "part_size_mb", &cfg.part_size_mb.to_string())?;
+    db::set_setting(
+        conn,
+        "concurrency_upload_global",
+        &cfg.concurrency_upload_global.to_string(),
+    )?;
+    db::set_setting(
+        conn,
+        "concurrency_upload_parts",
+        &cfg.concurrency_upload_parts.to_string(),
+    )?;
+    db::set_setting(
+        conn,
+        "concurrency_scan_parts",
+        &cfg.concurrency_scan_parts.to_string(),
+    )?;
+    db::set_setting(conn, "theme", &cfg.theme)?;
+    db::set_setting(
+        conn,
+        "scanner_enabled",
+        if cfg.scanner_enabled { "true" } else { "false" },
+    )?;
+    db::set_setting(
+        conn,
+        "host_metrics_enabled",
+        if cfg.host_metrics_enabled {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
+
+    db::set_setting(
+        conn,
+        "hopper_width_percent",
+        &cfg.hopper_width_percent.to_string(),
+    )?;
     db::set_setting(conn, "history_width", &cfg.history_width.to_string())?;
     db::set_setting(conn, "log_level", &cfg.log_level)?;
 
@@ -302,6 +399,7 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
 impl Config {
     /// Validate configuration values
     /// Returns errors for invalid configurations
+    #[allow(dead_code)]
     pub fn validate(&self) -> Result<()> {
         // Validate part_size_mb (S3 requires 5MB-5GB)
         if self.part_size_mb < 5 || self.part_size_mb > 5 * 1024 {
@@ -365,7 +463,7 @@ mod tests {
         assert_eq!(config.reports_dir, "./reports");
         assert_eq!(config.state_dir, "./state");
         assert_eq!(config.staging_mode, StagingMode::Direct);
-        assert_eq!(config.delete_source_after_upload, false);
+        assert!(!config.delete_source_after_upload);
         assert_eq!(config.scan_chunk_size_mb, 24);
         assert_eq!(config.clamd_host, "127.0.0.1");
         assert_eq!(config.clamd_port, 3310);
@@ -373,8 +471,8 @@ mod tests {
         assert_eq!(config.concurrency_upload_global, 1);
         assert_eq!(config.concurrency_upload_parts, 4);
         assert_eq!(config.concurrency_scan_parts, 4);
-        assert_eq!(config.scanner_enabled, true);
-        assert_eq!(config.host_metrics_enabled, true);
+        assert!(config.scanner_enabled);
+        assert!(config.host_metrics_enabled);
         assert_eq!(config.hopper_width_percent, 50);
         assert_eq!(config.history_width, 60);
         assert_eq!(config.log_level, "info");
@@ -390,8 +488,10 @@ mod tests {
 
     #[test]
     fn test_validate_part_size_too_small() {
-        let mut config = Config::default();
-        config.part_size_mb = 4; // Less than 5MB minimum
+        let config = Config {
+            part_size_mb: 4, // Less than 5MB minimum
+            ..Config::default()
+        };
 
         let result = config.validate();
         assert!(result.is_err(), "Should fail with part size < 5MB");
@@ -399,8 +499,10 @@ mod tests {
 
     #[test]
     fn test_validate_part_size_too_large() {
-        let mut config = Config::default();
-        config.part_size_mb = 6000; // More than 5GB
+        let config = Config {
+            part_size_mb: 6000, // More than 5GB
+            ..Config::default()
+        };
 
         let result = config.validate();
         assert!(result.is_err(), "Should fail with part size > 5GB");
@@ -408,9 +510,10 @@ mod tests {
 
     #[test]
     fn test_validate_part_size_valid_range() {
-        let mut config = Config::default();
-
-        config.part_size_mb = 5; // Min
+        let mut config = Config {
+            part_size_mb: 5, // Min
+            ..Config::default()
+        };
         assert!(config.validate().is_ok());
 
         config.part_size_mb = 128; // Default
@@ -422,8 +525,10 @@ mod tests {
 
     #[test]
     fn test_validate_concurrency_upload_global_zero() {
-        let mut config = Config::default();
-        config.concurrency_upload_global = 0;
+        let config = Config {
+            concurrency_upload_global: 0,
+            ..Config::default()
+        };
 
         let result = config.validate();
         assert!(result.is_err(), "Should fail with zero concurrency");
@@ -431,8 +536,10 @@ mod tests {
 
     #[test]
     fn test_validate_concurrency_upload_parts_zero() {
-        let mut config = Config::default();
-        config.concurrency_upload_parts = 0;
+        let config = Config {
+            concurrency_upload_parts: 0,
+            ..Config::default()
+        };
 
         let result = config.validate();
         assert!(result.is_err(), "Should fail with zero concurrency");
@@ -440,8 +547,10 @@ mod tests {
 
     #[test]
     fn test_validate_concurrency_scan_parts_zero() {
-        let mut config = Config::default();
-        config.concurrency_scan_parts = 0;
+        let config = Config {
+            concurrency_scan_parts: 0,
+            ..Config::default()
+        };
 
         let result = config.validate();
         assert!(result.is_err(), "Should fail with zero concurrency");
@@ -449,8 +558,10 @@ mod tests {
 
     #[test]
     fn test_validate_scan_chunk_size_zero() {
-        let mut config = Config::default();
-        config.scan_chunk_size_mb = 0;
+        let config = Config {
+            scan_chunk_size_mb: 0,
+            ..Config::default()
+        };
 
         let result = config.validate();
         assert!(result.is_err(), "Should fail with zero scan chunk size");
@@ -458,8 +569,10 @@ mod tests {
 
     #[test]
     fn test_validate_hopper_width_percent_over_100() {
-        let mut config = Config::default();
-        config.hopper_width_percent = 101;
+        let config = Config {
+            hopper_width_percent: 101,
+            ..Config::default()
+        };
 
         let result = config.validate();
         assert!(result.is_err(), "Should fail with hopper width > 100%");
@@ -557,13 +670,15 @@ mod tests {
     fn test_save_and_load_config_round_trip() -> Result<()> {
         let conn = setup_test_db()?;
 
-        let mut config = Config::default();
-        config.staging_dir = "/custom/staging".to_string();
-        config.part_size_mb = 256;
-        config.concurrency_upload_global = 2;
-        config.scanner_enabled = false;
-        config.s3_bucket = Some("test-bucket".to_string());
-        config.s3_secret_key = Some("test-secret".to_string());
+        let config = Config {
+            staging_dir: "/custom/staging".to_string(),
+            part_size_mb: 256,
+            concurrency_upload_global: 2,
+            scanner_enabled: false,
+            s3_bucket: Some("test-bucket".to_string()),
+            s3_secret_key: Some("test-secret".to_string()),
+            ..Config::default()
+        };
 
         save_config_to_db(&conn, &config)?;
         let loaded = load_config_from_db(&conn)?;
@@ -571,7 +686,7 @@ mod tests {
         assert_eq!(loaded.staging_dir, "/custom/staging");
         assert_eq!(loaded.part_size_mb, 256);
         assert_eq!(loaded.concurrency_upload_global, 2);
-        assert_eq!(loaded.scanner_enabled, false);
+        assert!(!loaded.scanner_enabled);
         assert_eq!(loaded.s3_bucket, Some("test-bucket".to_string()));
         assert_eq!(loaded.s3_secret_key, Some("test-secret".to_string()));
 
@@ -582,11 +697,13 @@ mod tests {
     fn test_save_and_load_enum_modes() -> Result<()> {
         let conn = setup_test_db()?;
 
-        let mut config = Config::default();
-        config.staging_mode = StagingMode::Copy;
-        config.scan_mode = ScanMode::Skip;
-        config.s3_key_mode = S3KeyMode::Template;
-        config.sse = SseMode::Kms;
+        let config = Config {
+            staging_mode: StagingMode::Copy,
+            scan_mode: ScanMode::Skip,
+            s3_key_mode: S3KeyMode::Template,
+            sse: SseMode::Kms,
+            ..Config::default()
+        };
 
         save_config_to_db(&conn, &config)?;
         let loaded = load_config_from_db(&conn)?;
@@ -620,10 +737,12 @@ mod tests {
     fn test_save_config_with_optional_none_values() -> Result<()> {
         let conn = setup_test_db()?;
 
-        let mut config = Config::default();
-        config.watch_dir = None;
-        config.s3_bucket = None;
-        config.s3_secret_key = None;
+        let config = Config {
+            watch_dir: None,
+            s3_bucket: None,
+            s3_secret_key: None,
+            ..Config::default()
+        };
 
         save_config_to_db(&conn, &config)?;
         let loaded = load_config_from_db(&conn)?;
@@ -639,10 +758,12 @@ mod tests {
     fn test_save_config_with_optional_some_values() -> Result<()> {
         let conn = setup_test_db()?;
 
-        let mut config = Config::default();
-        config.watch_dir = Some("/watch".to_string());
-        config.s3_bucket = Some("bucket".to_string());
-        config.s3_region = Some("us-west-2".to_string());
+        let config = Config {
+            watch_dir: Some("/watch".to_string()),
+            s3_bucket: Some("bucket".to_string()),
+            s3_region: Some("us-west-2".to_string()),
+            ..Config::default()
+        };
 
         save_config_to_db(&conn, &config)?;
         let loaded = load_config_from_db(&conn)?;
@@ -658,17 +779,19 @@ mod tests {
     fn test_save_config_boolean_flags() -> Result<()> {
         let conn = setup_test_db()?;
 
-        let mut config = Config::default();
-        config.delete_source_after_upload = true;
-        config.scanner_enabled = false;
-        config.host_metrics_enabled = false;
+        let config = Config {
+            delete_source_after_upload: true,
+            scanner_enabled: false,
+            host_metrics_enabled: false,
+            ..Config::default()
+        };
 
         save_config_to_db(&conn, &config)?;
         let loaded = load_config_from_db(&conn)?;
 
-        assert_eq!(loaded.delete_source_after_upload, true);
-        assert_eq!(loaded.scanner_enabled, false);
-        assert_eq!(loaded.host_metrics_enabled, false);
+        assert!(loaded.delete_source_after_upload);
+        assert!(!loaded.scanner_enabled);
+        assert!(!loaded.host_metrics_enabled);
 
         Ok(())
     }
@@ -723,7 +846,10 @@ mod tests {
         assert_eq!(loaded.state_dir, config.state_dir);
         assert_eq!(loaded.watch_dir, config.watch_dir);
         assert_eq!(loaded.staging_mode, config.staging_mode);
-        assert_eq!(loaded.delete_source_after_upload, config.delete_source_after_upload);
+        assert_eq!(
+            loaded.delete_source_after_upload,
+            config.delete_source_after_upload
+        );
         assert_eq!(loaded.scan_chunk_size_mb, config.scan_chunk_size_mb);
         assert_eq!(loaded.max_scan_size_mb, config.max_scan_size_mb);
         assert_eq!(loaded.clamd_host, config.clamd_host);
@@ -738,8 +864,14 @@ mod tests {
         assert_eq!(loaded.s3_key_template, config.s3_key_template);
         assert_eq!(loaded.kms_key_id, config.kms_key_id);
         assert_eq!(loaded.part_size_mb, config.part_size_mb);
-        assert_eq!(loaded.concurrency_upload_global, config.concurrency_upload_global);
-        assert_eq!(loaded.concurrency_upload_parts, config.concurrency_upload_parts);
+        assert_eq!(
+            loaded.concurrency_upload_global,
+            config.concurrency_upload_global
+        );
+        assert_eq!(
+            loaded.concurrency_upload_parts,
+            config.concurrency_upload_parts
+        );
         assert_eq!(loaded.concurrency_scan_parts, config.concurrency_scan_parts);
         assert_eq!(loaded.scanner_enabled, config.scanner_enabled);
         assert_eq!(loaded.host_metrics_enabled, config.host_metrics_enabled);

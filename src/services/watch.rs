@@ -1,11 +1,14 @@
 use crate::core::config::Config;
 use crate::services::ingest::ingest_path;
-use uuid::Uuid;
-use notify::{Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher};
+use notify::{
+    Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode,
+    Watcher as NotifyWatcher,
+};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tracing::{info, error, debug};
+use tracing::{debug, error, info};
+use uuid::Uuid;
 
 #[allow(dead_code)]
 pub struct Watcher {
@@ -47,10 +50,18 @@ impl Watcher {
                                         let staging_dir_clone = staging_dir.clone();
                                         let staging_mode_clone = staging_mode.clone();
                                         let path_str = path.to_string_lossy().to_string();
-                                        
+
                                         tokio::spawn(async move {
                                             let session_id = Uuid::new_v4().to_string();
-                                            if let Err(e) = ingest_path(conn_clone, &staging_dir_clone, &staging_mode_clone, &path_str, &session_id).await {
+                                            if let Err(e) = ingest_path(
+                                                conn_clone,
+                                                &staging_dir_clone,
+                                                &staging_mode_clone,
+                                                &path_str,
+                                                &session_id,
+                                            )
+                                            .await
+                                            {
                                                 error!("Failed to ingest file {}: {}", path_str, e);
                                             }
                                         });
@@ -68,7 +79,7 @@ impl Watcher {
 
         match watcher_result {
             Ok(mut watcher) => {
-                 if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
+                if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
                     error!("Failed to start watcher: {:?}", e);
                 } else {
                     info!("Watcher started successfully");

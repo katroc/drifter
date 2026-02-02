@@ -1,11 +1,11 @@
+use crate::core::config::Config;
+use crate::db;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
 use tracing::info;
-use crate::db;
-use crate::core::config::Config;
 
 #[derive(Serialize)]
 struct ReportSummary {
@@ -84,28 +84,35 @@ impl Reporter {
         fs::write(&json_path, json_content).context("Failed to write JSON report")?;
 
         info!("Generated scan report: {:?}", json_path);
-        
+
         // Optional: Text summary for easier reading
         let txt_filename = format!("scan_report_{}.txt", session_id);
         let txt_path = reports_dir.join(&txt_filename);
-        
-        let details = summary.files.iter().map(|f| format!(
-                 "[{}] {} - Checksum: {}", 
-                 f.scan_status.as_deref().unwrap_or("N/A").to_uppercase(), 
-                 f.filename,
-                 f.checksum.as_deref().unwrap_or("N/A")
-             )).collect::<Vec<_>>().join("\n");
+
+        let details = summary
+            .files
+            .iter()
+            .map(|f| {
+                format!(
+                    "[{}] {} - Checksum: {}",
+                    f.scan_status.as_deref().unwrap_or("N/A").to_uppercase(),
+                    f.filename,
+                    f.checksum.as_deref().unwrap_or("N/A")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let txt_content = format!(
             "Scan Report for Session: {}\nGenerated: {}\n----------------------------------------\nTotal Files:    {}\nClean:          {}\nInfected:       {}\nFailed:         {}\nSkipped:        {}\n----------------------------------------\nDetails:\n{}\n",
-             summary.session_id,
-             summary.generated_at,
-             summary.total_files,
-             summary.clean_files,
-             summary.infected_files,
-             summary.failed_files,
-             summary.skipped_files,
-             details
+            summary.session_id,
+            summary.generated_at,
+            summary.total_files,
+            summary.clean_files,
+            summary.infected_files,
+            summary.failed_files,
+            summary.skipped_files,
+            details
         );
         fs::write(&txt_path, txt_content).context("Failed to write text report")?;
 
@@ -151,9 +158,10 @@ mod tests {
     }
 
     fn create_test_config(temp_dir: &TempDir) -> Config {
-        let mut config = Config::default();
-        config.reports_dir = temp_dir.path().to_string_lossy().to_string();
-        config
+        Config {
+            reports_dir: temp_dir.path().to_string_lossy().to_string(),
+            ..Config::default()
+        }
     }
 
     // --- Report Generation Tests ---
@@ -169,7 +177,10 @@ mod tests {
 
         // No files should be created for empty session
         let json_path = temp_dir.path().join("scan_report_empty-session.json");
-        assert!(!json_path.exists(), "JSON report should not exist for empty session");
+        assert!(
+            !json_path.exists(),
+            "JSON report should not exist for empty session"
+        );
 
         Ok(())
     }
@@ -399,8 +410,10 @@ mod tests {
 
         // Use a non-existent subdirectory
         let reports_dir = temp_dir.path().join("reports").join("nested");
-        let mut config = Config::default();
-        config.reports_dir = reports_dir.to_string_lossy().to_string();
+        let config = Config {
+            reports_dir: reports_dir.to_string_lossy().to_string(),
+            ..Config::default()
+        };
 
         conn.execute(
             "INSERT INTO jobs (session_id, created_at, status, source_path, size_bytes, scan_status)
@@ -509,8 +522,10 @@ mod tests {
 
         // Verify timestamp is RFC3339 format
         let timestamp = report["generated_at"].as_str().unwrap();
-        assert!(chrono::DateTime::parse_from_rfc3339(timestamp).is_ok(),
-            "Timestamp should be valid RFC3339 format");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(timestamp).is_ok(),
+            "Timestamp should be valid RFC3339 format"
+        );
 
         Ok(())
     }

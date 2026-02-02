@@ -1,22 +1,22 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
-use std::time::{Duration, Instant};
-use std::sync::mpsc;
 use anyhow::Result;
 use rusqlite::Connection;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::time::{Duration, Instant};
 
-use crate::db::{JobRow, list_active_jobs, list_history_jobs, list_quarantined_jobs};
-use crate::components::file_picker::{FilePicker};
+use crate::app::settings::SettingsState;
+use crate::components::file_picker::FilePicker;
 use crate::components::wizard::WizardState;
 use crate::core::config::Config;
-use crate::core::metrics::{MetricsCollector, HostMetricsSnapshot};
-use crate::app::settings::SettingsState;
+use crate::core::metrics::{HostMetricsSnapshot, MetricsCollector};
+use crate::db::{JobRow, list_active_jobs, list_history_jobs, list_quarantined_jobs};
 use crate::services::uploader::S3Object;
 use crate::utils::lock_mutex;
 
-use crate::ui::theme::Theme;
 use crate::services::watch::Watcher;
+use crate::ui::theme::Theme;
 use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +47,6 @@ pub enum ModalAction {
     ClearHistory,
     CancelJob(i64),
     DeleteRemoteObject(String, String), // key, current_path
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,13 +67,13 @@ pub struct VisualItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
-    Browsing, // In File Picker
-    Filter,   // In File Picker Filter
-    LogSearch, // In Log Viewer Search
-    Confirmation, // Modal
-    LayoutAdjust, // Popout
-    QueueSearch,  // In Transfer Queue
-    HistorySearch, // In Job History
+    Browsing,       // In File Picker
+    Filter,         // In File Picker Filter
+    LogSearch,      // In Log Viewer Search
+    Confirmation,   // Modal
+    LayoutAdjust,   // Popout
+    QueueSearch,    // In Transfer Queue
+    HistorySearch,  // In Job History
     RemoteBrowsing, // For navigating S3 directories
 }
 
@@ -123,7 +122,6 @@ impl HistoryFilter {
 // The original `tui.rs` imported `crate::state::ProgressInfo`.
 // I should import it here too.
 
-
 use crate::coordinator::ProgressInfo;
 
 pub struct App {
@@ -133,7 +131,7 @@ pub struct App {
     pub selected_history: usize,
     pub quarantine: Vec<JobRow>,
     pub selected_quarantine: usize,
-    
+
     pub s3_objects: Vec<S3Object>,
     pub selected_remote: usize,
     pub remote_current_path: String,
@@ -169,7 +167,7 @@ pub struct App {
     pub log_search_active: bool,
     pub log_search_query: String,
     pub log_search_results: Vec<usize>, // Indicies of matching lines
-    pub log_search_current: usize, // Index in log_search_results
+    pub log_search_current: usize,      // Index in log_search_results
     pub log_handle: Option<crate::logging::LogHandle>,
     pub current_log_level: String,
 
@@ -206,10 +204,6 @@ pub struct App {
     // Layout Adjustment
     pub layout_adjust_target: Option<LayoutTarget>,
     pub layout_adjust_message: String,
-    
-
-
-
 }
 
 impl App {
@@ -237,11 +231,11 @@ impl App {
             selected: 0,
             selected_history: 0,
             selected_quarantine: 0,
-            
+
             s3_objects: Vec::new(),
             selected_remote: 0,
             remote_current_path: String::new(),
-            
+
             last_refresh: Instant::now() - Duration::from_secs(5),
             status_message: "Ready".to_string(),
             status_message_at: None,
@@ -306,12 +300,11 @@ impl App {
             loop {
                 // Read config for host/port
                 let (host, port) = {
-                     let cfg = config_clone.lock().await;
-                     (cfg.clamd_host.clone(), cfg.clamd_port)
+                    let cfg = config_clone.lock().await;
+                    (cfg.clamd_host.clone(), cfg.clamd_port)
                 };
                 let addr = format!("{}:{}", host, port);
-                let status = if tokio::net::TcpStream::connect(&addr).await.is_ok()
-                {
+                let status = if tokio::net::TcpStream::connect(&addr).await.is_ok() {
                     "Connected"
                 } else {
                     "Disconnected"
@@ -350,7 +343,7 @@ impl App {
         self.rebuild_visual_lists();
 
         if self.visual_jobs.len() != prev_visual_jobs_len {
-            // Log when list size changes significantly? 
+            // Log when list size changes significantly?
             // tracing::debug!("Job list updated: {} jobs visible", self.visual_jobs.len());
         }
 
@@ -383,23 +376,22 @@ impl App {
             jobs.iter()
                 .enumerate()
                 .filter(|(_, job)| {
-                    job.source_path.to_lowercase().contains(filter_query) ||
-                    Path::new(&job.source_path)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_lowercase().contains(filter_query))
-                        .unwrap_or(false)
+                    job.source_path.to_lowercase().contains(filter_query)
+                        || Path::new(&job.source_path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_lowercase().contains(filter_query))
+                            .unwrap_or(false)
                 })
                 .collect()
         };
 
-        let (jobs_to_process, original_indices): (Vec<&JobRow>, Vec<usize>) = filtered_jobs
-            .iter()
-            .map(|(idx, job)| (*job, *idx))
-            .unzip();
+        let (jobs_to_process, original_indices): (Vec<&JobRow>, Vec<usize>) =
+            filtered_jobs.iter().map(|(idx, job)| (*job, *idx)).unzip();
 
         match self.view_mode {
             ViewMode::Flat => {
-                filtered_jobs.into_iter()
+                filtered_jobs
+                    .into_iter()
                     .map(|(i, job)| {
                         // Extract filename for display
                         let name = Path::new(&job.source_path)
@@ -424,7 +416,10 @@ impl App {
 
                 // 1. Calculate Common Prefix
                 // We must scan ALL paths since we aren't sorting anymore.
-                let paths: Vec<&Path> = jobs_to_process.iter().map(|j| Path::new(&j.source_path)).collect();
+                let paths: Vec<&Path> = jobs_to_process
+                    .iter()
+                    .map(|j| Path::new(&j.source_path))
+                    .collect();
                 let p0 = paths[0];
                 let mut common_components: Vec<_> = p0.components().collect();
 
@@ -479,8 +474,8 @@ impl App {
                         .parent()
                         .map(|p| p.to_path_buf())
                         .unwrap_or(effective_common_path)
-                    } else {
-                        effective_common_path
+                } else {
+                    effective_common_path
                 };
 
                 // 3. Build Tree (Order Preserving)
@@ -495,7 +490,7 @@ impl App {
                     children: Vec::new(),
                     files: Vec::new(),
                 };
-                
+
                 for (it_idx, job) in jobs_to_process.iter().enumerate() {
                     let _orig_idx = original_indices[it_idx];
                     let full_path = Path::new(&job.source_path);
@@ -523,50 +518,52 @@ impl App {
                             if let Some(last) = current.children.last()
                                 && last.name == *comp
                             {
-                                    // Check collision: Does `last` already contain the file we are about to add?
-                                    // We need to verify if `last` + `remaining_for_file` hits an existing file.
-                                    // Helper closure for collision
-                                    fn check_collision(
-                                        node: &TreeNode,
-                                        path: &[String],
-                                        jobs_to_process: &[&JobRow],
-                                    ) -> bool {
-                                        if path.len() == 1 {
-                                            // Path is just [filename]. Check node.files.
-                                            let filename = &path[0];
-                                            for &f_idx in &node.files {
-                                                // index_in_jobs logic: f_idx is a relative index in the filtered list if Tree traversal uses it
-                                                // Actually, current implementation pushes `idx` from loop over `jobs_to_process`
-                                                // which is an index into `jobs_to_process`.
-                                                let f_path = &jobs_to_process[f_idx].source_path;
-                                                let f_name = std::path::Path::new(f_path)
-                                                    .file_name()
-                                                    .unwrap_or_default()
-                                                    .to_string_lossy();
-                                                if f_name == *filename {
-                                                    return true;
-                                                }
+                                // Check collision: Does `last` already contain the file we are about to add?
+                                // We need to verify if `last` + `remaining_for_file` hits an existing file.
+                                // Helper closure for collision
+                                fn check_collision(
+                                    node: &TreeNode,
+                                    path: &[String],
+                                    jobs_to_process: &[&JobRow],
+                                ) -> bool {
+                                    if path.len() == 1 {
+                                        // Path is just [filename]. Check node.files.
+                                        let filename = &path[0];
+                                        for &f_idx in &node.files {
+                                            // index_in_jobs logic: f_idx is a relative index in the filtered list if Tree traversal uses it
+                                            // Actually, current implementation pushes `idx` from loop over `jobs_to_process`
+                                            // which is an index into `jobs_to_process`.
+                                            let f_path = &jobs_to_process[f_idx].source_path;
+                                            let f_name = std::path::Path::new(f_path)
+                                                .file_name()
+                                                .unwrap_or_default()
+                                                .to_string_lossy();
+                                            if f_name == *filename {
+                                                return true;
                                             }
-                                            return false;
                                         }
-                                        // Path is [dir, ..., filename]
-                                        let next_dir = &path[0];
-                                        if let Some(child) =
-                                            node.children.iter().find(|c| c.name == *next_dir)
-                                        {
-                                            return check_collision(child, &path[1..], jobs_to_process);
-                                        }
-                                        false
+                                        return false;
                                     }
-
-                                    if !check_collision(last, remaining_for_file, &jobs_to_process) {
-                                        should_merge = true;
+                                    // Path is [dir, ..., filename]
+                                    let next_dir = &path[0];
+                                    if let Some(child) =
+                                        node.children.iter().find(|c| c.name == *next_dir)
+                                    {
+                                        return check_collision(child, &path[1..], jobs_to_process);
                                     }
+                                    false
+                                }
 
+                                if !check_collision(last, remaining_for_file, &jobs_to_process) {
+                                    should_merge = true;
+                                }
                             }
 
                             if should_merge {
-                                current = current.children.last_mut().expect("Merge logic guarantees child exists");
+                                current = current
+                                    .children
+                                    .last_mut()
+                                    .expect("Merge logic guarantees child exists");
                             } else {
                                 let new_node = TreeNode {
                                     name: comp.clone(),
@@ -660,10 +657,14 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, e)| {
-                if e.is_parent { return true; }
+                if e.is_parent {
+                    return true;
+                }
                 let matches_name = e.name.to_lowercase().contains(&filter);
                 if self.picker.search_recursive {
-                    let rel_path = e.path.strip_prefix(&self.picker.cwd)
+                    let rel_path = e
+                        .path
+                        .strip_prefix(&self.picker.cwd)
                         .map(|p| p.to_string_lossy().to_lowercase())
                         .unwrap_or_else(|_| e.name.to_lowercase());
                     matches_name || rel_path.contains(&filter)
@@ -705,10 +706,14 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, e)| {
-                if e.is_parent { return true; }
+                if e.is_parent {
+                    return true;
+                }
                 let matches_name = e.name.to_lowercase().contains(&filter);
                 if self.picker.search_recursive {
-                    let rel_path = e.path.strip_prefix(&self.picker.cwd)
+                    let rel_path = e
+                        .path
+                        .strip_prefix(&self.picker.cwd)
                         .map(|p| p.to_string_lossy().to_lowercase())
                         .unwrap_or_else(|_| e.name.to_lowercase());
                     matches_name || rel_path.contains(&filter)
@@ -750,10 +755,14 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, e)| {
-                if e.is_parent { return true; }
+                if e.is_parent {
+                    return true;
+                }
                 let matches_name = e.name.to_lowercase().contains(&filter);
                 if self.picker.search_recursive {
-                    let rel_path = e.path.strip_prefix(&self.picker.cwd)
+                    let rel_path = e
+                        .path
+                        .strip_prefix(&self.picker.cwd)
                         .map(|p| p.to_string_lossy().to_lowercase())
                         .unwrap_or_else(|_| e.name.to_lowercase());
                     matches_name || rel_path.contains(&filter)
@@ -771,73 +780,96 @@ impl App {
 
     pub async fn set_log_level(&mut self, level: &str) {
         if let Some(handle) = &self.log_handle {
-             use tracing_subscriber::EnvFilter;
-             let new_filter = EnvFilter::new(level);
-             if let Err(e) = handle.reload(new_filter) {
-                 self.status_message = format!("Failed to set log level: {}", e);
-             } else {
-                 self.current_log_level = level.to_string();
-                 self.status_message = format!("Log level set to: {}", level);
-                 
-                 // Persist to config and DB
-                 {
-                     let mut cfg = self.config.lock().await;
-                     cfg.log_level = level.to_string();
-                     if let Ok(conn) = self.conn.lock() {
-                         if let Err(e) = crate::core::config::save_config_to_db(&conn, &cfg) {
-                             tracing::error!("Failed to save log level to DB: {}", e);
-                         }
-                     }
-                 }
-             }
+            use tracing_subscriber::EnvFilter;
+            let new_filter = EnvFilter::new(level);
+            if let Err(e) = handle.reload(new_filter) {
+                self.status_message = format!("Failed to set log level: {}", e);
+            } else {
+                self.current_log_level = level.to_string();
+                self.status_message = format!("Log level set to: {}", level);
+
+                // Persist to config and DB
+                {
+                    let mut cfg = self.config.lock().await;
+                    cfg.log_level = level.to_string();
+                    if let Ok(conn) = self.conn.lock()
+                        && let Err(e) = crate::core::config::save_config_to_db(&conn, &cfg)
+                    {
+                        tracing::error!("Failed to save log level to DB: {}", e);
+                    }
+                }
+            }
         }
     }
 
-    
-
-
     pub async fn toggle_pause_selected_job(&mut self) {
         let job_id = if self.view_mode == ViewMode::Flat {
-             if self.selected < self.jobs.len() {
-                 self.jobs[self.selected].id
-             } else {
-                 return;
-             }
+            if self.selected < self.jobs.len() {
+                self.jobs[self.selected].id
+            } else {
+                return;
+            }
         } else {
-             // Tree mode logic: find job ID from visual item
-             // Assuming simple mapping for now or finding from visual item
-             // VisualItem has index_in_jobs, which is index into self.jobs (if flattened first?)
-             // Actually self.visual_jobs[self.selected].index_in_jobs -> self.jobs[idx].id
-             if self.selected < self.visual_jobs.len() {
-                  if let Some(idx) = self.visual_jobs[self.selected].index_in_jobs {
-                      if idx < self.jobs.len() {
-                          self.jobs[idx].id
-                      } else { return; }
-                  } else {
-                      return; // Folder selected?
-                  }
-             } else {
-                 return;
-             }
+            // Tree mode logic: find job ID from visual item
+            // Assuming simple mapping for now or finding from visual item
+            // VisualItem has index_in_jobs, which is index into self.jobs (if flattened first?)
+            // Actually self.visual_jobs[self.selected].index_in_jobs -> self.jobs[idx].id
+            if self.selected < self.visual_jobs.len() {
+                if let Some(idx) = self.visual_jobs[self.selected].index_in_jobs {
+                    if idx < self.jobs.len() {
+                        self.jobs[idx].id
+                    } else {
+                        return;
+                    }
+                } else {
+                    return; // Folder selected?
+                }
+            } else {
+                return;
+            }
         };
 
-        let conn = if let Ok(c) = self.conn.lock() { c } else { return; };
-        
         // Get current status
-        let status = if let Ok(Some(job)) = crate::db::get_job(&conn, job_id) {
-            job.status
-        } else {
-            return;
+        let status = {
+            let conn = if let Ok(c) = self.conn.lock() {
+                c
+            } else {
+                return;
+            };
+            if let Ok(Some(job)) = crate::db::get_job(&conn, job_id) {
+                job.status
+            } else {
+                return;
+            }
         };
 
         if status == "paused" {
+            let conn = if let Ok(c) = self.conn.lock() {
+                c
+            } else {
+                return;
+            };
             if let Err(e) = crate::db::resume_job(&conn, job_id) {
                 self.status_message = format!("Failed to resume: {}", e);
             } else {
                 self.status_message = format!("Resumed job {}", job_id);
             }
-        } else if status == "uploading" || status == "scanning" || status == "queued" || status == "staged" || status == "ready" {
-            if let Err(e) = crate::db::pause_job(&conn, job_id) {
+        } else if status == "uploading"
+            || status == "scanning"
+            || status == "queued"
+            || status == "staged"
+            || status == "ready"
+        {
+            let res = {
+                let conn = if let Ok(c) = self.conn.lock() {
+                    c
+                } else {
+                    return;
+                };
+                crate::db::pause_job(&conn, job_id)
+            };
+
+            if let Err(e) = res {
                 self.status_message = format!("Failed to pause: {}", e);
             } else {
                 self.status_message = format!("Paused job {}", job_id);
@@ -856,28 +888,32 @@ impl App {
 
     pub fn change_selected_job_priority(&mut self, delta: i64) {
         let job_id = if self.view_mode == ViewMode::Flat {
-             if self.selected < self.jobs.len() {
-                 self.jobs[self.selected].id
-             } else {
-                 return;
-             }
+            if self.selected < self.jobs.len() {
+                self.jobs[self.selected].id
+            } else {
+                return;
+            }
+        } else if self.selected < self.visual_jobs.len() {
+            if let Some(idx) = self.visual_jobs[self.selected].index_in_jobs {
+                if idx < self.jobs.len() {
+                    self.jobs[idx].id
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
         } else {
-             if self.selected < self.visual_jobs.len() {
-                  if let Some(idx) = self.visual_jobs[self.selected].index_in_jobs {
-                      if idx < self.jobs.len() {
-                          self.jobs[idx].id
-                      } else { return; }
-                  } else {
-                      return;
-                  }
-             } else {
-                 return;
-             }
+            return;
         };
 
         let conn_arc = self.conn.clone();
-        let conn = if let Ok(c) = conn_arc.lock() { c } else { return; };
-        
+        let conn = if let Ok(c) = conn_arc.lock() {
+            c
+        } else {
+            return;
+        };
+
         if let Ok(Some(job)) = crate::db::get_job(&conn, job_id) {
             let new_priority = job.priority + delta;
             if let Err(e) = crate::db::set_job_priority(&conn, job_id, new_priority) {
@@ -885,11 +921,11 @@ impl App {
             } else {
                 self.status_message = format!("Priority set to {}", new_priority);
                 let _ = self.refresh_jobs(&conn);
-                
-                if let Some(pos) = self.jobs.iter().position(|j| j.id == job_id) {
-                    if self.view_mode == ViewMode::Flat {
-                        self.selected = pos;
-                    }
+
+                if let Some(pos) = self.jobs.iter().position(|j| j.id == job_id)
+                    && self.view_mode == ViewMode::Flat
+                {
+                    self.selected = pos;
                 }
             }
         }

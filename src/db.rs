@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use tracing::{info, error, debug};
+use tracing::{debug, error, info};
 
 #[derive(Debug, Clone)]
 pub struct JobRow {
@@ -46,7 +46,7 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
     }
     let db_path = Path::new(state_dir).join("drifter.db");
     let conn = Connection::open(&db_path).context("open sqlite db")?;
-    
+
     if let Err(e) = conn.execute_batch(
         "
         PRAGMA journal_mode = WAL;
@@ -116,7 +116,10 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
     }
 
     // Migration for existing databases
-    let _ = conn.execute("ALTER TABLE jobs ADD COLUMN session_id TEXT DEFAULT 'legacy'", []);
+    let _ = conn.execute(
+        "ALTER TABLE jobs ADD COLUMN session_id TEXT DEFAULT 'legacy'",
+        [],
+    );
     let _ = conn.execute("ALTER TABLE jobs ADD COLUMN s3_upload_id TEXT", []);
     // Migration for priority
     let _ = conn.execute("ALTER TABLE jobs ADD COLUMN priority INTEGER DEFAULT 0", []);
@@ -125,7 +128,10 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
     let _ = conn.execute("ALTER TABLE jobs ADD COLUMN remote_checksum TEXT", []);
     let _ = conn.execute("ALTER TABLE parts ADD COLUMN checksum_sha256 TEXT", []);
     // Migration for retries
-    let _ = conn.execute("ALTER TABLE jobs ADD COLUMN retry_count INTEGER DEFAULT 0", []);
+    let _ = conn.execute(
+        "ALTER TABLE jobs ADD COLUMN retry_count INTEGER DEFAULT 0",
+        [],
+    );
     let _ = conn.execute("ALTER TABLE jobs ADD COLUMN next_retry_at TEXT", []);
     // Migration for timing
     let _ = conn.execute("ALTER TABLE jobs ADD COLUMN scan_duration_ms INTEGER", []);
@@ -170,25 +176,39 @@ fn map_job_row(row: &rusqlite::Row) -> rusqlite::Result<JobRow> {
 }
 
 pub fn list_active_jobs(conn: &Connection, limit: i64) -> Result<Vec<JobRow>> {
-    let mut stmt = conn.prepare(
-        &format!("SELECT {} FROM jobs 
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM jobs 
          WHERE status NOT IN ('complete', 'quarantined', 'quarantined_removed', 'cancelled') 
          OR datetime(created_at) > datetime('now', '-15 seconds')
-         ORDER BY priority DESC, id DESC LIMIT ?", JOB_COLUMNS),
-    )?;
+         ORDER BY priority DESC, id DESC LIMIT ?",
+        JOB_COLUMNS
+    ))?;
     let rows = stmt
         .query_map(params![limit], map_job_row)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
-pub fn list_history_jobs(conn: &Connection, limit: i64, filter: Option<&str>) -> Result<Vec<JobRow>> {
+pub fn list_history_jobs(
+    conn: &Connection,
+    limit: i64,
+    filter: Option<&str>,
+) -> Result<Vec<JobRow>> {
     let sql = match filter {
-        Some("Complete") => format!("SELECT {} FROM jobs WHERE status = 'complete' ORDER BY id DESC LIMIT ?", JOB_COLUMNS),
-        Some("Quarantined") => format!("SELECT {} FROM jobs WHERE status IN ('quarantined', 'quarantined_removed') ORDER BY id DESC LIMIT ?", JOB_COLUMNS),
-        _ => format!("SELECT {} FROM jobs WHERE status IN ('complete', 'quarantined', 'quarantined_removed', 'cancelled') ORDER BY id DESC LIMIT ?", JOB_COLUMNS),
+        Some("Complete") => format!(
+            "SELECT {} FROM jobs WHERE status = 'complete' ORDER BY id DESC LIMIT ?",
+            JOB_COLUMNS
+        ),
+        Some("Quarantined") => format!(
+            "SELECT {} FROM jobs WHERE status IN ('quarantined', 'quarantined_removed') ORDER BY id DESC LIMIT ?",
+            JOB_COLUMNS
+        ),
+        _ => format!(
+            "SELECT {} FROM jobs WHERE status IN ('complete', 'quarantined', 'quarantined_removed', 'cancelled') ORDER BY id DESC LIMIT ?",
+            JOB_COLUMNS
+        ),
     };
-    
+
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(params![limit], map_job_row)?
@@ -197,16 +217,24 @@ pub fn list_history_jobs(conn: &Connection, limit: i64, filter: Option<&str>) ->
 }
 
 pub fn list_quarantined_jobs(conn: &Connection, limit: i64) -> Result<Vec<JobRow>> {
-    let mut stmt = conn.prepare(
-        &format!("SELECT {} FROM jobs WHERE status = 'quarantined' ORDER BY id DESC LIMIT ?", JOB_COLUMNS),
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM jobs WHERE status = 'quarantined' ORDER BY id DESC LIMIT ?",
+        JOB_COLUMNS
+    ))?;
     let rows = stmt
         .query_map(params![limit], map_job_row)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
-pub fn update_job_retry_state(conn: &Connection, job_id: i64, retry_count: i64, next_retry_at: Option<&str>, status: &str, error: &str) -> Result<()> {
+pub fn update_job_retry_state(
+    conn: &Connection,
+    job_id: i64,
+    retry_count: i64,
+    next_retry_at: Option<&str>,
+    status: &str,
+    error: &str,
+) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET retry_count = ?, next_retry_at = ?, status = ?, error = ? WHERE id = ?",
         params![retry_count, next_retry_at, status, error, job_id],
@@ -216,11 +244,12 @@ pub fn update_job_retry_state(conn: &Connection, job_id: i64, retry_count: i64, 
 
 pub fn list_retryable_jobs(conn: &Connection) -> Result<Vec<JobRow>> {
     let now = Utc::now().to_rfc3339();
-    let mut stmt = conn.prepare(
-        &format!("SELECT {} FROM jobs 
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM jobs 
          WHERE status = 'retry_pending' AND next_retry_at <= ?
-         ORDER BY priority DESC, id ASC", JOB_COLUMNS),
-    )?;
+         ORDER BY priority DESC, id ASC",
+        JOB_COLUMNS
+    ))?;
     let rows = stmt
         .query_map(params![now], map_job_row)?
         .collect::<Result<Vec<_>, _>>()?;
@@ -235,7 +264,13 @@ pub fn update_job_upload_id(conn: &Connection, job_id: i64, upload_id: &str) -> 
     Ok(())
 }
 
-pub fn create_job(conn: &Connection, session_id: &str, source_path: &str, size_bytes: i64, s3_key: Option<&str>) -> Result<i64> {
+pub fn create_job(
+    conn: &Connection,
+    session_id: &str,
+    source_path: &str,
+    size_bytes: i64,
+    s3_key: Option<&str>,
+) -> Result<i64> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO jobs (session_id, created_at, status, source_path, size_bytes, s3_key, retry_count) VALUES (?, ?, ?, ?, ?, ?, 0)",
@@ -247,9 +282,10 @@ pub fn create_job(conn: &Connection, session_id: &str, source_path: &str, size_b
 }
 
 pub fn get_session_jobs(conn: &Connection, session_id: &str) -> Result<Vec<JobRow>> {
-    let mut stmt = conn.prepare(
-        &format!("SELECT {} FROM jobs WHERE session_id = ? ORDER BY id ASC", JOB_COLUMNS),
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM jobs WHERE session_id = ? ORDER BY id ASC",
+        JOB_COLUMNS
+    ))?;
     let rows = stmt
         .query_map(params![session_id], map_job_row)?
         .collect::<Result<Vec<_>, _>>()?;
@@ -339,8 +375,6 @@ pub fn delete_job(conn: &Connection, job_id: i64) -> Result<()> {
     Ok(())
 }
 
-
-
 pub fn pause_job(conn: &Connection, job_id: i64) -> Result<()> {
     info!("Pausing job ID {}", job_id);
     // Set status to 'paused'. We don't clear s3_upload_id because we want to resume.
@@ -354,20 +388,23 @@ pub fn pause_job(conn: &Connection, job_id: i64) -> Result<()> {
 
 pub fn resume_job(conn: &Connection, job_id: i64) -> Result<()> {
     info!("Resuming job ID {}", job_id);
-    
+
     // Determine target status based on current state (or just 'scanned' if it has an upload_id?)
     // If it has staged_path and we assume it was scanning or uploading.
     // Simplifying assumption: If it was paused, it was likely 'queued', 'scanning' or 'uploading'.
     // If we set it to 'queued', it might re-scan.
     // If we set it to 'scanned', it skips scan.
-    
+
     // Check if scan was complete (similar to retry_job logic)
     let mut scan_completed = false;
     let mut stmt = conn.prepare("SELECT scan_status FROM jobs WHERE id = ?")?;
     let mut rows = stmt.query(params![job_id])?;
     if let Some(row) = rows.next()? {
         let status: Option<String> = row.get(0)?;
-        if status.as_deref() == Some("completed") || status.as_deref() == Some("clean") || status.as_deref() == Some("scanned") {
+        if status.as_deref() == Some("completed")
+            || status.as_deref() == Some("clean")
+            || status.as_deref() == Some("scanned")
+        {
             scan_completed = true;
         }
     }
@@ -380,7 +417,12 @@ pub fn resume_job(conn: &Connection, job_id: i64) -> Result<()> {
         "UPDATE jobs SET status = ?, error = NULL WHERE id = ?",
         params![new_status, job_id],
     )?;
-    insert_event(conn, job_id, "resume", &format!("job resumed to {}", new_status))?;
+    insert_event(
+        conn,
+        job_id,
+        "resume",
+        &format!("job resumed to {}", new_status),
+    )?;
     Ok(())
 }
 
@@ -398,7 +440,7 @@ pub fn cancel_job(conn: &Connection, job_id: i64) -> Result<()> {
 pub fn clear_history(conn: &Connection, filter: Option<&str>) -> Result<()> {
     // 1. Identify IDs to delete
     let mut query = "SELECT id FROM jobs WHERE status NOT IN ('pending', 'scanning', 'uploading', 'failed_retryable')".to_string();
-    
+
     match filter {
         Some("Quarantined") => {
             query.push_str(" AND (status = 'quarantined' OR status = 'quarantined_removed')");
@@ -426,16 +468,19 @@ pub fn clear_history(conn: &Connection, filter: Option<&str>) -> Result<()> {
     // Construct safe "IN (?,?,?)" clause
     // Since SQLite limit is usually 999 parameters, batching might be needed for huge lists.
     // For now, simpler iteration or string construction if local
-    // Let's use iteration for simplicity and safety, wrapped in transaction? 
+    // Let's use iteration for simplicity and safety, wrapped in transaction?
     // Or just robust one-by-one deletions since user interaction isn't high frequency high volume here usually.
     // Actually better: just use delete_job for each ID, but ensure delete_job deletes uploads/parts too.
-    
+
     // Check if we should update delete_job first? Yes.
     // But let's fix it here for now to be self-contained.
-    
+
     for id in ids {
         // Delete parts
-        conn.execute("DELETE FROM parts WHERE upload_id IN (SELECT id FROM uploads WHERE job_id = ?)", params![id])?;
+        conn.execute(
+            "DELETE FROM parts WHERE upload_id IN (SELECT id FROM uploads WHERE job_id = ?)",
+            params![id],
+        )?;
         // Delete uploads
         conn.execute("DELETE FROM uploads WHERE job_id = ?", params![id])?;
         // Delete events
@@ -443,7 +488,7 @@ pub fn clear_history(conn: &Connection, filter: Option<&str>) -> Result<()> {
         // Delete job
         conn.execute("DELETE FROM jobs WHERE id = ?", params![id])?;
     }
-    
+
     Ok(())
 }
 
@@ -456,7 +501,12 @@ pub fn insert_event(conn: &Connection, job_id: i64, event_type: &str, message: &
     Ok(())
 }
 
-pub fn update_scan_status(conn: &Connection, job_id: i64, status: &str, global_status: &str) -> Result<()> {
+pub fn update_scan_status(
+    conn: &Connection,
+    job_id: i64,
+    status: &str,
+    global_status: &str,
+) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET scan_status = ?, status = ? WHERE id = ?",
         params![status, global_status, job_id],
@@ -464,7 +514,12 @@ pub fn update_scan_status(conn: &Connection, job_id: i64, status: &str, global_s
     Ok(())
 }
 
-pub fn update_upload_status(conn: &Connection, job_id: i64, status: &str, global_status: &str) -> Result<()> {
+pub fn update_upload_status(
+    conn: &Connection,
+    job_id: i64,
+    status: &str,
+    global_status: &str,
+) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET upload_status = ?, status = ? WHERE id = ?",
         params![status, global_status, job_id],
@@ -472,7 +527,12 @@ pub fn update_upload_status(conn: &Connection, job_id: i64, status: &str, global
     Ok(())
 }
 
-pub fn update_job_checksums(conn: &Connection, job_id: i64, local: Option<&str>, remote: Option<&str>) -> Result<()> {
+pub fn update_job_checksums(
+    conn: &Connection,
+    job_id: i64,
+    local: Option<&str>,
+    remote: Option<&str>,
+) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET checksum = ?, remote_checksum = ? WHERE id = ?",
         params![local, remote, job_id],
@@ -497,9 +557,10 @@ pub fn update_upload_duration(conn: &Connection, job_id: i64, duration_ms: i64) 
 }
 
 pub fn get_next_job(conn: &Connection, current_status: &str) -> Result<Option<JobRow>> {
-    let mut stmt = conn.prepare(
-        &format!("SELECT {} FROM jobs WHERE status = ? ORDER BY priority DESC, id ASC LIMIT 1", JOB_COLUMNS),
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM jobs WHERE status = ? ORDER BY priority DESC, id ASC LIMIT 1",
+        JOB_COLUMNS
+    ))?;
     let mut rows = stmt.query_map(params![current_status], map_job_row)?;
 
     if let Some(row) = rows.next() {
@@ -510,9 +571,7 @@ pub fn get_next_job(conn: &Connection, current_status: &str) -> Result<Option<Jo
 }
 
 pub fn get_job(conn: &Connection, job_id: i64) -> Result<Option<JobRow>> {
-    let mut stmt = conn.prepare(
-        &format!("SELECT {} FROM jobs WHERE id = ?", JOB_COLUMNS),
-    )?;
+    let mut stmt = conn.prepare(&format!("SELECT {} FROM jobs WHERE id = ?", JOB_COLUMNS))?;
     let mut rows = stmt.query_map(params![job_id], map_job_row)?;
 
     if let Some(row) = rows.next() {
@@ -750,7 +809,13 @@ mod tests {
     fn test_create_job_success() -> Result<()> {
         let conn = setup_test_db()?;
 
-        let job_id = create_job(&conn, "test-session", "/tmp/file.txt", 1024, Some("s3-key.txt"))?;
+        let job_id = create_job(
+            &conn,
+            "test-session",
+            "/tmp/file.txt",
+            1024,
+            Some("s3-key.txt"),
+        )?;
 
         assert!(job_id > 0);
         let job = get_job(&conn, job_id)?.expect("Job should exist");
@@ -1030,7 +1095,14 @@ mod tests {
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
         let next_retry = "2025-01-01T12:00:00Z";
-        update_job_retry_state(&conn, job_id, 3, Some(next_retry), "retry_pending", "Temporary failure")?;
+        update_job_retry_state(
+            &conn,
+            job_id,
+            3,
+            Some(next_retry),
+            "retry_pending",
+            "Temporary failure",
+        )?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
         assert_eq!(job.retry_count, 3);
@@ -1279,7 +1351,7 @@ mod tests {
         if let Some(row) = rows.next()? {
             let stored: String = row.get(0)?;
             assert_ne!(stored, "my-secret-password");
-            assert!(stored.len() > 0);
+            assert!(!stored.is_empty());
         }
 
         let decrypted = get_secret(&conn, "password")?;
@@ -1405,5 +1477,3 @@ mod tests {
         Ok(())
     }
 }
-
-
