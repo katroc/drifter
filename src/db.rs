@@ -23,6 +23,8 @@ pub struct JobRow {
     pub remote_checksum: Option<String>,
     pub retry_count: i64,
     pub next_retry_at: Option<String>,
+    pub scan_duration_ms: Option<i64>,
+    pub upload_duration_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,12 +124,15 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
     // Migration for retries
     let _ = conn.execute("ALTER TABLE jobs ADD COLUMN retry_count INTEGER DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE jobs ADD COLUMN next_retry_at TEXT", []);
+    // Migration for timing
+    let _ = conn.execute("ALTER TABLE jobs ADD COLUMN scan_duration_ms INTEGER", []);
+    let _ = conn.execute("ALTER TABLE jobs ADD COLUMN upload_duration_ms INTEGER", []);
 
     info!("Database initialized successfully at {:?}", db_path);
     Ok(conn)
 }
 
-pub const JOB_COLUMNS: &str = "id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at";
+pub const JOB_COLUMNS: &str = "id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at, scan_duration_ms, upload_duration_ms";
 
 impl<'a> TryFrom<&'a rusqlite::Row<'a>> for JobRow {
     type Error = rusqlite::Error;
@@ -149,6 +154,8 @@ impl<'a> TryFrom<&'a rusqlite::Row<'a>> for JobRow {
             remote_checksum: row.get(12)?,
             retry_count: row.get(13).unwrap_or(0),
             next_retry_at: row.get(14)?,
+            scan_duration_ms: row.get(15)?,
+            upload_duration_ms: row.get(16)?,
         })
     }
 }
@@ -437,6 +444,22 @@ pub fn update_job_checksums(conn: &Connection, job_id: i64, local: Option<&str>,
     conn.execute(
         "UPDATE jobs SET checksum = ?, remote_checksum = ? WHERE id = ?",
         params![local, remote, job_id],
+    )?;
+    Ok(())
+}
+
+pub fn update_scan_duration(conn: &Connection, job_id: i64, duration_ms: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE jobs SET scan_duration_ms = ? WHERE id = ?",
+        params![duration_ms, job_id],
+    )?;
+    Ok(())
+}
+
+pub fn update_upload_duration(conn: &Connection, job_id: i64, duration_ms: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE jobs SET upload_duration_ms = ? WHERE id = ?",
+        params![duration_ms, job_id],
     )?;
     Ok(())
 }

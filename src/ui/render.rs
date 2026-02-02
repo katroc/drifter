@@ -16,7 +16,7 @@ use crate::utils::lock_mutex;
 use crate::ui::util::{
     centered_rect, centered_fixed_rect, format_bytes, format_bytes_rate,
     format_relative_time, format_size, format_modified, fuzzy_match,
-    status_kind, extract_threat_name, calculate_list_offset
+    status_kind, extract_threat_name, calculate_list_offset, format_duration_ms
 };
 
 
@@ -724,6 +724,20 @@ fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRo
             Span::styled(scan_status, app.theme.text_style()),
         ]),
     ];
+
+    if let Some(ms) = job.scan_duration_ms {
+        text.push(Line::from(vec![
+            Span::styled("Scan Time:   ", app.theme.highlight_style()),
+            Span::styled(format_duration_ms(ms), app.theme.text_style()),
+        ]));
+    }
+    
+    if let Some(ms) = job.upload_duration_ms {
+         text.push(Line::from(vec![
+            Span::styled("Upload Time: ", app.theme.highlight_style()),
+            Span::styled(format_duration_ms(ms), app.theme.text_style()),
+        ]));
+    }
 
     // Show multipart upload progress if job is uploading
     if job.status == "uploading" {
