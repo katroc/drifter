@@ -640,10 +640,26 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
                 let job = &app.history[job_idx];
 
                 let status_str = match job.status.as_str() {
-                    "quarantined" => "Threat Detected",
-                    "quarantined_removed" => "Threat Removed",
-                    "complete" => "Done",
-                    s => s,
+                    "quarantined" => {
+                        if let Some(err) = &job.error {
+                            if err.starts_with("Infected: ") {
+                                // Extract virus name, maybe truncate if too long
+                                let name = &err[10..];
+                                if name.len() > 15 {
+                                    format!("{}...", &name[..14])
+                                } else {
+                                    name.to_string()
+                                }
+                            } else {
+                                "Threat Detected".to_string()
+                            }
+                        } else {
+                            "Threat Detected".to_string()
+                        }
+                    },
+                    "quarantined_removed" => "Threat Removed".to_string(),
+                    "complete" => "Done".to_string(),
+                    s => s.to_string(),
                 };
 
                 let time_str = format_relative_time(&job.created_at);

@@ -1,6 +1,6 @@
 use crate::core::config::Config;
 use crate::db::{self, JobRow};
-use crate::services::scanner::Scanner;
+use crate::services::scanner::{Scanner, ScanResult};
 use crate::services::uploader::Uploader;
 use anyhow::Result;
 use rusqlite::Connection;
@@ -153,14 +153,14 @@ impl Coordinator {
 
         let start_time = std::time::Instant::now();
         match self.scanner.scan_file(path).await {
-            Ok(true) => {
+            Ok(ScanResult::Clean) => {
                  let duration = start_time.elapsed().as_millis() as i64;
                  let conn = lock_mutex(&self.conn)?;
                  db::update_scan_status(&conn, job.id, "clean", "scanned")?;
                  db::update_scan_duration(&conn, job.id, duration)?;
                  db::insert_event(&conn, job.id, "scan", &format!("scan completed in {}ms", duration))?;
             }
-            Ok(false) => {
+            Ok(ScanResult::Infected(virus_name)) => {
                  let (quarantine_dir, _delete_source) = {
                     let cfg = lock_async_mutex(&self.config).await;
                     (PathBuf::from(&cfg.quarantine_dir), cfg.delete_source_after_upload)
@@ -185,10 +185,14 @@ impl Coordinator {
                  {
                      let conn = lock_mutex(&self.conn)?;
                      db::update_scan_status(&conn, job.id, "infected", "quarantined")?;
+                     
+                     // Store virus name in error column so it appears in details
+                     db::update_job_error(&conn, job.id, "quarantined", &format!("Infected: {}", virus_name))?;
+                     
                      if !quarantine_path_str.is_empty() {
                          let _ = db::update_job_staged(&conn, job.id, &quarantine_path_str, "quarantined");
                      }
-                     db::insert_event(&conn, job.id, "scan", "scan failed: infected (quarantined)")?;
+                     db::insert_event(&conn, job.id, "scan", &format!("scan failed: infected with {}", virus_name))?;
                  }
                  self.check_and_report(&job.session_id).await?;
             }

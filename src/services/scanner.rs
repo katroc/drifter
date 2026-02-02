@@ -6,6 +6,12 @@ use tracing::{info, warn, error};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt};
 use tokio::net::TcpStream;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScanResult {
+    Clean,
+    Infected(String),
+}
+
 #[derive(Clone)]
 pub struct Scanner {
     mode: ScanMode,
@@ -26,19 +32,19 @@ impl Scanner {
         }
     }
 
-    pub async fn scan_file(&self, path: &str) -> Result<bool> {
+    pub async fn scan_file(&self, path: &str) -> Result<ScanResult> {
 
         match self.mode {
             ScanMode::Skip => {
                 info!("Scanning skipped for: {}", path);
-                Ok(true)
+                Ok(ScanResult::Clean)
             },
             ScanMode::Stream => self.scan_chunked(path).await,
             ScanMode::Full => self.scan_chunked(path).await,
         }
     }
 
-    async fn scan_chunked(&self, path: &str) -> Result<bool> {
+    async fn scan_chunked(&self, path: &str) -> Result<ScanResult> {
         use tokio::task::JoinSet;
 
         info!("Starting chunked scan for: {}", path);
@@ -77,12 +83,13 @@ impl Scanner {
         // Process results and spawn remaining
         while let Some(res) = join_set.join_next().await {
             match res {
-                Ok(Ok(clean)) => {
-                    if !clean {
-                        warn!("Infection detected in file: {}", path);
-                        join_set.abort_all();
-                        return Ok(false); // Infection found - stop scanning
-                    }
+                Ok(Ok(ScanResult::Infected(virus))) => {
+                    warn!("Infection detected in file: {} ({})", path, virus);
+                    join_set.abort_all();
+                    return Ok(ScanResult::Infected(virus)); // Infection found - stop scanning
+                }
+                Ok(Ok(ScanResult::Clean)) => {
+                    // Clean, continue
                     
                     // Spawn next chunk if available
                     if let Some(chunk_offset) = offsets_iter.next() {
@@ -109,7 +116,7 @@ impl Scanner {
         }
         
         info!("Scan complete (clean) for: {}", path);
-        Ok(true)
+        Ok(ScanResult::Clean)
     }
 
     pub async fn check_connection(&self) -> Result<String> {
@@ -132,7 +139,7 @@ impl Scanner {
 }
 
 /// Standalone function for parallel chunk scanning
-async fn scan_chunk_at_offset(path: &str, offset: u64, chunk_size: usize, host: &str, port: u16) -> Result<bool> {
+async fn scan_chunk_at_offset(path: &str, offset: u64, chunk_size: usize, host: &str, port: u16) -> Result<ScanResult> {
     use std::io::SeekFrom;
     
     let mut file = TokioFile::open(path).await.context("Failed to open file")?;
@@ -148,7 +155,7 @@ async fn scan_chunk_at_offset(path: &str, offset: u64, chunk_size: usize, host: 
     }
     
     if bytes_read == 0 {
-        return Ok(true); // Empty chunk, nothing to scan
+        return Ok(ScanResult::Clean); // Empty chunk, nothing to scan
     }
     
     // Send to ClamAV
@@ -177,9 +184,13 @@ async fn scan_chunk_at_offset(path: &str, offset: u64, chunk_size: usize, host: 
     let response_str = String::from_utf8_lossy(&response);
     
     if response_str.contains("FOUND") {
-        Ok(false)
+        // Parse virus name: "stream: Win.Test.EICAR_HDB-1 FOUND"
+        let parts: Vec<&str> = response_str.split("FOUND").collect();
+        let name_part = parts.first().unwrap_or(&"Unknown");
+        let virus_name = name_part.trim().replace("stream: ", "").trim().to_string();
+        Ok(ScanResult::Infected(virus_name))
     } else if response_str.contains("OK") {
-        Ok(true)
+        Ok(ScanResult::Clean)
     } else {
         Err(anyhow::anyhow!("ClamAV Error: {}", response_str.trim()))
     }
