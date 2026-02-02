@@ -88,7 +88,7 @@ impl Coordinator {
         Ok(())
     }
 
-    async fn process_cycle(&self) -> Result<()> {
+    pub async fn process_cycle(&self) -> Result<()> {
         // 1. Check for retryable jobs
         {
             let conn = lock_mutex(&self.conn)?;
@@ -528,5 +528,147 @@ mod tests {
             .map(|i| Coordinator::calculate_backoff_seconds(i as i64))
             .sum();
         assert_eq!(total_wait, 155);
+    }
+
+    // --- Orchestration Tests ---
+
+    fn setup_test_db() -> Result<Connection> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "
+            CREATE TABLE jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL DEFAULT 'legacy',
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                staged_path TEXT,
+                size_bytes INTEGER NOT NULL,
+                scan_status TEXT,
+                upload_status TEXT,
+                s3_bucket TEXT,
+                s3_key TEXT,
+                s3_upload_id TEXT,
+                checksum TEXT,
+                remote_checksum TEXT,
+                error TEXT,
+                priority INTEGER DEFAULT 0,
+                retry_count INTEGER DEFAULT 0,
+                next_retry_at TEXT,
+                scan_duration_ms INTEGER,
+                upload_duration_ms INTEGER
+            );
+            CREATE TABLE uploads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                upload_id TEXT,
+                part_size INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(job_id) REFERENCES jobs(id)
+            );
+            CREATE TABLE parts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                upload_id INTEGER NOT NULL,
+                part_number INTEGER NOT NULL,
+                etag TEXT,
+                checksum_sha256 TEXT,
+                size_bytes INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                retries INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(upload_id) REFERENCES uploads(id)
+            );
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(job_id) REFERENCES jobs(id)
+            );
+            CREATE TABLE secrets (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            ",
+        )?;
+        Ok(conn)
+    }
+
+    // Helper to setup a test coordinator
+    async fn setup_coordinator(
+        scanner_enabled: bool,
+    ) -> Result<(Coordinator, Arc<Mutex<Connection>>)> {
+        let conn = Arc::new(Mutex::new(setup_test_db()?));
+        let mut config = Config::default();
+        config.scanner_enabled = scanner_enabled;
+        config.s3_bucket = Some("test-bucket".to_string()); // Minimal config for Uploader
+
+        let config = Arc::new(AsyncMutex::new(config));
+        let progress = Arc::new(AsyncMutex::new(HashMap::new()));
+        let cancel = Arc::new(AsyncMutex::new(HashMap::new()));
+
+        let coord = Coordinator::new(conn.clone(), config, progress, cancel)?;
+        Ok((coord, conn))
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_skips_scan_when_disabled() -> Result<()> {
+        let (coord, conn) = setup_coordinator(false).await?;
+
+        // Create a queued job
+        let job_id = {
+            let c = lock_mutex(&conn)?;
+            let id = db::create_job(&c, "session1", "/tmp/file.txt", 100, None)?;
+            db::update_job_staged(&c, id, "/tmp/staged.txt", "queued")?;
+            id
+        };
+
+        // Run cycle
+        coord.process_cycle().await?;
+
+        // Verify state changed. It might reach 'uploading' in one cycle if uploader is also ready
+        let c = lock_mutex(&conn)?;
+        let job = db::get_job(&c, job_id)?.expect("Job not found");
+
+        // It goes queued -> scanned (skipped) -> uploading
+        assert_eq!(job.status, "uploading");
+        assert_eq!(job.scan_status, Some("skipped".to_string()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_picks_up_upload() -> Result<()> {
+        let (coord, conn) = setup_coordinator(true).await?;
+
+        // Create a scanned job ready for upload
+        let job_id = {
+            let c = lock_mutex(&conn)?;
+            let id = db::create_job(&c, "session1", "/tmp/file.txt", 100, None)?;
+            db::update_job_staged(&c, id, "/tmp/staged.txt", "queued")?;
+            db::update_scan_status(&c, id, "clean", "scanned")?;
+            id
+        };
+
+        // Run cycle
+        // This will spawn the upload task, but we only care about the synchronous state update
+        // that happens BEFORE the spawn.
+        coord.process_cycle().await?;
+
+        // Verify state changed to 'uploading'
+        let c = lock_mutex(&conn)?;
+        let job = db::get_job(&c, job_id)?.expect("Job not found");
+
+        assert_eq!(job.status, "uploading");
+        assert_eq!(job.upload_status, Some("uploading".to_string()));
+
+        Ok(())
     }
 }
