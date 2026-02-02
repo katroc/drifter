@@ -39,6 +39,8 @@ impl Scanner {
     }
 
     async fn scan_chunked(&self, path: &str) -> Result<bool> {
+        use tokio::task::JoinSet;
+
         info!("Starting chunked scan for: {}", path);
         let chunk_size = (self.scan_chunk_size_mb * 1024 * 1024) as usize;
         let overlap = 1024 * 1024; // 1MB overlap
@@ -56,39 +58,52 @@ impl Scanner {
             offset += (chunk_size as u64) - (overlap as u64);
         }
         
-        // Process chunks in parallel batches
-        for batch in offsets.chunks(concurrency) {
-            let mut handles = Vec::new();
-            
-            for &chunk_offset in batch {
+        let mut join_set = JoinSet::new();
+        let mut offsets_iter = offsets.into_iter();
+        
+        // Fill initial queue
+        for _ in 0..concurrency {
+            if let Some(chunk_offset) = offsets_iter.next() {
                 let path = path.to_string();
                 let host = self.clamd_host.clone();
                 let port = self.clamd_port;
-                let chunk_sz = chunk_size;
                 
-                let handle = tokio::spawn(async move {
-                    scan_chunk_at_offset(&path, chunk_offset, chunk_sz, &host, port).await
+                join_set.spawn(async move {
+                    scan_chunk_at_offset(&path, chunk_offset, chunk_size, &host, port).await
                 });
-                handles.push(handle);
             }
-            
-            // Wait for all chunks in this batch
-            for handle in handles {
-                match handle.await {
-                    Ok(Ok(clean)) => {
-                        if !clean {
-                            warn!("Infection detected in file: {}", path);
-                            return Ok(false); // Infection found - stop scanning
-                        }
+        }
+        
+        // Process results and spawn remaining
+        while let Some(res) = join_set.join_next().await {
+            match res {
+                Ok(Ok(clean)) => {
+                    if !clean {
+                        warn!("Infection detected in file: {}", path);
+                        join_set.abort_all();
+                        return Ok(false); // Infection found - stop scanning
                     }
-                    Ok(Err(e)) => {
-                        error!("Scan chunk error: {}", e);
-                        return Err(e);
+                    
+                    // Spawn next chunk if available
+                    if let Some(chunk_offset) = offsets_iter.next() {
+                        let path = path.to_string();
+                        let host = self.clamd_host.clone();
+                        let port = self.clamd_port;
+                        
+                        join_set.spawn(async move {
+                            scan_chunk_at_offset(&path, chunk_offset, chunk_size, &host, port).await
+                        });
                     }
-                    Err(e) => {
-                         error!("Scan task failed: {}", e);
-                         return Err(anyhow::anyhow!("Scan task failed: {}", e));
-                    }
+                }
+                Ok(Err(e)) => {
+                    error!("Scan chunk error: {}", e);
+                    join_set.abort_all();
+                    return Err(e);
+                }
+                Err(e) => {
+                     error!("Scan task failed: {}", e);
+                     join_set.abort_all();
+                     return Err(anyhow::anyhow!("Scan task failed: {}", e));
                 }
             }
         }
