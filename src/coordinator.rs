@@ -135,11 +135,14 @@ impl Coordinator {
             }
         };
 
+        let start_time = std::time::Instant::now();
         match self.scanner.scan_file(path).await {
             Ok(true) => {
+                 let duration = start_time.elapsed().as_millis() as i64;
                  let conn = lock_mutex(&self.conn)?;
                  db::update_scan_status(&conn, job.id, "clean", "scanned")?;
-                 db::insert_event(&conn, job.id, "scan", "scan completed")?;
+                 db::update_scan_duration(&conn, job.id, duration)?;
+                 db::insert_event(&conn, job.id, "scan", &format!("scan completed in {}ms", duration))?;
             }
             Ok(false) => {
                  let (quarantine_dir, _delete_source) = {
@@ -194,13 +197,13 @@ impl Coordinator {
             let conn = lock_mutex(&self.conn)?;
             db::update_upload_status(&conn, job.id, "starting", "uploading")?;
         }
-
-        // Register cancellation token
+        
         let cancel_token = Arc::new(AtomicBool::new(false));
         {
             lock_async_mutex(&self.cancellation_tokens).await.insert(job.id, cancel_token.clone());
         }
 
+        let start_time = std::time::Instant::now();
         let res = self.uploader.upload_file(
             &config, 
             &path, 
@@ -219,9 +222,11 @@ impl Coordinator {
         match res {
             Ok(true) => {
                 {
+                    let duration = start_time.elapsed().as_millis() as i64;
                     let conn = lock_mutex(&self.conn)?;
                     db::update_upload_status(&conn, job.id, "completed", "complete")?;
-                    db::insert_event(&conn, job.id, "upload", "upload completed")?;
+                    db::update_upload_duration(&conn, job.id, duration)?;
+                    db::insert_event(&conn, job.id, "upload", &format!("upload completed in {}ms", duration))?;
                 }
                 
                 // Cleanup based on staging mode

@@ -182,3 +182,15 @@ pub fn extract_threat_name(scan_status: &str) -> String {
         "-".to_string()
     }
 }
+
+pub fn format_duration_ms(ms: i64) -> String {
+    if ms < 1000 {
+        format!("{}ms", ms)
+    } else if ms < 60_000 {
+        format!("{}.{}s", ms / 1000, (ms % 1000) / 100)
+    } else if ms < 3600_000 {
+        format!("{}m {}s", ms / 60_000, (ms % 60_000) / 1000)
+    } else {
+        format!("{}h {}m", ms / 3600_000, (ms % 3600_000) / 60_000)
+    }
+}

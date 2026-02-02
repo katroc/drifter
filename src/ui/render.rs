@@ -16,7 +16,7 @@ use crate::utils::lock_mutex;
 use crate::ui::util::{
     centered_rect, centered_fixed_rect, format_bytes, format_bytes_rate,
     format_relative_time, format_size, format_modified, fuzzy_match,
-    status_kind, extract_threat_name, calculate_list_offset
+    status_kind, extract_threat_name, calculate_list_offset, format_duration_ms
 };
 
 
@@ -205,6 +205,7 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
         InputMode::LogSearch => " Search ",
         InputMode::QueueSearch => " Queue (Search) ",
         InputMode::HistorySearch => " History (Search) ",
+        _ => " Hopper ",
     };
     let title = format!("{}{}", title_prefix, path_str);
 
@@ -723,6 +724,20 @@ fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRo
             Span::styled(scan_status, app.theme.text_style()),
         ]),
     ];
+
+    if let Some(ms) = job.scan_duration_ms {
+        text.push(Line::from(vec![
+            Span::styled("Scan Time:   ", app.theme.highlight_style()),
+            Span::styled(format_duration_ms(ms), app.theme.text_style()),
+        ]));
+    }
+    
+    if let Some(ms) = job.upload_duration_ms {
+         text.push(Line::from(vec![
+            Span::styled("Upload Time: ", app.theme.highlight_style()),
+            Span::styled(format_duration_ms(ms), app.theme.text_style()),
+        ]));
+    }
 
     // Show multipart upload progress if job is uploading
     if job.status == "uploading" {
@@ -1455,6 +1470,16 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             key("Esc"),
             act("Exit"),
         ],
+        InputMode::RemoteBrowsing => vec![
+            key("←/→"),
+            act("Navigate"),
+            sep(),
+            key("↑/↓"),
+            act("Select"),
+            sep(),
+            key("Esc"),
+            act("Exit"),
+        ],
         InputMode::Confirmation => vec![Span::styled(
             "Confirmation Required",
             app.theme.muted_style(),
@@ -1621,9 +1646,22 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         "Ready"
     };
 
-    let left_content = Line::from(footer_spans);
+    let is_error = app.status_message.to_lowercase().contains("fail") || app.status_message.to_lowercase().contains("error");
+    let status_style = if is_error {
+        app.theme.status_style(StatusKind::Error)
+    } else {
+        app.theme.status_style(StatusKind::Info)
+    };
 
-    let right_content = Line::from(vec![
+    let mut right_spans = vec![];
+    
+    if !app.status_message.is_empty() && app.status_message != "Ready" {
+        right_spans.push(Span::styled("● ", status_style));
+        right_spans.push(Span::styled(&app.status_message, app.theme.text_style()));
+        right_spans.push(Span::styled("  │  ", app.theme.muted_style()));
+    }
+
+    right_spans.extend(vec![
         Span::styled("ClamAV: ", app.theme.muted_style()),
         Span::styled(
             av_status,
@@ -1672,6 +1710,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             },
         ),
     ]);
+
+    let left_content = Line::from(footer_spans);
+    let right_content = Line::from(right_spans);
 
     let footer_chunks = Layout::default()
         .direction(Direction::Horizontal)
