@@ -140,6 +140,7 @@ pub struct App {
 
     pub last_refresh: Instant,
     pub status_message: String,
+    pub status_message_at: Option<Instant>,
     pub input_mode: InputMode,
     pub input_buffer: String,
     pub history_filter: HistoryFilter,
@@ -243,6 +244,7 @@ impl App {
             
             last_refresh: Instant::now() - Duration::from_secs(5),
             status_message: "Ready".to_string(),
+            status_message_at: None,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             history_filter: HistoryFilter::All,
@@ -325,6 +327,11 @@ impl App {
         app.picker.refresh();
 
         Ok(app)
+    }
+
+    pub fn set_status<S: Into<String>>(&mut self, msg: S) {
+        self.status_message = msg.into();
+        self.status_message_at = Some(Instant::now());
     }
 
     pub fn refresh_jobs(&mut self, conn: &Connection) -> Result<()> {

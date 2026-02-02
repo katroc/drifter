@@ -1646,9 +1646,22 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         "Ready"
     };
 
-    let left_content = Line::from(footer_spans);
+    let is_error = app.status_message.to_lowercase().contains("fail") || app.status_message.to_lowercase().contains("error");
+    let status_style = if is_error {
+        app.theme.status_style(StatusKind::Error)
+    } else {
+        app.theme.status_style(StatusKind::Info)
+    };
 
-    let right_content = Line::from(vec![
+    let mut right_spans = vec![];
+    
+    if !app.status_message.is_empty() && app.status_message != "Ready" {
+        right_spans.push(Span::styled("● ", status_style));
+        right_spans.push(Span::styled(&app.status_message, app.theme.text_style()));
+        right_spans.push(Span::styled("  │  ", app.theme.muted_style()));
+    }
+
+    right_spans.extend(vec![
         Span::styled("ClamAV: ", app.theme.muted_style()),
         Span::styled(
             av_status,
@@ -1697,6 +1710,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             },
         ),
     ]);
+
+    let left_content = Line::from(footer_spans);
+    let right_content = Line::from(right_spans);
 
     let footer_chunks = Layout::default()
         .direction(Direction::Horizontal)

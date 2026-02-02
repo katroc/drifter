@@ -96,6 +96,14 @@ pub async fn run_tui(
                 app.last_metrics_refresh = Instant::now();
         }
 
+        // Status Message Timeout (10s)
+        if let Some(at) = app.status_message_at {
+            if at.elapsed() >= Duration::from_secs(10) {
+                app.status_message = "Ready".to_string();
+                app.status_message_at = None;
+            }
+        }
+
         terminal.draw(|f| crate::ui::ui(f, &app))?;
 
         if app.last_refresh.elapsed() > Duration::from_secs(1) {
@@ -106,10 +114,13 @@ pub async fn run_tui(
         // Check for async messages (e.g. connection tests, S3 lists)
         while let Ok(event) = app.async_rx.try_recv() {
             match event {
-                AppEvent::Notification(msg) => app.status_message = msg,
+                AppEvent::Notification(msg) => {
+                    app.set_status(msg);
+                }
                 AppEvent::RemoteFileList(files) => {
                     app.s3_objects = files;
-                    app.status_message = format!("Loaded {} items from S3", app.s3_objects.len());
+                    let msg = format!("Loaded {} items from S3", app.s3_objects.len());
+                    app.set_status(msg);
                 }
                 AppEvent::LogLine(line) => {
                     app.logs.push_back(line);
@@ -1304,18 +1315,22 @@ pub async fn run_tui(
                                     app.focus = AppFocus::SettingsFields;
                                 }
                                 KeyCode::Char('s') => {
-                                    let mut cfg = app.config.lock().await;
-                                    app.settings.apply_to_config(&mut cfg);
+                                    let res = {
+                                        let mut cfg = app.config.lock().await;
+                                        app.settings.apply_to_config(&mut cfg);
 
-                                    // Apply theme immediately
-                                    app.theme = Theme::from_name(&cfg.theme);
+                                        // Apply theme immediately
+                                        app.theme = Theme::from_name(&cfg.theme);
 
-                                    // Save entire config to database
-                                    let conn = lock_mutex(&conn_mutex)?;
-                                    if let Err(e) = crate::config::save_config_to_db(&conn, &cfg) {
-                                        app.status_message = format!("Save error: {}", e);
+                                        // Save entire config to database
+                                        let conn = lock_mutex(&conn_mutex)?;
+                                        crate::config::save_config_to_db(&conn, &cfg)
+                                    };
+
+                                    if let Err(e) = res {
+                                        app.set_status(format!("Save error: {}", e));
                                     } else {
-                                        app.status_message = "Configuration saved".to_string();
+                                        app.set_status("Configuration saved");
                                     }
                                 }
                                 _ => {}
@@ -1400,13 +1415,15 @@ pub async fn run_tui(
                                         }
 
                                         // Trigger Auto-Save logic immediately
-                                        let mut cfg = app.config.lock().await;
-                                        app.settings.apply_to_config(&mut cfg);
-                                        let conn = lock_mutex(&conn_mutex)?;
-                                        if let Err(e) =
+                                        let res = {
+                                            let mut cfg = app.config.lock().await;
+                                            app.settings.apply_to_config(&mut cfg);
+                                            let conn = lock_mutex(&conn_mutex)?;
                                             crate::config::save_config_to_db(&conn, &cfg)
-                                        {
-                                            app.status_message = format!("Save error: {}", e);
+                                        };
+
+                                        if let Err(e) = res {
+                                            app.set_status(format!("Save error: {}", e));
                                         }
                                     } else {
                                         app.settings.editing = !app.settings.editing;
@@ -1424,19 +1441,13 @@ pub async fn run_tui(
                                             app.settings.original_theme = None;
                                         }
 
-                                        let mut cfg = app.config.lock().await;
-                                        app.settings.apply_to_config(&mut cfg);
+                                        let (res, field_name) = {
+                                            let mut cfg = app.config.lock().await;
+                                            app.settings.apply_to_config(&mut cfg);
 
-                                        // Apply theme immediately
-                                        app.theme = Theme::from_name(&cfg.theme);
+                                            // Apply theme immediately
+                                            app.theme = Theme::from_name(&cfg.theme);
 
-                                        // Save entire config to database
-                                        let conn = lock_mutex(&conn_mutex)?;
-                                        if let Err(e) =
-                                            crate::config::save_config_to_db(&conn, &cfg)
-                                        {
-                                            app.status_message = format!("Save error: {}", e);
-                                        } else {
                                             let field_name = match app.settings.active_category {
                                                 SettingsCategory::S3 => {
                                                     match app.settings.selected_field {
@@ -1461,7 +1472,16 @@ pub async fn run_tui(
                                                 SettingsCategory::Performance => "Performance",
                                                 SettingsCategory::Theme => "Theme",
                                             };
-                                            app.status_message = format!("Saved: {}", field_name);
+
+                                            // Save entire config to database
+                                            let conn = lock_mutex(&conn_mutex)?;
+                                            (crate::config::save_config_to_db(&conn, &cfg), field_name)
+                                        };
+
+                                        if let Err(e) = res {
+                                            app.set_status(format!("Save error: {}", e));
+                                        } else {
+                                            app.set_status(format!("Saved: {}", field_name));
                                         }
                                     }
                                 }
@@ -1645,21 +1665,27 @@ pub async fn run_tui(
                                         app.settings.original_theme = None;
                                     }
 
-                                    let mut cfg = app.config.lock().await;
-                                    app.settings.apply_to_config(&mut cfg);
+                                    let (res, bucket_name) = {
+                                        let mut cfg = app.config.lock().await;
+                                        app.settings.apply_to_config(&mut cfg);
 
-                                    // Apply theme immediately
-                                    app.theme = Theme::from_name(&cfg.theme);
+                                        // Apply theme immediately
+                                        app.theme = Theme::from_name(&cfg.theme);
 
-                                    // Save entire config to database
-                                    let conn = lock_mutex(&conn_mutex)?;
-                                    if let Err(e) = crate::config::save_config_to_db(&conn, &cfg) {
-                                        app.status_message = format!("Save error: {}", e);
+                                        let bucket_name = cfg.s3_bucket.clone();
+
+                                        // Save entire config to database
+                                        let conn = lock_mutex(&conn_mutex)?;
+                                        (crate::config::save_config_to_db(&conn, &cfg), bucket_name)
+                                    };
+
+                                    if let Err(e) = res {
+                                        app.set_status(format!("Save error: {}", e));
                                     } else {
-                                        app.status_message = format!(
+                                        app.set_status(format!(
                                             "Configuration saved. Bucket: {}",
-                                            cfg.s3_bucket.as_deref().unwrap_or("None")
-                                        );
+                                            bucket_name.as_deref().unwrap_or("None")
+                                        ));
                                     }
                                 }
                                 KeyCode::Char('w') if !app.settings.editing => {
@@ -1672,7 +1698,7 @@ pub async fn run_tui(
                                     if cat == SettingsCategory::S3
                                         || cat == SettingsCategory::Scanner
                                     {
-                                        app.status_message = "Testing connection...".to_string();
+                                        app.set_status("Testing connection...");
                                         let tx = app.async_tx.clone();
                                         let config_clone = app.config.lock().await.clone();
 
