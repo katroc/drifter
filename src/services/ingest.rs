@@ -26,7 +26,7 @@ pub async fn ingest_path(
 
     // Determine the base for relative paths
     let base_path = root.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| {
-        if root == PathBuf::from("/") {
+        if root == Path::new("/") {
             PathBuf::from("/")
         } else {
             PathBuf::from(".")
@@ -149,7 +149,7 @@ async fn stage_file(staging_dir: &str, job_id: i64, source: &Path) -> Result<Str
 #[allow(dead_code)]
 pub fn calculate_base_path(root: &Path) -> PathBuf {
     root.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| {
-        if root == PathBuf::from("/") {
+        if root == Path::new("/") {
             PathBuf::from("/")
         } else {
             PathBuf::from(".")

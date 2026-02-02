@@ -347,7 +347,7 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
 
             let mut style = if is_selected {
                 app.theme.selection_style()
-            } else if (visible_idx + offset) % 2 == 0 {
+            } else if (visible_idx + offset).is_multiple_of(2) {
                 app.theme.row_style(false)
             } else {
                 app.theme.row_style(true)

@@ -502,7 +502,7 @@ impl Uploader {
                     );
                 }
 
-                if n >= m_file_size as u64 {
+                if n >= m_file_size {
                     // Don't break, keep updating (likely 0 speeds) until aborted by main thread.
                     // This ensures we don't freeze on stale 'high speed' metrics if finalization takes time.
                 }
