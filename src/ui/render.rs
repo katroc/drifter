@@ -732,6 +732,14 @@ fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRo
             Span::styled(job.source_path.clone(), app.theme.text_style()),
         ]),
         Line::from(vec![
+            Span::styled("Session:", app.theme.highlight_style()),
+            Span::styled(format!(" {}", job.session_id), app.theme.text_style()),
+        ]),
+        Line::from(vec![
+            Span::styled("Report: ", app.theme.highlight_style()),
+            Span::styled(format!(" scan_report_{}.txt", job.session_id), app.theme.text_style()),
+        ]),
+        Line::from(vec![
             Span::styled("Size:   ", app.theme.highlight_style()),
             Span::styled(format_bytes(job.size_bytes as u64), app.theme.text_style()),
         ]),
