@@ -1346,7 +1346,7 @@ pub async fn run_tui(
                             let field_count = match app.settings.active_category {
                                 SettingsCategory::S3 => 6,
                                 SettingsCategory::Scanner => 4,
-                                SettingsCategory::Performance => 6,
+                                SettingsCategory::Performance => 7,
                                 SettingsCategory::Theme => 1,
                             };
                             // Focus-specific rendering logic for fields is handled in render.rs,
@@ -1361,7 +1361,7 @@ pub async fn run_tui(
                                         && app.settings.selected_field == 3)
                                         || (app.settings.active_category
                                             == SettingsCategory::Performance
-                                            && app.settings.selected_field >= 3);
+                                            && app.settings.selected_field >= 4);
 
                                     if is_toggle {
                                         // Handle toggle based on category and field
@@ -1381,7 +1381,7 @@ pub async fn run_tui(
                                                     }
                                                 );
                                             }
-                                            (SettingsCategory::Performance, 3) => {
+                                            (SettingsCategory::Performance, 4) => {
                                                 app.settings.staging_mode_direct =
                                                     !app.settings.staging_mode_direct;
                                                 app.status_message = format!(
@@ -1393,7 +1393,7 @@ pub async fn run_tui(
                                                     }
                                                 );
                                             }
-                                            (SettingsCategory::Performance, 4) => {
+                                            (SettingsCategory::Performance, 5) => {
                                                 app.settings.delete_source_after_upload =
                                                     !app.settings.delete_source_after_upload;
                                                 app.status_message = format!(
@@ -1405,7 +1405,7 @@ pub async fn run_tui(
                                                     }
                                                 );
                                             }
-                                            (SettingsCategory::Performance, 5) => {
+                                            (SettingsCategory::Performance, 6) => {
                                                 app.settings.host_metrics_enabled =
                                                     !app.settings.host_metrics_enabled;
                                                 app.status_message = format!(
@@ -2158,7 +2158,7 @@ pub async fn run_tui(
                                             let count = match app.settings.active_category {
                                                 SettingsCategory::S3 => 6,
                                                 SettingsCategory::Scanner => 4,
-                                                SettingsCategory::Performance => 6,
+                                                SettingsCategory::Performance => 7,
                                                 SettingsCategory::Theme => 1,
                                             };
                                             
@@ -2181,14 +2181,14 @@ pub async fn run_tui(
                                                 app.settings.selected_field = target_idx;
                                                 // Handle boolean toggles on click
                                                 let is_toggle = (app.settings.active_category == SettingsCategory::Scanner && target_idx == 3)
-                                                    || (app.settings.active_category == SettingsCategory::Performance && target_idx >= 3);
+                                                    || (app.settings.active_category == SettingsCategory::Performance && target_idx >= 4);
                                                 
                                                 if is_toggle {
                                                      match (app.settings.active_category, target_idx) {
                                                         (SettingsCategory::Scanner, 3) => { app.settings.scanner_enabled = !app.settings.scanner_enabled; }
-                                                        (SettingsCategory::Performance, 3) => { app.settings.staging_mode_direct = !app.settings.staging_mode_direct; }
-                                                        (SettingsCategory::Performance, 4) => { app.settings.delete_source_after_upload = !app.settings.delete_source_after_upload; }
-                                                        (SettingsCategory::Performance, 5) => { app.settings.host_metrics_enabled = !app.settings.host_metrics_enabled; }
+                                                        (SettingsCategory::Performance, 4) => { app.settings.staging_mode_direct = !app.settings.staging_mode_direct; }
+                                                        (SettingsCategory::Performance, 5) => { app.settings.delete_source_after_upload = !app.settings.delete_source_after_upload; }
+                                                        (SettingsCategory::Performance, 6) => { app.settings.host_metrics_enabled = !app.settings.host_metrics_enabled; }
                                                         _ => {}
                                                      }
                                                      let mut cfg = app.config.lock().await;
