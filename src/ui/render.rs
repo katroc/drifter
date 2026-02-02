@@ -1066,10 +1066,17 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         SettingsCategory::Performance => vec![
             ("Part Size (MB)", app.settings.part_size.as_str()),
             (
-                "Global Concurrency",
+                "Global Upload Concurrency (Files)",
                 app.settings.concurrency_global.as_str(),
             ),
-            ("Scan Concurrency", app.settings.scan_concurrency.as_str()),
+            (
+                "Upload Part Concurrency (Streams/File)",
+                app.settings.concurrency_upload_parts.as_str(),
+            ),
+            (
+                "Scanner Concurrency (Chunks/File)",
+                app.settings.concurrency_scan_parts.as_str(),
+            ),
             (
                 "Staging Mode",
                 if app.settings.staging_mode_direct {

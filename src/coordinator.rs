@@ -22,6 +22,7 @@ pub struct ProgressInfo {
     pub parts_total: usize,
 }
 
+#[derive(Clone)]
 pub struct Coordinator {
     conn: Arc<Mutex<Connection>>,
     config: Arc<AsyncMutex<Config>>,
@@ -94,48 +95,62 @@ impl Coordinator {
             }
         }
 
-        // 2. Find jobs in "queued" state
+        // 2. Try starting scans (Limit: 2 concurrent file scans)
         let scanner_enabled = lock_async_mutex(&self.config).await.scanner_enabled;
-        
-        let queued_job_action = {
+        let active_scans = {
             let conn = lock_mutex(&self.conn)?;
-            if let Some(job) = db::get_next_job(&conn, "queued")? {
-                if scanner_enabled {
-                    db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
-                    Some((job, true))
-                } else {
-                    db::update_upload_status(&conn, job.id, "uploading", "uploading")?;
-                    db::insert_event(&conn, job.id, "scan", "scan skipped by policy")?;
-                    Some((job, false))
-                }
-            } else {
-                None
-            }
+            db::count_jobs_with_status(&conn, "scanning")?
         };
 
-        if let Some((job, is_scan)) = queued_job_action {
-            if is_scan {
-                self.process_scan(&job).await?;
-            } else {
-                self.process_upload(&job).await?;
+        if active_scans < 2 {
+            let queued_job = {
+                let conn = lock_mutex(&self.conn)?;
+                if let Some(job) = db::get_next_job(&conn, "queued")? {
+                    if scanner_enabled {
+                        db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
+                        Some(job)
+                    } else {
+                        db::update_scan_status(&conn, job.id, "skipped", "scanned")?;
+                        db::insert_event(&conn, job.id, "scan", "scan skipped by policy")?;
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+
+            if let Some(job) = queued_job {
+                let coord = self.clone();
+                tokio::spawn(async move {
+                    let _ = coord.process_scan(&job).await;
+                });
             }
-            return Ok(());
         }
 
-        // 3. Find jobs in "scanned" state -> move to "uploading"
-        let scanned_job = {
+        // 3. Try starting uploads
+        let (max_uploads, active_uploads) = {
+            let cfg = lock_async_mutex(&self.config).await;
             let conn = lock_mutex(&self.conn)?;
-            if let Some(job) = db::get_next_job(&conn, "scanned")? {
-                db::update_upload_status(&conn, job.id, "uploading", "uploading")?;
-                Some(job)
-            } else {
-                None
-            }
+            (cfg.concurrency_upload_global, db::count_jobs_with_status(&conn, "uploading")?)
         };
 
-        if let Some(job) = scanned_job {
-            self.process_upload(&job).await?;
-            return Ok(());
+        if active_uploads < max_uploads as i64 {
+            let scanned_job = {
+                let conn = lock_mutex(&self.conn)?;
+                if let Some(job) = db::get_next_job(&conn, "scanned")? {
+                    db::update_upload_status(&conn, job.id, "uploading", "uploading")?;
+                    Some(job)
+                } else {
+                    None
+                }
+            };
+
+            if let Some(job) = scanned_job {
+                let coord = self.clone();
+                tokio::spawn(async move {
+                    let _ = coord.process_upload(&job).await;
+                });
+            }
         }
 
         Ok(())

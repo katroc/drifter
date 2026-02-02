@@ -66,7 +66,8 @@ pub struct Config {
     pub kms_key_id: Option<String>,
     pub part_size_mb: u64,
     pub concurrency_upload_global: usize,
-    pub concurrency_parts_per_file: usize,
+    pub concurrency_upload_parts: usize,
+    pub concurrency_scan_parts: usize,
     #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default = "default_scanner_enabled")]
@@ -118,7 +119,8 @@ impl Default for Config {
             kms_key_id: None,
             part_size_mb: 128,
             concurrency_upload_global: 1,
-            concurrency_parts_per_file: 4,
+            concurrency_upload_parts: 4,
+            concurrency_scan_parts: 4,
             theme: Theme::default_name().to_string(),
             scanner_enabled: true,
             host_metrics_enabled: true,
@@ -189,6 +191,8 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
     // Load secret separately
     let s3_secret_key = db::get_secret(conn, "s3_secret")?;
     
+    let legacy_parts = get_usize("concurrency_parts_per_file", 4);
+    
     Ok(Config {
         staging_dir: get_or("staging_dir", "./staging"),
         quarantine_dir: get_or("quarantine_dir", "./quarantine"),
@@ -215,7 +219,8 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         kms_key_id: get("kms_key_id"),
         part_size_mb: get_u64("part_size_mb", 128),
         concurrency_upload_global: get_usize("concurrency_upload_global", 1),
-        concurrency_parts_per_file: get_usize("concurrency_parts_per_file", 4),
+        concurrency_upload_parts: get_usize("concurrency_upload_parts", legacy_parts),
+        concurrency_scan_parts: get_usize("concurrency_scan_parts", legacy_parts),
         theme: Theme::resolve_name(&get_or("theme", Theme::default_name()))
             .unwrap_or(Theme::default_name())
             .to_string(),
@@ -276,7 +281,8 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
     
     db::set_setting(conn, "part_size_mb", &cfg.part_size_mb.to_string())?;
     db::set_setting(conn, "concurrency_upload_global", &cfg.concurrency_upload_global.to_string())?;
-    db::set_setting(conn, "concurrency_parts_per_file", &cfg.concurrency_parts_per_file.to_string())?;
+    db::set_setting(conn, "concurrency_upload_parts", &cfg.concurrency_upload_parts.to_string())?;
+    db::set_setting(conn, "concurrency_scan_parts", &cfg.concurrency_scan_parts.to_string())?;
     db::set_setting(conn, "theme", &cfg.theme)?;
     db::set_setting(conn, "scanner_enabled", if cfg.scanner_enabled { "true" } else { "false" })?;
     db::set_setting(conn, "host_metrics_enabled", if cfg.host_metrics_enabled { "true" } else { "false" })?;

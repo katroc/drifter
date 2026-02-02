@@ -339,8 +339,9 @@ pub async fn run_tui(
                                             Some(app.wizard.secret_key.clone())
                                         },
                                         part_size_mb: app.wizard.part_size.parse().unwrap_or(64),
-                                        concurrency_upload_global: app.wizard.concurrency.parse().unwrap_or(4),
-                                        concurrency_parts_per_file: 4,
+                                        concurrency_upload_global: app.wizard.concurrency.parse().unwrap_or(1),
+                                        concurrency_upload_parts: 4,
+                                        concurrency_scan_parts: 4,
                                         ..Config::default()
                                     };
 
@@ -1598,7 +1599,10 @@ pub async fn run_tui(
                                             app.settings.concurrency_global.push(c)
                                         }
                                         (SettingsCategory::Performance, 2) => {
-                                            app.settings.scan_concurrency.push(c)
+                                            app.settings.concurrency_upload_parts.push(c)
+                                        }
+                                        (SettingsCategory::Performance, 3) => {
+                                            app.settings.concurrency_scan_parts.push(c)
                                         }
                                         _ => {}
                                     }
@@ -1642,7 +1646,10 @@ pub async fn run_tui(
                                             app.settings.concurrency_global.pop();
                                         }
                                         (SettingsCategory::Performance, 2) => {
-                                            app.settings.scan_concurrency.pop();
+                                            app.settings.concurrency_upload_parts.pop();
+                                        }
+                                        (SettingsCategory::Performance, 3) => {
+                                            app.settings.concurrency_scan_parts.pop();
                                         }
                                         _ => {}
                                     }

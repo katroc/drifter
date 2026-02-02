@@ -20,7 +20,8 @@ pub struct SettingsState {
     pub scan_chunk_size: String,
     pub part_size: String,
     pub concurrency_global: String,
-    pub scan_concurrency: String,
+    pub concurrency_upload_parts: String,
+    pub concurrency_scan_parts: String,
     pub active_category: SettingsCategory,
     pub selected_field: usize,
     pub editing: bool,
@@ -46,7 +47,8 @@ impl SettingsState {
             scan_chunk_size: cfg.scan_chunk_size_mb.to_string(),
             part_size: cfg.part_size_mb.to_string(),
             concurrency_global: cfg.concurrency_upload_global.to_string(),
-            scan_concurrency: cfg.concurrency_parts_per_file.to_string(),
+            concurrency_upload_parts: cfg.concurrency_upload_parts.to_string(),
+            concurrency_scan_parts: cfg.concurrency_scan_parts.to_string(),
             active_category: SettingsCategory::S3,
             selected_field: 0,
             editing: false,
@@ -103,8 +105,11 @@ impl SettingsState {
         if let Ok(v) = self.concurrency_global.trim().parse() {
             cfg.concurrency_upload_global = v;
         }
-        if let Ok(v) = self.scan_concurrency.trim().parse() {
-            cfg.concurrency_parts_per_file = v;
+        if let Ok(v) = self.concurrency_upload_parts.trim().parse() {
+            cfg.concurrency_upload_parts = v;
+        }
+        if let Ok(v) = self.concurrency_scan_parts.trim().parse() {
+            cfg.concurrency_scan_parts = v;
         }
         cfg.theme = self.theme.clone();
         cfg.scanner_enabled = self.scanner_enabled;

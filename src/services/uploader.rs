@@ -40,6 +40,7 @@ pub struct S3Object {
     pub is_dir: bool,
 }
 
+#[derive(Clone)]
 pub struct Uploader {}
 
 impl Uploader {
@@ -241,7 +242,7 @@ impl Uploader {
     ) -> Result<bool> {
         let (client, bucket) = Self::create_client(config).await?;
         let prefix = config.s3_prefix.as_deref().unwrap_or_default();
-        let concurrency = config.concurrency_parts_per_file.max(1);
+        let concurrency = config.concurrency_upload_parts.max(1);
         // create_client already checks bucket
 
 

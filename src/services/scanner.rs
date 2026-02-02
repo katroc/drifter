@@ -28,7 +28,7 @@ impl Scanner {
             clamd_host: config.clamd_host.clone(),
             clamd_port: config.clamd_port,
             scan_chunk_size_mb: config.scan_chunk_size_mb,
-            concurrency: config.concurrency_parts_per_file.max(1),
+            concurrency: config.concurrency_scan_parts.max(1),
         }
     }
 

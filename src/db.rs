@@ -256,6 +256,15 @@ pub fn get_session_jobs(conn: &Connection, session_id: &str) -> Result<Vec<JobRo
     Ok(rows)
 }
 
+pub fn count_jobs_with_status(conn: &Connection, status: &str) -> Result<i64> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE status = ?",
+        params![status],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
 pub fn count_pending_session_jobs(conn: &Connection, session_id: &str) -> Result<i64> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM jobs WHERE session_id = ? AND status NOT IN ('complete', 'quarantined', 'quarantined_removed', 'cancelled', 'failed', 'failed_retryable')",
