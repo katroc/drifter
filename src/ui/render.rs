@@ -1,24 +1,23 @@
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap, Clear},
-    Frame,
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap},
 };
 
-use crate::app::state::{App, AppFocus, AppTab, InputMode, LayoutTarget};
 use crate::app::settings::SettingsCategory;
+use crate::app::state::{App, AppFocus, AppTab, InputMode, LayoutTarget};
 use crate::components::file_picker::FileEntry;
 use crate::components::wizard::WizardStep;
 use crate::ui::theme::{StatusKind, Theme};
 use crate::utils::lock_mutex;
 
 use crate::ui::util::{
-    centered_rect, centered_fixed_rect, format_bytes, format_bytes_rate,
-    format_relative_time, format_size, format_modified, fuzzy_match,
-    status_kind, extract_threat_name, calculate_list_offset, format_duration_ms
+    calculate_list_offset, centered_fixed_rect, centered_rect, extract_threat_name, format_bytes,
+    format_bytes_rate, format_duration_ms, format_modified, format_relative_time, format_size,
+    fuzzy_match, status_kind,
 };
-
 
 pub fn ui(f: &mut Frame, app: &App) {
     if app.show_wizard {
@@ -128,7 +127,7 @@ fn draw_rail(f: &mut Frame, app: &App, area: Rect) {
         app.theme.border_style()
     };
 
-    let items = vec![
+    let items = [
         ("Transfers", AppTab::Transfers),
         ("Remote", AppTab::Remote),
         ("Quarantine", AppTab::Quarantine),
@@ -254,7 +253,9 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
         inner_area.x,
         inner_area.y + if has_filter { 1 } else { 0 },
         inner_area.width,
-        inner_area.height.saturating_sub(if has_filter { 1 } else { 0 }),
+        inner_area
+            .height
+            .saturating_sub(if has_filter { 1 } else { 0 }),
     );
 
     // Live Filtering
@@ -272,17 +273,17 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
             if filter.is_empty() {
                 return true;
             }
-            
+
             if fuzzy_match(&filter, &e.name) {
                 return true;
             }
-            
-            if app.picker.search_recursive {
-                if let Ok(rel_path) = e.path.strip_prefix(&app.picker.cwd) {
-                    return fuzzy_match(&filter, &rel_path.to_string_lossy());
-                }
+
+            if app.picker.search_recursive
+                && let Ok(rel_path) = e.path.strip_prefix(&app.picker.cwd)
+            {
+                return fuzzy_match(&filter, &rel_path.to_string_lossy());
             }
-            
+
             false
         })
         .collect();
@@ -346,7 +347,7 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
 
             let mut style = if is_selected {
                 app.theme.selection_style()
-            } else if (visible_idx + offset) % 2 == 0 {
+            } else if (visible_idx + offset).is_multiple_of(2) {
                 app.theme.row_style(false)
             } else {
                 app.theme.row_style(true)
@@ -397,18 +398,20 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
         .style(app.theme.header_style())
         .height(1);
 
-    let inner_area = Block::default()
-        .borders(Borders::ALL)
-        .inner(area);
+    let inner_area = Block::default().borders(Borders::ALL).inner(area);
 
     let has_filter = !app.queue_search_query.is_empty() || app.input_mode == InputMode::QueueSearch;
-    
+
     if has_filter {
         let filter_line = Line::from(vec![
             Span::styled(" 🔍 Filter: ", app.theme.muted_style()),
             Span::styled(&app.queue_search_query, app.theme.accent_style()),
             Span::styled(
-                if app.input_mode == InputMode::QueueSearch { " █" } else { "" },
+                if app.input_mode == InputMode::QueueSearch {
+                    " █"
+                } else {
+                    ""
+                },
                 app.theme.accent_style(),
             ),
         ]);
@@ -420,14 +423,16 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
         inner_area.x,
         inner_area.y + if has_filter { 1 } else { 0 },
         inner_area.width,
-        inner_area.height.saturating_sub(if has_filter { 1 } else { 0 }),
+        inner_area
+            .height
+            .saturating_sub(if has_filter { 1 } else { 0 }),
     );
 
     let total_rows = app.visual_jobs.len();
     let display_height = table_area.height.saturating_sub(2) as usize; // Header + 1 padding for table border?
-    // Actually, Ratatui Table.block handles its own border. 
+    // Actually, Ratatui Table.block handles its own border.
     // Wait, draw_jobs currently defines its own header row and creates a Table.
-    
+
     let offset = calculate_list_offset(app.selected, total_rows, display_height);
 
     let rows = app
@@ -602,7 +607,9 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
         inner_area.x,
         inner_area.y + if has_filter { 1 } else { 0 },
         inner_area.width,
-        inner_area.height.saturating_sub(if has_filter { 1 } else { 0 }),
+        inner_area
+            .height
+            .saturating_sub(if has_filter { 1 } else { 0 }),
     );
 
     let total_rows = app.visual_history.len();
@@ -642,9 +649,8 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
                 let status_str = match job.status.as_str() {
                     "quarantined" => {
                         if let Some(err) = &job.error {
-                            if err.starts_with("Infected: ") {
+                            if let Some(name) = err.strip_prefix("Infected: ") {
                                 // Extract virus name, maybe truncate if too long
-                                let name = &err[10..];
                                 if name.len() > 15 {
                                     format!("{}...", &name[..14])
                                 } else {
@@ -656,7 +662,7 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
                         } else {
                             "Threat Detected".to_string()
                         }
-                    },
+                    }
                     "quarantined_removed" => "Threat Removed".to_string(),
                     "complete" => "Done".to_string(),
                     s => s.to_string(),
@@ -737,7 +743,10 @@ fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRo
         ]),
         Line::from(vec![
             Span::styled("Report: ", app.theme.highlight_style()),
-            Span::styled(format!(" scan_report_{}.txt", job.session_id), app.theme.text_style()),
+            Span::styled(
+                format!(" scan_report_{}.txt", job.session_id),
+                app.theme.text_style(),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Size:   ", app.theme.highlight_style()),
@@ -755,9 +764,9 @@ fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRo
             Span::styled(format_duration_ms(ms), app.theme.text_style()),
         ]));
     }
-    
+
     if let Some(ms) = job.upload_duration_ms {
-         text.push(Line::from(vec![
+        text.push(Line::from(vec![
             Span::styled("Upload Time: ", app.theme.highlight_style()),
             Span::styled(format_duration_ms(ms), app.theme.text_style()),
         ]));
@@ -770,7 +779,7 @@ fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRo
             if let Some(info_ref) = progress_map.get(&job.id) {
                 // Clone the info so we can drop the lock
                 let info = info_ref.clone();
-                
+
                 if info.parts_total > 0 {
                     let parts_done = info.parts_done;
                     let parts_total = info.parts_total;
@@ -797,7 +806,7 @@ fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRo
                         Span::styled("Parts:  ", app.theme.highlight_style()),
                         Span::styled(bar, app.theme.progress_style()),
                     ]));
-                    
+
                     text.push(Line::from(vec![
                         Span::styled("Detail: ", app.theme.highlight_style()),
                         Span::styled(details, app.theme.text_style()),
@@ -813,22 +822,27 @@ fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRo
                 .status_style(StatusKind::Warning)
                 .add_modifier(Modifier::UNDERLINED),
         )));
-        
-        if let Some(next_retry) = &job.next_retry_at {
-            if let Ok(target) = chrono::DateTime::parse_from_rfc3339(next_retry) {
-                let now = chrono::Utc::now();
-                let diff = target.signed_duration_since(now).num_seconds();
-                let wait_msg = if diff > 0 {
-                    format!("Retrying in {} seconds (Attempt {}/{})", diff, job.retry_count + 1, 5)
-                } else {
-                    "Retrying momentarily...".to_string()
-                };
-                
-                text.push(Line::from(vec![
-                    Span::styled("Status: ", app.theme.highlight_style()),
-                    Span::styled(wait_msg, app.theme.status_style(StatusKind::Warning)),
-                ]));
-            }
+
+        if let Some(next_retry) = &job.next_retry_at
+            && let Ok(target) = chrono::DateTime::parse_from_rfc3339(next_retry)
+        {
+            let now = chrono::Utc::now();
+            let diff = target.signed_duration_since(now).num_seconds();
+            let wait_msg = if diff > 0 {
+                format!(
+                    "Retrying in {} seconds (Attempt {}/{})",
+                    diff,
+                    job.retry_count + 1,
+                    5
+                )
+            } else {
+                "Retrying momentarily...".to_string()
+            };
+
+            text.push(Line::from(vec![
+                Span::styled("Status: ", app.theme.highlight_style()),
+                Span::styled(wait_msg, app.theme.status_style(StatusKind::Warning)),
+            ]));
         }
     }
 
@@ -839,10 +853,10 @@ fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRo
             .highlight_style()
             .add_modifier(Modifier::UNDERLINED),
     )));
-    
+
     let local_checksum = job.checksum.as_deref().unwrap_or("Calculating...");
     let remote_checksum = job.remote_checksum.as_deref().unwrap_or("Not uploaded");
-    
+
     let remote_style = if job.status == "complete" && job.remote_checksum.is_some() {
         app.theme.status_style(StatusKind::Success)
     } else {
@@ -1023,9 +1037,6 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         .style(app.theme.panel_style());
     let sidebar = List::new(cat_items).block(sidebar_block);
     f.render_widget(sidebar, main_layout[0]);
-
-
-
 
     let fields_area = main_layout[1];
     let display_height = fields_area.height as usize;
@@ -1453,11 +1464,12 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let act = |a: &str| Span::styled(format!(" {}", a), app.theme.muted_style());
 
     let footer_spans = match app.input_mode {
-
-
         InputMode::LogSearch => vec![
-            key("Enter"), act("Search"), sep(),
-            key("Esc"), act("Cancel"),
+            key("Enter"),
+            act("Search"),
+            sep(),
+            key("Esc"),
+            act("Cancel"),
         ],
         InputMode::QueueSearch | InputMode::HistorySearch => vec![
             key("Type"),
@@ -1531,153 +1543,168 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             key("q"),
             act("Cancel"),
         ],
-        InputMode::Normal => if app.current_tab == AppTab::Remote {
-             vec![
-                 key("r"), act("Refresh"), sep(),
-                 key("d"), act("Download"), sep(),
-                 key("x"), act("Delete"), sep(),
-                 key("Tab"), act("Nav"),
-             ]
-        } else { match app.focus {
-            AppFocus::Logs => vec![
-                key("q"), act("Back"),
-            ],
-            AppFocus::Rail => vec![
-                key("Tab/→"),
-                act("Content"),
-                sep(),
-                key("↑/↓"),
-                act("Switch Tab"),
-                sep(),
-                key("q"),
-                act("Quit"),
-            ],
-            AppFocus::Browser => vec![
-                key("↑/↓"),
-                act("Select"),
-                sep(),
-                key("a"),
-                act("Browse"),
-                sep(),
-                key("Tab"),
-                act("Next Panel"),
-            ],
-            AppFocus::Queue => vec![
-                key("↑/↓"),
-                act("Select"),
-                sep(),
-                key("p"),
-                act("Pause/Resume"),
-                sep(),
-                key("+/-"),
-                act("Priority"),
-                sep(),
-                key("Enter"),
-                act("Details"),
-                sep(),
-                key("c"),
-                act("Clear Done"),
-                sep(),
-                key("r"),
-                act("Retry"),
-                sep(),
-                key("←/→"),
-                act("Nav"),
-                sep(),
-                key("d"),
-                act("Cancel"),
-            ],
-            AppFocus::History => vec![key("Tab"), act("Rail"), sep(), key("←"), act("Queue")],
-            AppFocus::Remote => vec![ // Handled by AppTab::Remote above mostly, but kept for completeness if needed
-                 key("Tab"), act("Rail"),
-            ],
-            AppFocus::Quarantine => vec![
-                key("Tab"),
-                act("Rail"),
-                sep(),
-                key("←"),
-                act("Rail"),
-                sep(),
-                key("d"),
-                act("Clear"),
-                sep(),
-                key("R"),
-                act("Refresh"),
-            ],
-            AppFocus::SettingsCategory => match app.settings.active_category {
-                SettingsCategory::S3 | SettingsCategory::Scanner => vec![
-                    key("Tab/→"),
-                    act("Fields"),
+        InputMode::Normal => {
+            if app.current_tab == AppTab::Remote {
+                vec![
+                    key("r"),
+                    act("Refresh"),
                     sep(),
-                    key("←"),
-                    act("Rail"),
+                    key("d"),
+                    act("Download"),
                     sep(),
-                    key("↑/↓"),
-                    act("Category"),
+                    key("x"),
+                    act("Delete"),
                     sep(),
-                    key("s"),
-                    act("Save"),
-                    sep(),
-                    key("t"),
-                    act("Test"),
-                ],
-                _ => vec![
-                    key("Tab/→"),
-                    act("Fields"),
-                    sep(),
-                    key("←"),
-                    act("Rail"),
-                    sep(),
-                    key("↑/↓"),
-                    act("Category"),
-                    sep(),
-                    key("s"),
-                    act("Save"),
-                ],
-            },
-            AppFocus::SettingsFields => match app.settings.active_category {
-                SettingsCategory::S3 | SettingsCategory::Scanner => vec![
                     key("Tab"),
-                    act("Rail"),
-                    sep(),
-                    key("←"),
-                    act("Category"),
-                    sep(),
-                    key("Enter"),
-                    act("Edit"),
-                    sep(),
-                    key("s"),
-                    act("Save"),
-                    sep(),
-                    key("t"),
-                    act("Test"),
-                ],
-                _ => vec![
-                    key("Tab"),
-                    act("Rail"),
-                    sep(),
-                    key("←"),
-                    act("Category"),
-                    sep(),
-                    key("Enter"),
-                    act("Edit"),
-                    sep(),
-                    key("s"),
-                    act("Save"),
-                ],
-            },
+                    act("Nav"),
+                ]
+            } else {
+                match app.focus {
+                    AppFocus::Logs => vec![key("q"), act("Back")],
+                    AppFocus::Rail => vec![
+                        key("Tab/→"),
+                        act("Content"),
+                        sep(),
+                        key("↑/↓"),
+                        act("Switch Tab"),
+                        sep(),
+                        key("q"),
+                        act("Quit"),
+                    ],
+                    AppFocus::Browser => vec![
+                        key("↑/↓"),
+                        act("Select"),
+                        sep(),
+                        key("a"),
+                        act("Browse"),
+                        sep(),
+                        key("Tab"),
+                        act("Next Panel"),
+                    ],
+                    AppFocus::Queue => vec![
+                        key("↑/↓"),
+                        act("Select"),
+                        sep(),
+                        key("p"),
+                        act("Pause/Resume"),
+                        sep(),
+                        key("+/-"),
+                        act("Priority"),
+                        sep(),
+                        key("Enter"),
+                        act("Details"),
+                        sep(),
+                        key("c"),
+                        act("Clear Done"),
+                        sep(),
+                        key("r"),
+                        act("Retry"),
+                        sep(),
+                        key("←/→"),
+                        act("Nav"),
+                        sep(),
+                        key("d"),
+                        act("Cancel"),
+                    ],
+                    AppFocus::History => {
+                        vec![key("Tab"), act("Rail"), sep(), key("←"), act("Queue")]
+                    }
+                    AppFocus::Remote => vec![
+                        // Handled by AppTab::Remote above mostly, but kept for completeness if needed
+                        key("Tab"),
+                        act("Rail"),
+                    ],
+                    AppFocus::Quarantine => vec![
+                        key("Tab"),
+                        act("Rail"),
+                        sep(),
+                        key("←"),
+                        act("Rail"),
+                        sep(),
+                        key("d"),
+                        act("Clear"),
+                        sep(),
+                        key("R"),
+                        act("Refresh"),
+                    ],
+                    AppFocus::SettingsCategory => match app.settings.active_category {
+                        SettingsCategory::S3 | SettingsCategory::Scanner => vec![
+                            key("Tab/→"),
+                            act("Fields"),
+                            sep(),
+                            key("←"),
+                            act("Rail"),
+                            sep(),
+                            key("↑/↓"),
+                            act("Category"),
+                            sep(),
+                            key("s"),
+                            act("Save"),
+                            sep(),
+                            key("t"),
+                            act("Test"),
+                        ],
+                        _ => vec![
+                            key("Tab/→"),
+                            act("Fields"),
+                            sep(),
+                            key("←"),
+                            act("Rail"),
+                            sep(),
+                            key("↑/↓"),
+                            act("Category"),
+                            sep(),
+                            key("s"),
+                            act("Save"),
+                        ],
+                    },
+                    AppFocus::SettingsFields => match app.settings.active_category {
+                        SettingsCategory::S3 | SettingsCategory::Scanner => vec![
+                            key("Tab"),
+                            act("Rail"),
+                            sep(),
+                            key("←"),
+                            act("Category"),
+                            sep(),
+                            key("Enter"),
+                            act("Edit"),
+                            sep(),
+                            key("s"),
+                            act("Save"),
+                            sep(),
+                            key("t"),
+                            act("Test"),
+                        ],
+                        _ => vec![
+                            key("Tab"),
+                            act("Rail"),
+                            sep(),
+                            key("←"),
+                            act("Category"),
+                            sep(),
+                            key("Enter"),
+                            act("Edit"),
+                            sep(),
+                            key("s"),
+                            act("Save"),
+                        ],
+                    },
+                }
+            }
         }
-        },
     };
 
-    let av_status = lock_mutex(&app.clamav_status).map(|s| s.clone()).unwrap_or("Unknown".to_string());
+    let av_status = lock_mutex(&app.clamav_status)
+        .map(|s| s.clone())
+        .unwrap_or("Unknown".to_string());
     let s3_status = if app.settings.bucket.is_empty() {
         "Not Configured"
     } else {
         "Ready"
     };
 
-    let is_error = app.status_message.to_lowercase().contains("fail") || app.status_message.to_lowercase().contains("error");
+    let is_error = app.status_message.to_lowercase().contains("fail")
+        || app.status_message.to_lowercase().contains("error");
     let status_style = if is_error {
         app.theme.status_style(StatusKind::Error)
     } else {
@@ -1685,7 +1712,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let mut right_spans = vec![];
-    
+
     if !app.status_message.is_empty() && app.status_message != "Ready" {
         right_spans.push(Span::styled("● ", status_style));
         right_spans.push(Span::styled(&app.status_message, app.theme.text_style()));
@@ -1696,7 +1723,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("ClamAV: ", app.theme.muted_style()),
         Span::styled(
             av_status,
-            if lock_mutex(&app.clamav_status).map(|s| s.contains("Ready")).unwrap_or(false) {
+            if lock_mutex(&app.clamav_status)
+                .map(|s| s.contains("Ready"))
+                .unwrap_or(false)
+            {
                 app.theme.status_style(StatusKind::Success)
             } else {
                 app.theme.status_style(StatusKind::Warning)
@@ -1930,5 +1960,3 @@ fn draw_metrics_panel(f: &mut Frame, app: &App, area: Rect) {
     ];
     f.render_widget(Paragraph::new(net_content), chunks[1]);
 }
-
-

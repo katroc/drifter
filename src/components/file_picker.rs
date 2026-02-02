@@ -33,6 +33,12 @@ pub struct FilePicker {
     pub is_searching: bool,
 }
 
+impl Default for FilePicker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FilePicker {
     pub fn new() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -96,7 +102,7 @@ impl FilePicker {
         if self.selected >= self.entries.len() {
             self.selected = self.entries.len().saturating_sub(1);
         }
-        
+
         // Auto-select first item if we just loaded and have no selection (or if 0 is "..")
         if self.selected == 0 && self.entries.len() > 1 && self.entries[0].name == ".." {
             // Skip '..' parent on initial load
@@ -336,17 +342,17 @@ impl FilePicker {
     pub fn toggle_expand(&mut self) {
         let entry = self.selected_entry().cloned();
         if let Some(entry) = entry
-            && entry.is_dir && !entry.is_parent
+            && entry.is_dir
+            && !entry.is_parent
         {
-                if self.expanded.contains(&entry.path) {
-                    self.expanded.remove(&entry.path);
-                } else {
-                    self.expanded.insert(entry.path);
-                }
-                if self.view == PickerView::Tree {
-                    self.refresh();
-                }
-
+            if self.expanded.contains(&entry.path) {
+                self.expanded.remove(&entry.path);
+            } else {
+                self.expanded.insert(entry.path);
+            }
+            if self.view == PickerView::Tree {
+                self.refresh();
+            }
         }
     }
 

@@ -192,7 +192,9 @@ impl Theme {
     }
 
     pub fn border_active_style(&self) -> Style {
-        Style::default().fg(self.accent).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.accent)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn text_style(&self) -> Style {
@@ -208,7 +210,9 @@ impl Theme {
     }
 
     pub fn highlight_style(&self) -> Style {
-        Style::default().fg(self.highlight).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.highlight)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn accent_style(&self) -> Style {
@@ -238,11 +242,12 @@ impl Theme {
     }
 
     pub fn row_style(&self, alt: bool) -> Style {
-        Style::default()
-            .fg(self.fg)
-            .bg(if alt { self.table_row_alt_bg } else { self.panel_bg })
+        Style::default().fg(self.fg).bg(if alt {
+            self.table_row_alt_bg
+        } else {
+            self.panel_bg
+        })
     }
-
 
     pub fn input_style(&self, active: bool) -> Style {
         let mut style = Style::default().fg(self.input_fg).bg(self.input_bg);

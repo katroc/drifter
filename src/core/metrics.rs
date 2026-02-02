@@ -7,7 +7,6 @@ pub struct HostMetricsSnapshot {
     pub disk_write_bytes_sec: u64,
     pub net_tx_bytes_sec: u64,
     pub net_rx_bytes_sec: u64,
-
 }
 
 pub struct MetricsCollector {
@@ -17,17 +16,23 @@ pub struct MetricsCollector {
     last_update: Instant,
 }
 
+impl Default for MetricsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetricsCollector {
     pub fn new() -> Self {
         let mut sys = System::new_all();
         let mut networks = Networks::new_with_refreshed_list();
-        
+
         // Initial refresh to establish baseline
         sys.refresh_cpu_all();
         sys.refresh_memory();
         sys.refresh_processes(ProcessesToUpdate::All, true);
         networks.refresh();
-        
+
         Self {
             sys,
             networks,
@@ -39,7 +44,7 @@ impl MetricsCollector {
     pub fn refresh(&mut self) -> HostMetricsSnapshot {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_update).as_secs_f64();
-        
+
         // Avoid division by zero or extremely fast refreshes
         if elapsed < 0.1 {
             return self.last_snapshot.clone();
@@ -47,7 +52,7 @@ impl MetricsCollector {
 
         // 1. Refresh Networks
         self.networks.refresh();
-        
+
         // 2. Refresh Processes (for disk usage)
         self.sys.refresh_processes(ProcessesToUpdate::All, true);
 
@@ -79,7 +84,7 @@ impl MetricsCollector {
             net_tx_bytes_sec: tx_rate,
             net_rx_bytes_sec: rx_rate,
         };
-        
+
         self.last_update = now;
         self.last_snapshot.clone()
     }

@@ -1,18 +1,18 @@
 use crate::core::config::Config;
 use crate::db::{self, JobRow};
-use crate::services::scanner::{Scanner, ScanResult};
+use crate::services::scanner::{ScanResult, Scanner};
 use crate::services::uploader::Uploader;
 use anyhow::Result;
 use rusqlite::Connection;
-use std::sync::{Arc, Mutex};
-use tokio::sync::Mutex as AsyncMutex;
-use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::Mutex as AsyncMutex;
 
+use crate::utils::{lock_async_mutex, lock_mutex};
 use std::collections::HashMap;
-use crate::utils::{lock_mutex, lock_async_mutex};
-use tracing::{info, error};
+use tracing::{error, info};
 
 #[derive(Debug, Clone)]
 pub struct ProgressInfo {
@@ -33,22 +33,34 @@ pub struct Coordinator {
 }
 
 impl Coordinator {
-    pub fn new(conn: Arc<Mutex<Connection>>, config: Arc<AsyncMutex<Config>>, progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>, cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>) -> Result<Self> {
+    pub fn new(
+        conn: Arc<Mutex<Connection>>,
+        config: Arc<AsyncMutex<Config>>,
+        progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>,
+        cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
+    ) -> Result<Self> {
         // We need lock to init scanner/uploader but they are just helpers now or cheap to init
-        // Note: Initializing services might need config, but for now we assume they don't deep copy config state 
+        // Note: Initializing services might need config, but for now we assume they don't deep copy config state
         // OR we need to async lock here. But new() is sync.
         // Scanner/Uploader::new take &Config.
         // Block on the lock since we are in initialization phase (likely sync main) or create detached?
         // Actually Uploader::new takes &Config but just creates Self {}. It doesn't use it.
         // Scanner::new takes &Config and stores clamav host/port.
         // We need to peek at config.
-        
+
         let cfg = futures::executor::block_on(config.lock());
         let scanner = Scanner::new(&cfg);
         let uploader = Uploader::new(&cfg);
         drop(cfg);
-        
-        Ok(Self { conn, config, scanner, uploader, progress, cancellation_tokens })
+
+        Ok(Self {
+            conn,
+            config,
+            scanner,
+            uploader,
+            progress,
+            cancellation_tokens,
+        })
     }
 
     pub async fn run(&self) {
@@ -82,15 +94,29 @@ impl Coordinator {
             let conn = lock_mutex(&self.conn)?;
             if let Ok(retry_jobs) = db::list_retryable_jobs(&conn) {
                 for job in retry_jobs {
-                    let next_status = if job.scan_status.as_deref() == Some("clean") || job.scan_status.as_deref() == Some("scanned") {
+                    let next_status = if job.scan_status.as_deref() == Some("clean")
+                        || job.scan_status.as_deref() == Some("scanned")
+                    {
                         "scanned"
                     } else {
                         "queued"
                     };
-                    
+
                     info!("Retrying job {} (Attempt #{})", job.id, job.retry_count + 1);
-                    db::update_job_retry_state(&conn, job.id, job.retry_count + 1, None, next_status, "Retrying...")?;
-                    db::insert_event(&conn, job.id, "retry", &format!("Auto-retry attempt #{}", job.retry_count + 1))?;
+                    db::update_job_retry_state(
+                        &conn,
+                        job.id,
+                        job.retry_count + 1,
+                        None,
+                        next_status,
+                        "Retrying...",
+                    )?;
+                    db::insert_event(
+                        &conn,
+                        job.id,
+                        "retry",
+                        &format!("Auto-retry attempt #{}", job.retry_count + 1),
+                    )?;
                 }
             }
         }
@@ -131,7 +157,10 @@ impl Coordinator {
         let (max_uploads, active_uploads) = {
             let cfg = lock_async_mutex(&self.config).await;
             let conn = lock_mutex(&self.conn)?;
-            (cfg.concurrency_upload_global, db::count_jobs_with_status(&conn, "uploading")?)
+            (
+                cfg.concurrency_upload_global,
+                db::count_jobs_with_status(&conn, "uploading")?,
+            )
         };
 
         if active_uploads < max_uploads as i64 {
@@ -160,63 +189,86 @@ impl Coordinator {
         let path = match &job.staged_path {
             Some(p) => p,
             None => {
-                 let conn = lock_mutex(&self.conn)?;
-                 db::update_job_error(&conn, job.id, "failed", "no staged path")?;
-                 return Ok(());
+                let conn = lock_mutex(&self.conn)?;
+                db::update_job_error(&conn, job.id, "failed", "no staged path")?;
+                return Ok(());
             }
         };
 
         let start_time = std::time::Instant::now();
         match self.scanner.scan_file(path).await {
             Ok(ScanResult::Clean) => {
-                 let duration = start_time.elapsed().as_millis() as i64;
-                 let conn = lock_mutex(&self.conn)?;
-                 db::update_scan_status(&conn, job.id, "clean", "scanned")?;
-                 db::update_scan_duration(&conn, job.id, duration)?;
-                 db::insert_event(&conn, job.id, "scan", &format!("scan completed in {}ms", duration))?;
+                let duration = start_time.elapsed().as_millis() as i64;
+                let conn = lock_mutex(&self.conn)?;
+                db::update_scan_status(&conn, job.id, "clean", "scanned")?;
+                db::update_scan_duration(&conn, job.id, duration)?;
+                db::insert_event(
+                    &conn,
+                    job.id,
+                    "scan",
+                    &format!("scan completed in {}ms", duration),
+                )?;
             }
             Ok(ScanResult::Infected(virus_name)) => {
-                 let (quarantine_dir, _delete_source) = {
+                let (quarantine_dir, _delete_source) = {
                     let cfg = lock_async_mutex(&self.config).await;
-                    (PathBuf::from(&cfg.quarantine_dir), cfg.delete_source_after_upload)
-                 };
-                 
-                 if !quarantine_dir.exists() {
-                     let _ = std::fs::create_dir_all(&quarantine_dir);
-                 }
-                 
-                 let file_name = std::path::Path::new(path).file_name();
-                 let mut quarantine_path_str = String::new();
-                 
-                 if let Some(fname) = file_name {
-                     let dest = quarantine_dir.join(fname);
-                     if let Err(e) = std::fs::rename(path, &dest) {
-                         eprintln!("Failed to quarantine file: {}", e);
-                     } else {
-                         quarantine_path_str = dest.to_string_lossy().to_string();
-                     }
-                 }
+                    (
+                        PathBuf::from(&cfg.quarantine_dir),
+                        cfg.delete_source_after_upload,
+                    )
+                };
 
-                 {
-                     let conn = lock_mutex(&self.conn)?;
-                     db::update_scan_status(&conn, job.id, "infected", "quarantined")?;
-                     
-                     // Store virus name in error column so it appears in details
-                     db::update_job_error(&conn, job.id, "quarantined", &format!("Infected: {}", virus_name))?;
-                     
-                     if !quarantine_path_str.is_empty() {
-                         let _ = db::update_job_staged(&conn, job.id, &quarantine_path_str, "quarantined");
-                     }
-                     db::insert_event(&conn, job.id, "scan", &format!("scan failed: infected with {}", virus_name))?;
-                 }
-                 self.check_and_report(&job.session_id).await?;
+                if !quarantine_dir.exists() {
+                    let _ = std::fs::create_dir_all(&quarantine_dir);
+                }
+
+                let file_name = std::path::Path::new(path).file_name();
+                let mut quarantine_path_str = String::new();
+
+                if let Some(fname) = file_name {
+                    let dest = quarantine_dir.join(fname);
+                    if let Err(e) = std::fs::rename(path, &dest) {
+                        eprintln!("Failed to quarantine file: {}", e);
+                    } else {
+                        quarantine_path_str = dest.to_string_lossy().to_string();
+                    }
+                }
+
+                {
+                    let conn = lock_mutex(&self.conn)?;
+                    db::update_scan_status(&conn, job.id, "infected", "quarantined")?;
+
+                    // Store virus name in error column so it appears in details
+                    db::update_job_error(
+                        &conn,
+                        job.id,
+                        "quarantined",
+                        &format!("Infected: {}", virus_name),
+                    )?;
+
+                    if !quarantine_path_str.is_empty() {
+                        let _ = db::update_job_staged(
+                            &conn,
+                            job.id,
+                            &quarantine_path_str,
+                            "quarantined",
+                        );
+                    }
+                    db::insert_event(
+                        &conn,
+                        job.id,
+                        "scan",
+                        &format!("scan failed: infected with {}", virus_name),
+                    )?;
+                }
+                self.check_and_report(&job.session_id).await?;
             }
             Err(e) => {
-                 {
-                     let conn = lock_mutex(&self.conn)?;
-                     db::update_job_error(&conn, job.id, "failed", &format!("scan error: {}", e))?;
-                 }
-                 self.check_and_report(&job.session_id).await?;
+                {
+                    let conn = lock_mutex(&self.conn)?;
+                    db::update_job_error(&conn, job.id, "failed", &format!("scan error: {}", e))?;
+                }
+                self.check_and_report(&job.session_id).await?;
             }
         }
         Ok(())
@@ -224,10 +276,10 @@ impl Coordinator {
 
     async fn process_upload(&self, job: &JobRow) -> Result<()> {
         let path = match &job.staged_path {
-             Some(p) => p.clone(),
-             None => return Ok(()),
+            Some(p) => p.clone(),
+            None => return Ok(()),
         };
-        
+
         let config = {
             let config_guard = lock_async_mutex(&self.config).await;
             config_guard.clone()
@@ -238,26 +290,33 @@ impl Coordinator {
             let conn = lock_mutex(&self.conn)?;
             db::update_upload_status(&conn, job.id, "starting", "uploading")?;
         }
-        
+
         let cancel_token = Arc::new(AtomicBool::new(false));
         {
-            lock_async_mutex(&self.cancellation_tokens).await.insert(job.id, cancel_token.clone());
+            lock_async_mutex(&self.cancellation_tokens)
+                .await
+                .insert(job.id, cancel_token.clone());
         }
 
         let start_time = std::time::Instant::now();
-        let res = self.uploader.upload_file(
-            &config, 
-            &path, 
-            job.id, 
-            self.progress.clone(),
-            self.conn.clone(),
-            job.s3_upload_id.clone(),
-            cancel_token
-        ).await;
-        
+        let res = self
+            .uploader
+            .upload_file(
+                &config,
+                &path,
+                job.id,
+                self.progress.clone(),
+                self.conn.clone(),
+                job.s3_upload_id.clone(),
+                cancel_token,
+            )
+            .await;
+
         // Remove token
         {
-            lock_async_mutex(&self.cancellation_tokens).await.remove(&job.id);
+            lock_async_mutex(&self.cancellation_tokens)
+                .await
+                .remove(&job.id);
         }
 
         match res {
@@ -267,9 +326,14 @@ impl Coordinator {
                     let conn = lock_mutex(&self.conn)?;
                     db::update_upload_status(&conn, job.id, "completed", "complete")?;
                     db::update_upload_duration(&conn, job.id, duration)?;
-                    db::insert_event(&conn, job.id, "upload", &format!("upload completed in {}ms", duration))?;
+                    db::insert_event(
+                        &conn,
+                        job.id,
+                        "upload",
+                        &format!("upload completed in {}ms", duration),
+                    )?;
                 }
-                
+
                 // Cleanup based on staging mode
                 use crate::core::config::StagingMode;
                 let staged_path = std::path::Path::new(&path);
@@ -277,7 +341,7 @@ impl Coordinator {
                     StagingMode::Copy => {
                         let _ = std::fs::remove_file(staged_path);
                         if let Some(parent) = staged_path.parent() {
-                            let _ = std::fs::remove_dir(parent); 
+                            let _ = std::fs::remove_dir(parent);
                         }
                     }
                     StagingMode::Direct => {
@@ -286,7 +350,7 @@ impl Coordinator {
                         }
                     }
                 }
-                
+
                 self.check_and_report(&job.session_id).await?;
             }
             Ok(false) => {
@@ -298,9 +362,9 @@ impl Coordinator {
                         .unwrap_or_else(|| "unknown".to_string());
 
                     if current_status == "paused" {
-                         db::insert_event(&conn, job.id, "upload", "upload paused")?;
+                        db::insert_event(&conn, job.id, "upload", "upload paused")?;
                     } else {
-                         db::insert_event(&conn, job.id, "upload", "upload cancelled")?;
+                        db::insert_event(&conn, job.id, "upload", "upload cancelled")?;
                     }
                 }
                 self.check_and_report(&job.session_id).await?;
@@ -311,26 +375,43 @@ impl Coordinator {
                     let conn = lock_mutex(&self.conn)?;
                     if job.retry_count < max_retries {
                         // Exponential backoff: 5s, 10s, 20s, 40s, 80s
-                        let backoff_secs = 5 * (2_u64.pow(job.retry_count as u32));
-                        let next_retry = chrono::Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                        let backoff_secs = Self::calculate_backoff_seconds(job.retry_count);
+                        let next_retry =
+                            chrono::Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
                         let next_retry_str = next_retry.to_rfc3339();
-                        
-                        error!("Upload failed for job {}: {}. Retrying in {}s...", job.id, e, backoff_secs);
-                        
+
+                        error!(
+                            "Upload failed for job {}: {}. Retrying in {}s...",
+                            job.id, e, backoff_secs
+                        );
+
                         db::update_job_retry_state(
-                            &conn, 
-                            job.id, 
-                            job.retry_count, 
-                            Some(&next_retry_str), 
-                            "retry_pending", 
-                            &format!("Failed: {}. Retry pending.", e)
+                            &conn,
+                            job.id,
+                            job.retry_count,
+                            Some(&next_retry_str),
+                            "retry_pending",
+                            &format!("Failed: {}. Retry pending.", e),
                         )?;
-                        
-                        db::insert_event(&conn, job.id, "retry_scheduled", &format!("Scheduled retry in {}s", backoff_secs))?;
+
+                        db::insert_event(
+                            &conn,
+                            job.id,
+                            "retry_scheduled",
+                            &format!("Scheduled retry in {}s", backoff_secs),
+                        )?;
                         false
                     } else {
-                        error!("Upload failed for job {} after {} retries: {}", job.id, job.retry_count, e);
-                        db::update_job_error(&conn, job.id, "failed", &format!("Max retries exceeded. Error: {}", e))?;
+                        error!(
+                            "Upload failed for job {} after {} retries: {}",
+                            job.id, job.retry_count, e
+                        );
+                        db::update_job_error(
+                            &conn,
+                            job.id,
+                            "failed",
+                            &format!("Max retries exceeded. Error: {}", e),
+                        )?;
                         true
                     }
                 };
@@ -340,11 +421,112 @@ impl Coordinator {
                 }
             }
         }
-        
+
         // Check for report if we failed permanently (max retries)
         // We can't do it easily inside the match arm above without refactoring the if/else or using drop.
         // But wait, I need to check report only on failure terminal state.
-        
+
         Ok(())
+    }
+
+    /// Calculate exponential backoff delay in seconds
+    /// Formula: 5 * (2^retry_count)
+    /// Results: 5s, 10s, 20s, 40s, 80s...
+    pub fn calculate_backoff_seconds(retry_count: i64) -> u64 {
+        5 * (2_u64.pow(retry_count as u32))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Exponential Backoff Tests ---
+
+    #[test]
+    fn test_calculate_backoff_first_retry() {
+        let backoff = Coordinator::calculate_backoff_seconds(0);
+        assert_eq!(backoff, 5, "First retry should wait 5 seconds");
+    }
+
+    #[test]
+    fn test_calculate_backoff_second_retry() {
+        let backoff = Coordinator::calculate_backoff_seconds(1);
+        assert_eq!(backoff, 10, "Second retry should wait 10 seconds");
+    }
+
+    #[test]
+    fn test_calculate_backoff_third_retry() {
+        let backoff = Coordinator::calculate_backoff_seconds(2);
+        assert_eq!(backoff, 20, "Third retry should wait 20 seconds");
+    }
+
+    #[test]
+    fn test_calculate_backoff_fourth_retry() {
+        let backoff = Coordinator::calculate_backoff_seconds(3);
+        assert_eq!(backoff, 40, "Fourth retry should wait 40 seconds");
+    }
+
+    #[test]
+    fn test_calculate_backoff_fifth_retry() {
+        let backoff = Coordinator::calculate_backoff_seconds(4);
+        assert_eq!(backoff, 80, "Fifth retry should wait 80 seconds");
+    }
+
+    #[test]
+    fn test_calculate_backoff_sequence() {
+        // Verify the complete retry sequence: 5s, 10s, 20s, 40s, 80s
+        let expected = [5, 10, 20, 40, 80];
+
+        for (retry_count, expected_delay) in expected.iter().enumerate() {
+            let backoff = Coordinator::calculate_backoff_seconds(retry_count as i64);
+            assert_eq!(
+                backoff, *expected_delay,
+                "Retry {} should have backoff of {}s, got {}s",
+                retry_count, expected_delay, backoff
+            );
+        }
+    }
+
+    #[test]
+    fn test_calculate_backoff_doubles_each_time() {
+        // Verify exponential growth property
+        for retry_count in 0..5 {
+            let current = Coordinator::calculate_backoff_seconds(retry_count);
+            let next = Coordinator::calculate_backoff_seconds(retry_count + 1);
+
+            assert_eq!(
+                next,
+                current * 2,
+                "Backoff should double: retry {} = {}s, retry {} = {}s",
+                retry_count,
+                current,
+                retry_count + 1,
+                next
+            );
+        }
+    }
+
+    #[test]
+    fn test_calculate_backoff_large_retry_count() {
+        // Test with larger retry count (though app limits to 5)
+        let backoff = Coordinator::calculate_backoff_seconds(10);
+        assert_eq!(backoff, 5 * 1024); // 5 * 2^10 = 5120 seconds
+    }
+
+    #[test]
+    fn test_calculate_backoff_max_retries_boundary() {
+        // Test at the max retry boundary (5 retries = retry_count 0-4)
+        let max_retries = 5;
+        let last_backoff = Coordinator::calculate_backoff_seconds((max_retries - 1) as i64);
+
+        // After 5th retry (retry_count=4), backoff should be 80s
+        assert_eq!(last_backoff, 80);
+
+        // Total wait time across all retries: 5 + 10 + 20 + 40 + 80 = 155 seconds
+        let total_wait: u64 = (0..max_retries)
+            .map(|i| Coordinator::calculate_backoff_seconds(i as i64))
+            .sum();
+        assert_eq!(total_wait, 155);
     }
 }

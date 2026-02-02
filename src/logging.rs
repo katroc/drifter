@@ -1,5 +1,7 @@
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry, reload};
+use tracing_subscriber::{
+    EnvFilter, Registry, layer::SubscriberExt, reload, util::SubscriberInitExt,
+};
 
 pub type LogHandle = reload::Handle<EnvFilter, Registry>;
 

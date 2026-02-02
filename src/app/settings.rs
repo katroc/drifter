@@ -1,4 +1,4 @@
-use crate::config::{Config, StagingMode};
+use crate::core::config::{Config, StagingMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsCategory {
