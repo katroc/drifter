@@ -117,7 +117,7 @@ impl Default for Config {
             sse: SseMode::Off,
             kms_key_id: None,
             part_size_mb: 128,
-            concurrency_upload_global: 4,
+            concurrency_upload_global: 1,
             concurrency_parts_per_file: 4,
             theme: Theme::default_name().to_string(),
             scanner_enabled: true,
@@ -214,7 +214,7 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         sse,
         kms_key_id: get("kms_key_id"),
         part_size_mb: get_u64("part_size_mb", 128),
-        concurrency_upload_global: get_usize("concurrency_upload_global", 4),
+        concurrency_upload_global: get_usize("concurrency_upload_global", 1),
         concurrency_parts_per_file: get_usize("concurrency_parts_per_file", 4),
         theme: Theme::resolve_name(&get_or("theme", Theme::default_name()))
             .unwrap_or(Theme::default_name())
