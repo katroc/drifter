@@ -182,7 +182,7 @@ pub async fn run_tui(
                             KeyCode::Char('s') => {
                                 let conn = lock_mutex(&conn_mutex)?;
                                 let cfg_guard = app.config.lock().await;
-                                if let Err(e) = crate::config::save_config_to_db(
+                                if let Err(e) = crate::core::config::save_config_to_db(
                                     &conn,
                                     &cfg_guard,
                                 ) {
@@ -195,7 +195,7 @@ pub async fn run_tui(
                             }
                             KeyCode::Esc | KeyCode::Char('q') => {
                                 let conn = lock_mutex(&conn_mutex)?;
-                                if let Ok(loaded_cfg) = crate::config::load_config_from_db(&conn) {
+                                if let Ok(loaded_cfg) = crate::core::config::load_config_from_db(&conn) {
                                     *app.config.lock().await = loaded_cfg;
                                     app.status_message = "Layout changes discarded".to_string();
                                 }
@@ -345,7 +345,7 @@ pub async fn run_tui(
                                         ..Config::default()
                                     };
 
-                                    let _ = crate::config::save_config_to_db(&conn, &cfg);
+                                    let _ = crate::core::config::save_config_to_db(&conn, &cfg);
                                     drop(conn);
 
                                     // Create directories if they don't exist
@@ -1330,7 +1330,7 @@ pub async fn run_tui(
 
                                         // Save entire config to database
                                         let conn = lock_mutex(&conn_mutex)?;
-                                        crate::config::save_config_to_db(&conn, &cfg)
+                                        crate::core::config::save_config_to_db(&conn, &cfg)
                                     };
 
                                     if let Err(e) = res {
@@ -1425,7 +1425,7 @@ pub async fn run_tui(
                                             let mut cfg = app.config.lock().await;
                                             app.settings.apply_to_config(&mut cfg);
                                             let conn = lock_mutex(&conn_mutex)?;
-                                            crate::config::save_config_to_db(&conn, &cfg)
+                                            crate::core::config::save_config_to_db(&conn, &cfg)
                                         };
 
                                         if let Err(e) = res {
@@ -1481,7 +1481,7 @@ pub async fn run_tui(
 
                                             // Save entire config to database
                                             let conn = lock_mutex(&conn_mutex)?;
-                                            (crate::config::save_config_to_db(&conn, &cfg), field_name)
+                                            (crate::core::config::save_config_to_db(&conn, &cfg), field_name)
                                         };
 
                                         if let Err(e) = res {
@@ -1688,7 +1688,7 @@ pub async fn run_tui(
 
                                         // Save entire config to database
                                         let conn = lock_mutex(&conn_mutex)?;
-                                        (crate::config::save_config_to_db(&conn, &cfg), bucket_name)
+                                        (crate::core::config::save_config_to_db(&conn, &cfg), bucket_name)
                                     };
 
                                     if let Err(e) = res {
@@ -2131,7 +2131,7 @@ pub async fn run_tui(
                                                                 let mut cfg = app.config.lock().await;
                                                                 app.settings.apply_to_config(&mut cfg);
                                                                 let conn = lock_mutex(&conn_mutex)?;
-                                                                let _ = crate::config::save_config_to_db(&conn, &cfg);
+                                                                let _ = crate::core::config::save_config_to_db(&conn, &cfg);
                                                                 app.status_message = "Theme saved".to_string();
                                                                 app.last_click_time = None;
                                                             } else {
@@ -2194,7 +2194,7 @@ pub async fn run_tui(
                                                      let mut cfg = app.config.lock().await;
                                                      app.settings.apply_to_config(&mut cfg);
                                                      let conn = lock_mutex(&conn_mutex)?;
-                                                     let _ = crate::config::save_config_to_db(&conn, &cfg);
+                                                     let _ = crate::core::config::save_config_to_db(&conn, &cfg);
                                                 } else {
                                                     // Double click for other fields
                                                     let now = Instant::now();

@@ -622,7 +622,7 @@ mod tests {
     #[test]
     fn test_job_row_mapping() -> Result<()> {
         let conn = Connection::open_in_memory()?;
-        
+
         conn.execute(
             "CREATE TABLE jobs (
                 id INTEGER PRIMARY KEY,
@@ -660,18 +660,748 @@ mod tests {
 
         let mut stmt = conn.prepare(&format!("SELECT {} FROM jobs", JOB_COLUMNS))?;
         let rows = stmt.query_map([], |row| JobRow::try_from(row))?;
-        
+
         let jobs: Vec<JobRow> = rows.collect::<Result<_, _>>()?;
         assert_eq!(jobs.len(), 1);
         let job = &jobs[0];
-        
+
         assert_eq!(job.session_id, "test-session");
         assert_eq!(job.status, "pending");
         assert_eq!(job.source_path, "/tmp/test");
         assert_eq!(job.size_bytes, 100);
         assert_eq!(job.priority, 10);
         assert_eq!(job.retry_count, 5);
-        
+
+        Ok(())
+    }
+
+    // Helper function to initialize test database with schema
+    fn setup_test_db() -> Result<Connection> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "
+            CREATE TABLE jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL DEFAULT 'legacy',
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                staged_path TEXT,
+                size_bytes INTEGER NOT NULL,
+                scan_status TEXT,
+                upload_status TEXT,
+                s3_bucket TEXT,
+                s3_key TEXT,
+                s3_upload_id TEXT,
+                checksum TEXT,
+                remote_checksum TEXT,
+                error TEXT,
+                priority INTEGER DEFAULT 0,
+                retry_count INTEGER DEFAULT 0,
+                next_retry_at TEXT,
+                scan_duration_ms INTEGER,
+                upload_duration_ms INTEGER
+            );
+            CREATE TABLE uploads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                upload_id TEXT,
+                part_size INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(job_id) REFERENCES jobs(id)
+            );
+            CREATE TABLE parts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                upload_id INTEGER NOT NULL,
+                part_number INTEGER NOT NULL,
+                etag TEXT,
+                checksum_sha256 TEXT,
+                size_bytes INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                retries INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(upload_id) REFERENCES uploads(id)
+            );
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE secrets (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            ",
+        )?;
+        Ok(conn)
+    }
+
+    // --- Job CRUD Tests ---
+
+    #[test]
+    fn test_create_job_success() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "test-session", "/tmp/file.txt", 1024, Some("s3-key.txt"))?;
+
+        assert!(job_id > 0);
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.session_id, "test-session");
+        assert_eq!(job.source_path, "/tmp/file.txt");
+        assert_eq!(job.size_bytes, 1024);
+        assert_eq!(job.s3_key, Some("s3-key.txt".to_string()));
+        assert_eq!(job.status, "ingesting");
+        assert_eq!(job.retry_count, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_job_not_found() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job = get_job(&conn, 999)?;
+        assert!(job.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_active_jobs_filtering() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        create_job(&conn, "session1", "/tmp/active1.txt", 100, None)?;
+        create_job(&conn, "session1", "/tmp/active2.txt", 200, None)?;
+
+        // Create complete and quarantined jobs with old timestamps (more than 15 seconds ago)
+        let old_time = (Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+        conn.execute(
+            "INSERT INTO jobs (session_id, created_at, status, source_path, size_bytes, retry_count) VALUES (?, ?, ?, ?, ?, 0)",
+            params!["session1", &old_time, "complete", "/tmp/complete.txt", 300],
+        )?;
+        conn.execute(
+            "INSERT INTO jobs (session_id, created_at, status, source_path, size_bytes, retry_count) VALUES (?, ?, ?, ?, ?, 0)",
+            params!["session1", &old_time, "quarantined", "/tmp/quarantined.txt", 400],
+        )?;
+
+        let active = list_active_jobs(&conn, 100)?;
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].source_path, "/tmp/active2.txt");
+        assert_eq!(active[1].source_path, "/tmp/active1.txt");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_history_jobs_all_filter() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
+        update_job_error(&conn, id1, "complete", "")?;
+
+        let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
+        update_job_error(&conn, id2, "quarantined", "infected")?;
+
+        let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
+        update_job_error(&conn, id3, "cancelled", "user cancelled")?;
+
+        create_job(&conn, "session1", "/tmp/active.txt", 400, None)?;
+
+        let history = list_history_jobs(&conn, 100, None)?;
+        assert_eq!(history.len(), 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_history_jobs_complete_filter() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
+        update_job_error(&conn, id1, "complete", "")?;
+
+        let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
+        update_job_error(&conn, id2, "quarantined", "infected")?;
+
+        let history = list_history_jobs(&conn, 100, Some("Complete"))?;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, "complete");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_history_jobs_quarantined_filter() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
+        update_job_error(&conn, id1, "complete", "")?;
+
+        let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
+        update_job_error(&conn, id2, "quarantined", "infected")?;
+
+        let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
+        update_job_error(&conn, id3, "quarantined_removed", "infected and removed")?;
+
+        let history = list_history_jobs(&conn, 100, Some("Quarantined"))?;
+        assert_eq!(history.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_quarantined_jobs() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
+        update_job_error(&conn, id1, "quarantined", "infected")?;
+
+        let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
+        update_job_error(&conn, id2, "complete", "")?;
+
+        let quarantined = list_quarantined_jobs(&conn, 100)?;
+        assert_eq!(quarantined.len(), 1);
+        assert_eq!(quarantined[0].status, "quarantined");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_session_jobs() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
+        create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
+        create_job(&conn, "session2", "/tmp/file3.txt", 300, None)?;
+
+        let jobs = get_session_jobs(&conn, "session1")?;
+        assert_eq!(jobs.len(), 2);
+
+        let jobs2 = get_session_jobs(&conn, "session2")?;
+        assert_eq!(jobs2.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_count_jobs_with_status() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
+        create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
+
+        let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
+        update_job_error(&conn, id3, "complete", "")?;
+
+        let count = count_jobs_with_status(&conn, "ingesting")?;
+        assert_eq!(count, 2);
+
+        let count_complete = count_jobs_with_status(&conn, "complete")?;
+        assert_eq!(count_complete, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_count_pending_session_jobs() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
+        create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
+
+        let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
+        update_job_error(&conn, id3, "complete", "")?;
+
+        create_job(&conn, "session2", "/tmp/file4.txt", 400, None)?;
+
+        let count = count_pending_session_jobs(&conn, "session1")?;
+        assert_eq!(count, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_job_staged() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        update_job_staged(&conn, job_id, "/staging/file.txt", "queued")?;
+
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.staged_path, Some("/staging/file.txt".to_string()));
+        assert_eq!(job.status, "queued");
+        assert_eq!(job.error, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_job_error() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        update_job_error(&conn, job_id, "failed", "Network timeout")?;
+
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.status, "failed");
+        assert_eq!(job.error, Some("Network timeout".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_job_priority() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        set_job_priority(&conn, job_id, 50)?;
+
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.priority, 50);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_next_job_priority_ordering() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
+        update_job_error(&conn, id1, "queued", "")?;
+        set_job_priority(&conn, id1, 10)?;
+
+        let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
+        update_job_error(&conn, id2, "queued", "")?;
+        set_job_priority(&conn, id2, 50)?;
+
+        let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
+        update_job_error(&conn, id3, "queued", "")?;
+        set_job_priority(&conn, id3, 30)?;
+
+        let next = get_next_job(&conn, "queued")?.expect("Should have next job");
+        assert_eq!(next.id, id2);
+        assert_eq!(next.priority, 50);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cancel_job() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        cancel_job(&conn, job_id)?;
+
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.status, "cancelled");
+        assert_eq!(job.error, Some("Cancelled by user".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_job() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        insert_event(&conn, job_id, "test", "test message")?;
+
+        delete_job(&conn, job_id)?;
+
+        let job = get_job(&conn, job_id)?;
+        assert!(job.is_none());
+
+        Ok(())
+    }
+
+    // --- Retry Logic Tests ---
+
+    #[test]
+    fn test_update_job_retry_state() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        let next_retry = "2025-01-01T12:00:00Z";
+        update_job_retry_state(&conn, job_id, 3, Some(next_retry), "retry_pending", "Temporary failure")?;
+
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.retry_count, 3);
+        assert_eq!(job.next_retry_at, Some(next_retry.to_string()));
+        assert_eq!(job.status, "retry_pending");
+        assert_eq!(job.error, Some("Temporary failure".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_retryable_jobs_timing() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let now = Utc::now();
+        let past = (now - chrono::Duration::seconds(60)).to_rfc3339();
+        let future = (now + chrono::Duration::seconds(60)).to_rfc3339();
+
+        let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
+        update_job_retry_state(&conn, id1, 1, Some(&past), "retry_pending", "error")?;
+
+        let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
+        update_job_retry_state(&conn, id2, 1, Some(&future), "retry_pending", "error")?;
+
+        let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
+        update_job_retry_state(&conn, id3, 1, Some(&past), "retry_pending", "error")?;
+
+        let retryable = list_retryable_jobs(&conn)?;
+        assert_eq!(retryable.len(), 2);
+        assert!(retryable.iter().any(|j| j.id == id1));
+        assert!(retryable.iter().any(|j| j.id == id3));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_retry_job_with_completed_scan() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        update_scan_status(&conn, job_id, "completed", "scanned")?;
+        update_job_error(&conn, job_id, "failed", "Upload error")?;
+
+        retry_job(&conn, job_id)?;
+
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.status, "scanned");
+        assert_eq!(job.error, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_retry_job_without_completed_scan() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        update_job_error(&conn, job_id, "failed", "Scan error")?;
+
+        retry_job(&conn, job_id)?;
+
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.status, "queued");
+        assert_eq!(job.error, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pause_and_resume_job() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        update_scan_status(&conn, job_id, "completed", "scanned")?;
+
+        pause_job(&conn, job_id)?;
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.status, "paused");
+
+        resume_job(&conn, job_id)?;
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.status, "scanned");
+
+        Ok(())
+    }
+
+    // --- Checksum Tests ---
+
+    #[test]
+    fn test_update_job_checksums() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        update_job_checksums(&conn, job_id, Some("local-sha256"), Some("remote-sha256"))?;
+
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.checksum, Some("local-sha256".to_string()));
+        assert_eq!(job.remote_checksum, Some("remote-sha256".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_job_checksums_partial() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        update_job_checksums(&conn, job_id, Some("local-sha256"), None)?;
+
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.checksum, Some("local-sha256".to_string()));
+        assert_eq!(job.remote_checksum, None);
+
+        Ok(())
+    }
+
+    // --- Upload ID Tests ---
+
+    #[test]
+    fn test_update_job_upload_id() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        update_job_upload_id(&conn, job_id, "upload-12345")?;
+
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.s3_upload_id, Some("upload-12345".to_string()));
+
+        Ok(())
+    }
+
+    // --- Status Update Tests ---
+
+    #[test]
+    fn test_update_scan_status() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        update_scan_status(&conn, job_id, "clean", "scanned")?;
+
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.scan_status, Some("clean".to_string()));
+        assert_eq!(job.status, "scanned");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_upload_status() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        update_upload_status(&conn, job_id, "in_progress", "uploading")?;
+
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.status, "uploading");
+
+        Ok(())
+    }
+
+    // --- Duration Tests ---
+
+    #[test]
+    fn test_update_scan_duration() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        update_scan_duration(&conn, job_id, 1500)?;
+
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.scan_duration_ms, Some(1500));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_upload_duration() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        update_upload_duration(&conn, job_id, 5000)?;
+
+        let job = get_job(&conn, job_id)?.expect("Job should exist");
+        assert_eq!(job.upload_duration_ms, Some(5000));
+
+        Ok(())
+    }
+
+    // --- Event Tests ---
+
+    #[test]
+    fn test_insert_event() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        insert_event(&conn, job_id, "test_event", "Test message")?;
+
+        let mut stmt = conn.prepare("SELECT event_type, message FROM events WHERE job_id = ?")?;
+        let mut rows = stmt.query(params![job_id])?;
+
+        if let Some(row) = rows.next()? {
+            let event_type: String = row.get(0)?;
+            let message: String = row.get(1)?;
+            assert_eq!(event_type, "test_event");
+            assert_eq!(message, "Test message");
+        } else {
+            panic!("Event not found");
+        }
+
+        Ok(())
+    }
+
+    // --- Secrets Tests ---
+
+    #[test]
+    fn test_set_and_get_secret() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        set_secret(&conn, "test_key", "secret_value")?;
+        let value = get_secret(&conn, "test_key")?;
+
+        assert_eq!(value, Some("secret_value".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_nonexistent_secret() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let value = get_secret(&conn, "nonexistent")?;
+        assert!(value.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_secret_obfuscation() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        set_secret(&conn, "password", "my-secret-password")?;
+
+        let mut stmt = conn.prepare("SELECT value FROM secrets WHERE key = ?")?;
+        let mut rows = stmt.query(params!["password"])?;
+
+        if let Some(row) = rows.next()? {
+            let stored: String = row.get(0)?;
+            assert_ne!(stored, "my-secret-password");
+            assert!(stored.len() > 0);
+        }
+
+        let decrypted = get_secret(&conn, "password")?;
+        assert_eq!(decrypted, Some("my-secret-password".to_string()));
+
+        Ok(())
+    }
+
+    // --- Settings Tests ---
+
+    #[test]
+    fn test_set_and_get_setting() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        set_setting(&conn, "theme", "dark")?;
+        let value = get_setting(&conn, "theme")?;
+
+        assert_eq!(value, Some("dark".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_all_settings() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        set_setting(&conn, "theme", "dark")?;
+        set_setting(&conn, "log_level", "debug")?;
+        set_setting(&conn, "concurrency", "4")?;
+
+        let settings = load_all_settings(&conn)?;
+
+        assert_eq!(settings.len(), 3);
+        assert_eq!(settings.get("theme"), Some(&"dark".to_string()));
+        assert_eq!(settings.get("log_level"), Some(&"debug".to_string()));
+        assert_eq!(settings.get("concurrency"), Some(&"4".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_has_settings() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        assert!(!has_settings(&conn)?);
+
+        set_setting(&conn, "theme", "dark")?;
+
+        assert!(has_settings(&conn)?);
+
+        Ok(())
+    }
+
+    // --- Clear History Tests ---
+
+    #[test]
+    fn test_clear_history_all() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
+        update_job_error(&conn, id1, "complete", "")?;
+
+        let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
+        update_job_error(&conn, id2, "quarantined", "infected")?;
+
+        // Create an active job with "pending" status (which is excluded from clear_history)
+        let id3 = create_job(&conn, "session1", "/tmp/active.txt", 300, None)?;
+        update_job_error(&conn, id3, "pending", "")?;
+
+        clear_history(&conn, None)?;
+
+        let job1 = get_job(&conn, id1)?;
+        assert!(job1.is_none());
+
+        let job2 = get_job(&conn, id2)?;
+        assert!(job2.is_none());
+
+        let job3 = get_job(&conn, id3)?;
+        assert!(job3.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_clear_history_complete_only() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
+        update_job_error(&conn, id1, "complete", "")?;
+
+        let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
+        update_job_error(&conn, id2, "quarantined", "infected")?;
+
+        clear_history(&conn, Some("Complete"))?;
+
+        let job1 = get_job(&conn, id1)?;
+        assert!(job1.is_none());
+
+        let job2 = get_job(&conn, id2)?;
+        assert!(job2.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_clear_history_quarantined_only() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
+        update_job_error(&conn, id1, "complete", "")?;
+
+        let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
+        update_job_error(&conn, id2, "quarantined", "infected")?;
+
+        clear_history(&conn, Some("Quarantined"))?;
+
+        let job1 = get_job(&conn, id1)?;
+        assert!(job1.is_some());
+
+        let job2 = get_job(&conn, id2)?;
+        assert!(job2.is_none());
+
         Ok(())
     }
 }

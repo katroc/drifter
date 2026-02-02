@@ -311,7 +311,7 @@ impl Coordinator {
                     let conn = lock_mutex(&self.conn)?;
                     if job.retry_count < max_retries {
                         // Exponential backoff: 5s, 10s, 20s, 40s, 80s
-                        let backoff_secs = 5 * (2_u64.pow(job.retry_count as u32));
+                        let backoff_secs = Self::calculate_backoff_seconds(job.retry_count);
                         let next_retry = chrono::Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
                         let next_retry_str = next_retry.to_rfc3339();
                         
@@ -346,5 +346,98 @@ impl Coordinator {
         // But wait, I need to check report only on failure terminal state.
         
         Ok(())
+    }
+
+    /// Calculate exponential backoff delay in seconds
+    /// Formula: 5 * (2^retry_count)
+    /// Results: 5s, 10s, 20s, 40s, 80s...
+    pub fn calculate_backoff_seconds(retry_count: i64) -> u64 {
+        5 * (2_u64.pow(retry_count as u32))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Exponential Backoff Tests ---
+
+    #[test]
+    fn test_calculate_backoff_first_retry() {
+        let backoff = Coordinator::calculate_backoff_seconds(0);
+        assert_eq!(backoff, 5, "First retry should wait 5 seconds");
+    }
+
+    #[test]
+    fn test_calculate_backoff_second_retry() {
+        let backoff = Coordinator::calculate_backoff_seconds(1);
+        assert_eq!(backoff, 10, "Second retry should wait 10 seconds");
+    }
+
+    #[test]
+    fn test_calculate_backoff_third_retry() {
+        let backoff = Coordinator::calculate_backoff_seconds(2);
+        assert_eq!(backoff, 20, "Third retry should wait 20 seconds");
+    }
+
+    #[test]
+    fn test_calculate_backoff_fourth_retry() {
+        let backoff = Coordinator::calculate_backoff_seconds(3);
+        assert_eq!(backoff, 40, "Fourth retry should wait 40 seconds");
+    }
+
+    #[test]
+    fn test_calculate_backoff_fifth_retry() {
+        let backoff = Coordinator::calculate_backoff_seconds(4);
+        assert_eq!(backoff, 80, "Fifth retry should wait 80 seconds");
+    }
+
+    #[test]
+    fn test_calculate_backoff_sequence() {
+        // Verify the complete retry sequence: 5s, 10s, 20s, 40s, 80s
+        let expected = vec![5, 10, 20, 40, 80];
+
+        for (retry_count, expected_delay) in expected.iter().enumerate() {
+            let backoff = Coordinator::calculate_backoff_seconds(retry_count as i64);
+            assert_eq!(backoff, *expected_delay,
+                "Retry {} should have backoff of {}s, got {}s",
+                retry_count, expected_delay, backoff);
+        }
+    }
+
+    #[test]
+    fn test_calculate_backoff_doubles_each_time() {
+        // Verify exponential growth property
+        for retry_count in 0..5 {
+            let current = Coordinator::calculate_backoff_seconds(retry_count);
+            let next = Coordinator::calculate_backoff_seconds(retry_count + 1);
+
+            assert_eq!(next, current * 2,
+                "Backoff should double: retry {} = {}s, retry {} = {}s",
+                retry_count, current, retry_count + 1, next);
+        }
+    }
+
+    #[test]
+    fn test_calculate_backoff_large_retry_count() {
+        // Test with larger retry count (though app limits to 5)
+        let backoff = Coordinator::calculate_backoff_seconds(10);
+        assert_eq!(backoff, 5 * 1024); // 5 * 2^10 = 5120 seconds
+    }
+
+    #[test]
+    fn test_calculate_backoff_max_retries_boundary() {
+        // Test at the max retry boundary (5 retries = retry_count 0-4)
+        let max_retries = 5;
+        let last_backoff = Coordinator::calculate_backoff_seconds((max_retries - 1) as i64);
+
+        // After 5th retry (retry_count=4), backoff should be 80s
+        assert_eq!(last_backoff, 80);
+
+        // Total wait time across all retries: 5 + 10 + 20 + 40 + 80 = 155 seconds
+        let total_wait: u64 = (0..max_retries)
+            .map(|i| Coordinator::calculate_backoff_seconds(i as i64))
+            .sum();
+        assert_eq!(total_wait, 155);
     }
 }

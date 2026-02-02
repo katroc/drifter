@@ -784,7 +784,7 @@ impl App {
                      let mut cfg = self.config.lock().await;
                      cfg.log_level = level.to_string();
                      if let Ok(conn) = self.conn.lock() {
-                         if let Err(e) = crate::config::save_config_to_db(&conn, &cfg) {
+                         if let Err(e) = crate::core::config::save_config_to_db(&conn, &cfg) {
                              tracing::error!("Failed to save log level to DB: {}", e);
                          }
                      }

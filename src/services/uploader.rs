@@ -644,4 +644,337 @@ impl Uploader {
 
         Ok(true)
     }
+
+    // Helper functions exposed for testing
+
+    /// Calculate the optimal part size for S3 multipart upload
+    /// Takes into account:
+    /// - Configured part size (default 128MB)
+    /// - Parallelism (smaller parts for better concurrency)
+    /// - S3 minimum part size (5MB)
+    /// - S3 maximum parts limit (10,000)
+    pub fn calculate_part_size(
+        file_size: u64,
+        config_part_size_mb: u64,
+        concurrency: usize,
+    ) -> usize {
+        let min_part_size = 5 * 1024 * 1024; // S3 Min: 5MB
+        let max_parts = 10000u64; // S3 Max parts
+
+        let config_part_size = (config_part_size_mb * 1024 * 1024) as usize;
+        let parallel_part_size = (file_size as usize).checked_div(concurrency).unwrap_or(file_size as usize);
+
+        let mut part_size = config_part_size.min(parallel_part_size).max(min_part_size);
+
+        // Critical: Adjust for S3 10,000 part limit
+        let required_min_part = file_size.div_ceil(max_parts);
+        part_size = part_size.max(required_min_part as usize);
+
+        part_size
+    }
+
+    /// Calculate SHA256 checksum for a byte slice
+    pub fn calculate_checksum(data: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let hash = hasher.finalize();
+        general_purpose::STANDARD.encode(hash)
+    }
+
+    /// Calculate composite checksum from multiple part hashes
+    /// This matches S3's multipart checksum format: base64(SHA256(hash1+hash2+...))-partcount
+    pub fn calculate_composite_checksum(part_hashes: Vec<Vec<u8>>) -> String {
+        let count = part_hashes.len();
+        let mut hasher = Sha256::new();
+        for hash_bytes in &part_hashes {
+            hasher.update(hash_bytes);
+        }
+        let composite_hash = hasher.finalize();
+        let b64 = general_purpose::STANDARD.encode(composite_hash);
+        format!("{}-{}", b64, count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Part Size Calculation Tests ---
+
+    #[test]
+    fn test_calculate_part_size_respects_minimum() {
+        // Even with tiny config, should enforce 5MB minimum
+        let part_size = Uploader::calculate_part_size(
+            10 * 1024 * 1024, // 10MB file
+            1,                // 1MB config (too small)
+            4,                // 4 threads
+        );
+
+        assert_eq!(part_size, 5 * 1024 * 1024, "Should enforce 5MB minimum");
+    }
+
+    #[test]
+    fn test_calculate_part_size_uses_config_default() {
+        // Normal file with standard config
+        let part_size = Uploader::calculate_part_size(
+            1024 * 1024 * 1024, // 1GB file
+            128,                 // 128MB config (default)
+            4,                   // 4 threads
+        );
+
+        // Should use config size since it's reasonable
+        assert_eq!(part_size, 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_calculate_part_size_parallelism_optimization() {
+        // Small file with high concurrency - should create smaller parts
+        let part_size = Uploader::calculate_part_size(
+            100 * 1024 * 1024, // 100MB file
+            128,                // 128MB config
+            8,                  // 8 threads
+        );
+
+        // Should use smaller size for parallelism: 100MB/8 = 12.5MB (rounded to 12MB range)
+        // But at least 5MB
+        assert!(part_size >= 5 * 1024 * 1024);
+        assert!(part_size <= 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_calculate_part_size_respects_10k_limit() {
+        // Huge file that would exceed 10k parts with default size
+        let file_size = 5_000_000_000_000u64; // 5TB
+        let part_size = Uploader::calculate_part_size(
+            file_size,
+            128,  // 128MB config
+            4,
+        );
+
+        // With 128MB parts, 5TB would need 40,960 parts (exceeds 10k limit)
+        // So part size should be increased to: 5TB / 10000 = 500MB
+        let required_min = (file_size / 10000) as usize;
+        assert!(part_size >= required_min,
+            "Part size {} should be at least {} to stay under 10k parts",
+            part_size, required_min);
+
+        let total_parts = (file_size as usize).div_ceil(part_size);
+        assert!(total_parts <= 10000,
+            "Should not exceed 10k parts, got {}", total_parts);
+    }
+
+    #[test]
+    fn test_calculate_part_size_edge_case_exact_10k_parts() {
+        // File that's exactly 10k * 5MB = 50GB (minimum possible multipart)
+        let file_size = 10000 * 5 * 1024 * 1024u64;
+        let part_size = Uploader::calculate_part_size(
+            file_size,
+            128,
+            4,
+        );
+
+        let total_parts = (file_size as usize).div_ceil(part_size);
+        assert!(total_parts <= 10000);
+    }
+
+    #[test]
+    fn test_calculate_part_size_small_file() {
+        // Very small file (1MB) should still work
+        let part_size = Uploader::calculate_part_size(
+            1024 * 1024,  // 1MB
+            128,
+            4,
+        );
+
+        // Should use minimum 5MB (larger than file, but that's ok)
+        assert_eq!(part_size, 5 * 1024 * 1024);
+    }
+
+    // --- SHA256 Checksum Tests ---
+
+    #[test]
+    fn test_calculate_checksum_empty() {
+        let checksum = Uploader::calculate_checksum(&[]);
+
+        // SHA256 of empty string is known
+        assert_eq!(checksum, "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=");
+    }
+
+    #[test]
+    fn test_calculate_checksum_known_value() {
+        let data = b"Hello, World!";
+        let checksum = Uploader::calculate_checksum(data);
+
+        // SHA256 of "Hello, World!" is known
+        // dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f
+        assert_eq!(checksum, "3/1gIbsr1bCvZ2KQgJ7DpTGR3YHH9wpLKGiKNiGCmG8=");
+    }
+
+    #[test]
+    fn test_calculate_checksum_different_inputs() {
+        let checksum1 = Uploader::calculate_checksum(b"data1");
+        let checksum2 = Uploader::calculate_checksum(b"data2");
+
+        assert_ne!(checksum1, checksum2, "Different inputs should produce different checksums");
+    }
+
+    #[test]
+    fn test_calculate_checksum_deterministic() {
+        let data = b"test data for checksumming";
+        let checksum1 = Uploader::calculate_checksum(data);
+        let checksum2 = Uploader::calculate_checksum(data);
+
+        assert_eq!(checksum1, checksum2, "Same input should produce same checksum");
+    }
+
+    #[test]
+    fn test_calculate_checksum_large_data() {
+        // Test with a larger chunk (simulating part of a file)
+        let data = vec![0xAB; 5 * 1024 * 1024]; // 5MB of 0xAB
+        let checksum = Uploader::calculate_checksum(&data);
+
+        assert!(!checksum.is_empty());
+        assert!(checksum.len() > 40); // Base64 of SHA256 is 44 chars
+    }
+
+    // --- Composite Checksum Tests ---
+
+    #[test]
+    fn test_calculate_composite_checksum_single_part() {
+        // For single-part upload, composite is SHA256 of that one hash
+        let hash1 = vec![0x01, 0x02, 0x03, 0x04];
+        let composite = Uploader::calculate_composite_checksum(vec![hash1]);
+
+        assert!(composite.ends_with("-1"), "Should end with part count");
+        assert!(composite.len() > 5);
+    }
+
+    #[test]
+    fn test_calculate_composite_checksum_multiple_parts() {
+        let hash1 = vec![0x01; 32]; // Simulated SHA256 hash
+        let hash2 = vec![0x02; 32];
+        let hash3 = vec![0x03; 32];
+
+        let composite = Uploader::calculate_composite_checksum(vec![hash1, hash2, hash3]);
+
+        assert!(composite.ends_with("-3"), "Should end with part count: {}", composite);
+
+        let parts: Vec<&str> = composite.split('-').collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1], "3");
+    }
+
+    #[test]
+    fn test_calculate_composite_checksum_format() {
+        let hash1 = vec![0xFF; 32];
+        let composite = Uploader::calculate_composite_checksum(vec![hash1]);
+
+        // Should be in format: base64-count
+        assert!(composite.contains('-'));
+        let parts: Vec<&str> = composite.split('-').collect();
+        assert_eq!(parts.len(), 2);
+
+        // First part should be valid base64
+        assert!(!parts[0].is_empty());
+        // Second part should be numeric
+        assert!(parts[1].parse::<usize>().is_ok());
+    }
+
+    #[test]
+    fn test_calculate_composite_checksum_order_matters() {
+        let hash1 = vec![0x01; 32];
+        let hash2 = vec![0x02; 32];
+
+        let composite1 = Uploader::calculate_composite_checksum(vec![hash1.clone(), hash2.clone()]);
+        let composite2 = Uploader::calculate_composite_checksum(vec![hash2, hash1]);
+
+        // Order of parts matters for checksum
+        assert_ne!(composite1, composite2, "Part order should affect composite checksum");
+    }
+
+    #[test]
+    fn test_calculate_composite_checksum_matches_s3_format() {
+        // S3 multipart checksum format is: base64(SHA256(hash1+hash2+...))-partcount
+        let hash1 = vec![0xAB; 32];
+        let hash2 = vec![0xCD; 32];
+
+        let composite = Uploader::calculate_composite_checksum(vec![hash1, hash2]);
+
+        // Verify format
+        let parts: Vec<&str> = composite.split('-').collect();
+        assert_eq!(parts.len(), 2, "Should have exactly one dash");
+        assert_eq!(parts[1], "2", "Should have correct part count");
+
+        // Base64 should be 44 characters for SHA256
+        assert_eq!(parts[0].len(), 44, "Base64 of SHA256 should be 44 chars");
+    }
+
+    // --- Integration-like Tests (testing patterns without S3) ---
+
+    #[test]
+    fn test_part_size_for_various_file_sizes() {
+        let test_cases = vec![
+            (1024 * 1024, 128, 4, 5 * 1024 * 1024),           // 1MB file
+            (100 * 1024 * 1024, 128, 4, 25 * 1024 * 1024),    // 100MB file (parallelism)
+            (1024 * 1024 * 1024, 128, 4, 128 * 1024 * 1024),  // 1GB file (config)
+            (10 * 1024 * 1024 * 1024, 128, 4, 128 * 1024 * 1024), // 10GB file
+        ];
+
+        for (file_size, config_mb, concurrency, expected_min) in test_cases {
+            let part_size = Uploader::calculate_part_size(file_size, config_mb, concurrency);
+            assert!(part_size >= expected_min,
+                "File size {} should have part size >= {}, got {}",
+                file_size, expected_min, part_size);
+
+            // Verify 10k parts constraint
+            let total_parts = (file_size as usize).div_ceil(part_size);
+            assert!(total_parts <= 10000,
+                "File size {} created {} parts (exceeds 10k)",
+                file_size, total_parts);
+        }
+    }
+
+    #[test]
+    fn test_checksum_workflow_single_part() {
+        // Simulate single-part upload workflow
+        let data = b"Small file content";
+
+        // Calculate checksum for the part
+        let part_checksum = Uploader::calculate_checksum(data);
+        assert!(!part_checksum.is_empty());
+
+        // For composite, we need the raw hash bytes
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let hash_bytes = hasher.finalize().to_vec();
+
+        // Calculate composite
+        let composite = Uploader::calculate_composite_checksum(vec![hash_bytes]);
+        assert!(composite.ends_with("-1"));
+    }
+
+    #[test]
+    fn test_checksum_workflow_multipart() {
+        // Simulate 3-part upload
+        let part1 = b"Part 1 data";
+        let part2 = b"Part 2 data";
+        let part3 = b"Part 3 data";
+
+        // Calculate checksums for each part
+        let mut hashes = Vec::new();
+        for part in &[part1, part2, part3] {
+            let mut hasher = Sha256::new();
+            hasher.update(part);
+            hashes.push(hasher.finalize().to_vec());
+        }
+
+        // Calculate composite
+        let composite = Uploader::calculate_composite_checksum(hashes);
+        assert!(composite.ends_with("-3"));
+
+        // Verify format
+        let parts: Vec<&str> = composite.split('-').collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1], "3");
+    }
 }
