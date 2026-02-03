@@ -2273,9 +2273,7 @@ pub async fn run_tui(
                                                     .direction(Direction::Horizontal)
                                                     .constraints([
                                                         Constraint::Percentage(local_percent),
-                                                        Constraint::Percentage(
-                                                            100 - local_percent,
-                                                        ),
+                                                        Constraint::Percentage(100 - local_percent),
                                                     ])
                                                     .split(top_area);
 
@@ -2285,7 +2283,8 @@ pub async fn run_tui(
                                                     let is_double_click = if let (
                                                         Some(last_time),
                                                         Some(last_pos),
-                                                    ) = (app.last_click_time, app.last_click_pos)
+                                                    ) =
+                                                        (app.last_click_time, app.last_click_pos)
                                                     {
                                                         now.duration_since(last_time)
                                                             < Duration::from_millis(500)
@@ -2305,26 +2304,21 @@ pub async fn run_tui(
                                                     }
 
                                                     let inner_y = chunks[0].y + 1;
-                                                    let has_filter =
-                                                        !app.input_buffer.is_empty()
-                                                            || app.input_mode
-                                                                == InputMode::Filter;
+                                                    let has_filter = !app.input_buffer.is_empty()
+                                                        || app.input_mode == InputMode::Filter;
                                                     let table_y =
                                                         inner_y + if has_filter { 1 } else { 0 };
                                                     let content_y = table_y + 1; // +1 for header
 
                                                     if y >= content_y {
-                                                        let relative_row =
-                                                            (y - content_y) as usize;
+                                                        let relative_row = (y - content_y) as usize;
                                                         let display_height =
                                                             chunks[0].height.saturating_sub(
                                                                 if has_filter { 4 } else { 3 },
                                                             )
                                                                 as usize; // Border + table_y + header
-                                                        let filter = app
-                                                            .input_buffer
-                                                            .trim()
-                                                            .to_lowercase();
+                                                        let filter =
+                                                            app.input_buffer.trim().to_lowercase();
                                                         let filtered_entries: Vec<usize> = app
                                                             .picker
                                                             .entries
@@ -2333,17 +2327,13 @@ pub async fn run_tui(
                                                             .filter(|(_, e)| {
                                                                 e.is_parent
                                                                     || filter.is_empty()
-                                                                    || fuzzy_match(
-                                                                        &filter,
-                                                                        &e.name,
-                                                                    )
+                                                                    || fuzzy_match(&filter, &e.name)
                                                             })
                                                             .map(|(i, _)| i)
                                                             .collect();
 
                                                         if relative_row < display_height {
-                                                            let total_rows =
-                                                                filtered_entries.len();
+                                                            let total_rows = filtered_entries.len();
                                                             let current_filtered_selected =
                                                                 filtered_entries
                                                                     .iter()
@@ -2356,8 +2346,7 @@ pub async fn run_tui(
                                                                 total_rows,
                                                                 display_height,
                                                             );
-                                                            if offset + relative_row < total_rows
-                                                            {
+                                                            if offset + relative_row < total_rows {
                                                                 let target_real_idx =
                                                                     filtered_entries
                                                                         [offset + relative_row];
@@ -2386,9 +2375,10 @@ pub async fn run_tui(
                                                                             .to_string();
                                                                         tokio::spawn(async move {
                                                                             let (staging, mode) = {
-                                                                                let cfg = cfg_handle
-                                                                                    .lock()
-                                                                                    .await;
+                                                                                let cfg =
+                                                                                    cfg_handle
+                                                                                        .lock()
+                                                                                        .await;
                                                                                 (
                                                                                     cfg.staging_dir
                                                                                         .clone(),
@@ -2422,8 +2412,7 @@ pub async fn run_tui(
 
                                                     let inner_y = chunks[1].y + 2;
                                                     if y >= inner_y {
-                                                        let relative_row =
-                                                            (y - inner_y) as usize;
+                                                        let relative_row = (y - inner_y) as usize;
                                                         let display_height =
                                                             chunks[1].height.saturating_sub(3)
                                                                 as usize;
@@ -2436,8 +2425,7 @@ pub async fn run_tui(
                                                         if relative_row < display_height
                                                             && offset + relative_row < total_rows
                                                         {
-                                                            let new_idx =
-                                                                offset + relative_row;
+                                                            let new_idx = offset + relative_row;
                                                             app.selected_remote = new_idx;
 
                                                             // Double click to navigate
@@ -2458,8 +2446,7 @@ pub async fn run_tui(
 
                                                             if is_double_click {
                                                                 app.last_click_time = None;
-                                                                let obj =
-                                                                    &app.s3_objects[new_idx];
+                                                                let obj = &app.s3_objects[new_idx];
                                                                 if obj.is_dir {
                                                                     app.remote_current_path
                                                                         .push_str(&obj.name);
@@ -2467,14 +2454,15 @@ pub async fn run_tui(
                                                                     app.input_mode =
                                                                         InputMode::RemoteBrowsing;
 
-                                                                    let tx =
-                                                                        app.async_tx.clone();
-                                                                    let config_clone =
-                                                                        app.config.lock().await
-                                                                            .clone();
-                                                                    let current_path =
-                                                                        app.remote_current_path
-                                                                            .clone();
+                                                                    let tx = app.async_tx.clone();
+                                                                    let config_clone = app
+                                                                        .config
+                                                                        .lock()
+                                                                        .await
+                                                                        .clone();
+                                                                    let current_path = app
+                                                                        .remote_current_path
+                                                                        .clone();
                                                                     tokio::spawn(async move {
                                                                         let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, Some(&current_path)).await;
                                                                         match res {
@@ -2514,20 +2502,21 @@ pub async fn run_tui(
                                                             | Borders::BOTTOM,
                                                     )
                                                     .inner(queue_area);
-                                                let has_filter =
-                                                    !app.queue_search_query.is_empty()
-                                                        || app.input_mode
-                                                            == InputMode::QueueSearch;
+                                                let has_filter = !app.queue_search_query.is_empty()
+                                                    || app.input_mode == InputMode::QueueSearch;
                                                 let table_y =
                                                     inner_area.y + if has_filter { 1 } else { 0 };
                                                 let content_y = table_y + 1; // +1 for header
 
                                                 if y >= content_y {
-                                                    let relative_row =
-                                                        (y - content_y) as usize;
+                                                    let relative_row = (y - content_y) as usize;
                                                     let display_height = inner_area
                                                         .height
-                                                        .saturating_sub(if has_filter { 1 } else { 0 })
+                                                        .saturating_sub(if has_filter {
+                                                            1
+                                                        } else {
+                                                            0
+                                                        })
                                                         .saturating_sub(2)
                                                         as usize;
                                                     let total_rows = app.visual_jobs.len();
@@ -2896,9 +2885,7 @@ pub async fn run_tui(
                                                     .direction(Direction::Horizontal)
                                                     .constraints([
                                                         Constraint::Percentage(local_percent),
-                                                        Constraint::Percentage(
-                                                            100 - local_percent,
-                                                        ),
+                                                        Constraint::Percentage(100 - local_percent),
                                                     ])
                                                     .split(top_area);
 

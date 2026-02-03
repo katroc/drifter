@@ -261,8 +261,7 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         host_metrics_enabled: get("host_metrics_enabled")
             .map(|s| s == "true")
             .unwrap_or(true),
-        local_width_percent: get_u16("local_width_percent",
-            get_u16("local_width_percent", 50)), // Fallback to old name for migration
+        local_width_percent: get_u16("local_width_percent", get_u16("local_width_percent", 50)), // Fallback to old name for migration
         history_width: get_u16("history_width", 60),
         log_level: get_or("log_level", "info"),
     })

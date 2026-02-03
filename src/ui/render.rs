@@ -179,8 +179,8 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
     let vertical_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),      // Top: Local | Remote browsers
-            Constraint::Length(20),  // Bottom: Queue (18 rows + 2 borders)
+            Constraint::Min(0),     // Top: Local | Remote browsers
+            Constraint::Length(20), // Bottom: Queue (18 rows + 2 borders)
         ])
         .split(area);
 
@@ -523,7 +523,9 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
             let mut row_style = if is_selected {
                 app.theme.selection_style()
             } else if is_hovered && app.focus != AppFocus::Queue {
-                app.theme.row_style(idx % 2 != 0).add_modifier(Modifier::BOLD)
+                app.theme
+                    .row_style(idx % 2 != 0)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 app.theme.row_style(idx % 2 != 0)
             };

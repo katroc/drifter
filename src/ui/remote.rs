@@ -9,12 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-pub fn render_remote(
-    f: &mut Frame,
-    app: &App,
-    area: Rect,
-    theme: &Theme,
-) {
+pub fn render_remote(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // S3 Object List
     let is_focused = app.focus == AppFocus::Remote;
     let items: Vec<ListItem> = app
