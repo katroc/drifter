@@ -17,6 +17,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::widgets::{Block, Borders};
 
 use ratatui::Terminal;
 use rusqlite::Connection;
@@ -65,6 +66,14 @@ pub async fn run_tui(
     {
         let conn = lock_mutex(&conn_mutex)?;
         app.refresh_jobs(&conn)?;
+    }
+
+    let should_prefetch_remote = {
+        let cfg = app.config.lock().await;
+        s3_ready(&cfg)
+    };
+    if should_prefetch_remote {
+        request_remote_list(&app).await;
     }
 
     // Start Log Watcher
@@ -145,8 +154,8 @@ pub async fn run_tui(
                         if app.input_mode == InputMode::LayoutAdjust {
                             match key.code {
                                 KeyCode::Char('1') => {
-                                    app.layout_adjust_target = Some(LayoutTarget::Hopper);
-                                    update_layout_message(&mut app, LayoutTarget::Hopper).await;
+                                    app.layout_adjust_target = Some(LayoutTarget::Local);
+                                    update_layout_message(&mut app, LayoutTarget::Local).await;
                                 }
                                 KeyCode::Char('2') => {
                                     app.layout_adjust_target = Some(LayoutTarget::Queue);
@@ -215,6 +224,7 @@ pub async fn run_tui(
                                 KeyCode::Char('y') | KeyCode::Enter => {
                                     // Execute Action
                                     match app.pending_action {
+                                        ModalAction::None => {}
                                         ModalAction::ClearHistory => {
                                             let conn = lock_mutex(&conn_mutex)?;
                                             let filter_str =
@@ -295,7 +305,6 @@ pub async fn run_tui(
                                                 }
                                             });
                                         }
-                                        _ => {}
                                     }
 
                                     // Reset
@@ -456,7 +465,7 @@ pub async fn run_tui(
                                 {
                                     app.input_mode = InputMode::LayoutAdjust;
                                     app.layout_adjust_target = None;
-                                    app.layout_adjust_message = "Layout Adjustment: 1=Hopper 2=Queue 3=History | +/- adjust | r reset | R reset-all | s save | q cancel".to_string();
+                                    app.layout_adjust_message = "Layout Adjustment: 1=Local 2=Queue 3=History | +/- adjust | r reset | R reset-all | s save | q cancel".to_string();
                                     continue;
                                 }
                                 KeyCode::Char('q') if app.focus != AppFocus::Logs => {
@@ -468,16 +477,22 @@ pub async fn run_tui(
                                         AppFocus::Rail => match app.current_tab {
                                             AppTab::Transfers => AppFocus::Browser,
                                             AppTab::Quarantine => AppFocus::Quarantine,
-                                            AppTab::Remote => AppFocus::Remote,
                                             AppTab::Logs => AppFocus::Logs,
                                             AppTab::Settings => AppFocus::SettingsCategory,
                                         },
-                                        AppFocus::Browser => AppFocus::Queue,
+                                        AppFocus::Browser => {
+                                            // In Transfers tab, cycle to Remote; otherwise to Queue
+                                            if app.current_tab == AppTab::Transfers {
+                                                AppFocus::Remote
+                                            } else {
+                                                AppFocus::Queue
+                                            }
+                                        }
+                                        AppFocus::Remote => AppFocus::Queue,
                                         AppFocus::Queue => AppFocus::History,
                                         AppFocus::SettingsCategory => AppFocus::SettingsFields,
                                         AppFocus::History
                                         | AppFocus::Quarantine
-                                        | AppFocus::Remote
                                         | AppFocus::Logs
                                         | AppFocus::SettingsFields => AppFocus::Rail,
                                     };
@@ -487,16 +502,22 @@ pub async fn run_tui(
                                         AppFocus::Rail => match app.current_tab {
                                             AppTab::Transfers => AppFocus::History,
                                             AppTab::Quarantine => AppFocus::Quarantine,
-                                            AppTab::Remote => AppFocus::Remote,
                                             AppTab::Logs => AppFocus::Logs,
                                             AppTab::Settings => AppFocus::SettingsFields,
                                         },
                                         AppFocus::History => AppFocus::Queue,
-                                        AppFocus::Queue => AppFocus::Browser,
+                                        AppFocus::Queue => {
+                                            // In Transfers tab, cycle to Remote; otherwise to Browser
+                                            if app.current_tab == AppTab::Transfers {
+                                                AppFocus::Remote
+                                            } else {
+                                                AppFocus::Browser
+                                            }
+                                        }
+                                        AppFocus::Remote => AppFocus::Browser,
                                         AppFocus::SettingsFields => AppFocus::SettingsCategory,
                                         AppFocus::Browser
                                         | AppFocus::Quarantine
-                                        | AppFocus::Remote
                                         | AppFocus::SettingsCategory
                                         | AppFocus::Logs => AppFocus::Rail,
                                     };
@@ -507,10 +528,16 @@ pub async fn run_tui(
                                             AppTab::Transfers => AppFocus::Browser,
                                             AppTab::Quarantine => AppFocus::Quarantine,
                                             AppTab::Logs => AppFocus::Logs,
-                                            AppTab::Remote => AppFocus::Remote,
                                             AppTab::Settings => AppFocus::SettingsCategory,
                                         },
-                                        AppFocus::Browser => AppFocus::Queue,
+                                        AppFocus::Browser => {
+                                            if app.current_tab == AppTab::Transfers {
+                                                AppFocus::Remote
+                                            } else {
+                                                AppFocus::Queue
+                                            }
+                                        }
+                                        AppFocus::Remote => AppFocus::Queue,
                                         AppFocus::Queue => AppFocus::History,
                                         AppFocus::SettingsCategory => AppFocus::SettingsFields,
                                         _ => app.focus,
@@ -519,10 +546,16 @@ pub async fn run_tui(
                                 KeyCode::Left => {
                                     app.focus = match app.focus {
                                         AppFocus::History => AppFocus::Queue,
-                                        AppFocus::Queue => AppFocus::Browser,
+                                        AppFocus::Queue => {
+                                            if app.current_tab == AppTab::Transfers {
+                                                AppFocus::Remote
+                                            } else {
+                                                AppFocus::Browser
+                                            }
+                                        }
+                                        AppFocus::Remote => AppFocus::Browser,
                                         AppFocus::Browser
                                         | AppFocus::Quarantine
-                                        | AppFocus::Remote
                                         | AppFocus::SettingsCategory => AppFocus::Rail,
                                         AppFocus::SettingsFields => AppFocus::SettingsCategory,
                                         _ => app.focus,
@@ -533,7 +566,6 @@ pub async fn run_tui(
                                         app.focus = match app.current_tab {
                                             AppTab::Transfers => AppFocus::Browser,
                                             AppTab::Quarantine => AppFocus::Quarantine,
-                                            AppTab::Remote => AppFocus::Remote,
                                             AppTab::Logs => AppFocus::Logs,
                                             AppTab::Settings => AppFocus::SettingsCategory,
                                         };
@@ -541,6 +573,13 @@ pub async fn run_tui(
                                 }
                                 _ => {}
                             }
+                            if app.focus != old_focus
+                                && app.current_tab == AppTab::Transfers
+                                && app.focus == AppFocus::Remote
+                            {
+                                request_remote_list(&app).await;
+                            }
+
                             // If focus changed, don't also process this key in focus-specific handling
                             if app.focus != old_focus {
                                 continue;
@@ -552,6 +591,7 @@ pub async fn run_tui(
                             match key.code {
                                 KeyCode::Char('y') | KeyCode::Enter => {
                                     match app.pending_action {
+                                        ModalAction::None => {}
                                         ModalAction::CancelJob(id) => {
                                             {
                                                 let conn = lock_mutex(&conn_mutex)?;
@@ -613,7 +653,6 @@ pub async fn run_tui(
                                             let _ = app.refresh_jobs(&conn);
                                             app.status_message = "History cleared".to_string();
                                         }
-                                        _ => {}
                                     }
                                     app.input_mode = InputMode::Normal;
                                     app.pending_action = ModalAction::None;
@@ -634,70 +673,18 @@ pub async fn run_tui(
                                 KeyCode::Up | KeyCode::Char('k') => {
                                     app.current_tab = match app.current_tab {
                                         AppTab::Transfers => AppTab::Settings,
-                                        AppTab::Remote => AppTab::Transfers,
-                                        AppTab::Quarantine => AppTab::Remote,
+                                        AppTab::Quarantine => AppTab::Transfers,
                                         AppTab::Logs => AppTab::Quarantine,
                                         AppTab::Settings => AppTab::Logs,
                                     };
-                                    if app.current_tab == AppTab::Remote {
-                                        // Auto-refresh
-                                        let tx = app.async_tx.clone();
-                                        let config_clone = app.config.lock().await.clone();
-                                        let current_path = app.remote_current_path.clone();
-                                        tokio::spawn(async move {
-                                            let path_arg = if current_path.is_empty() {
-                                                None
-                                            } else {
-                                                Some(current_path.as_str())
-                                            };
-                                            let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, path_arg).await;
-                                            match res {
-                                                Ok(files) => {
-                                                    let _ =
-                                                        tx.send(AppEvent::RemoteFileList(files));
-                                                }
-                                                Err(e) => {
-                                                    let _ = tx.send(AppEvent::Notification(
-                                                        format!("List Failed: {}", e),
-                                                    ));
-                                                }
-                                            }
-                                        });
-                                    }
                                 }
                                 KeyCode::Down | KeyCode::Char('j') => {
                                     app.current_tab = match app.current_tab {
-                                        AppTab::Transfers => AppTab::Remote,
-                                        AppTab::Remote => AppTab::Quarantine,
+                                        AppTab::Transfers => AppTab::Quarantine,
                                         AppTab::Quarantine => AppTab::Logs,
                                         AppTab::Logs => AppTab::Settings,
                                         AppTab::Settings => AppTab::Transfers,
                                     };
-                                    if app.current_tab == AppTab::Remote {
-                                        // Auto-refresh
-                                        let tx = app.async_tx.clone();
-                                        let config_clone = app.config.lock().await.clone();
-                                        let current_path = app.remote_current_path.clone();
-                                        tokio::spawn(async move {
-                                            let path_arg = if current_path.is_empty() {
-                                                None
-                                            } else {
-                                                Some(current_path.as_str())
-                                            };
-                                            let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, path_arg).await;
-                                            match res {
-                                                Ok(files) => {
-                                                    let _ =
-                                                        tx.send(AppEvent::RemoteFileList(files));
-                                                }
-                                                Err(e) => {
-                                                    let _ = tx.send(AppEvent::Notification(
-                                                        format!("List Failed: {}", e),
-                                                    ));
-                                                }
-                                            }
-                                        });
-                                    }
                                 }
                                 _ => {}
                             },
@@ -2216,13 +2203,18 @@ pub async fn run_tui(
                         }
                     }
                     Event::Mouse(mouse) => {
+                        // Track hover position for row highlighting
+                        if mouse.kind == MouseEventKind::Moved {
+                            app.hover_pos = Some((mouse.column, mouse.row));
+                        }
+
                         let history_width = app.cached_config.history_width;
 
                         if let Ok(size) = terminal.size() {
                             let main_layout = Layout::default()
                                 .direction(Direction::Horizontal)
                                 .constraints([
-                                    Constraint::Length(14),
+                                    Constraint::Length(16),
                                     Constraint::Min(0),
                                     Constraint::Length(history_width),
                                 ])
@@ -2237,43 +2229,20 @@ pub async fn run_tui(
                             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                                 if x >= rail_layout.x && x < rail_layout.x + rail_layout.width {
                                     // Rail Click
+                                    app.focus = AppFocus::Rail;
                                     let rel_ry = y.saturating_sub(rail_layout.y);
                                     match rel_ry {
                                         1 => {
                                             app.current_tab = AppTab::Transfers;
-                                            app.focus = AppFocus::Rail;
                                         }
                                         2 => {
-                                            app.current_tab = AppTab::Remote;
-                                            app.focus = AppFocus::Rail;
-                                            let tx = app.async_tx.clone();
-                                            let config_clone = app.config.lock().await.clone();
-                                            tokio::spawn(async move {
-                                                let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, None).await;
-                                                match res {
-                                                    Ok(files) => {
-                                                        let _ = tx
-                                                            .send(AppEvent::RemoteFileList(files));
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = tx.send(AppEvent::Notification(
-                                                            format!("List Failed: {}", e),
-                                                        ));
-                                                    }
-                                                }
-                                            });
+                                            app.current_tab = AppTab::Quarantine;
                                         }
                                         3 => {
-                                            app.current_tab = AppTab::Quarantine;
-                                            app.focus = AppFocus::Rail;
+                                            app.current_tab = AppTab::Logs;
                                         }
                                         4 => {
-                                            app.current_tab = AppTab::Logs;
-                                            app.focus = AppFocus::Rail;
-                                        }
-                                        5 => {
                                             app.current_tab = AppTab::Settings;
-                                            app.focus = AppFocus::Rail;
                                         }
                                         _ => {}
                                     }
@@ -2285,32 +2254,38 @@ pub async fn run_tui(
                                         AppTab::Logs => {
                                             app.focus = AppFocus::Logs;
                                         }
-                                        AppTab::Remote => {
-                                            app.focus = AppFocus::Remote;
-                                            let inner_y = center_layout.y + 1;
-                                            if y >= inner_y {
-                                                let relative_row = (y - inner_y) as usize;
-                                                let display_height =
-                                                    center_layout.height.saturating_sub(2) as usize;
-                                                let total_rows = app.s3_objects.len();
-                                                let offset = calculate_list_offset(
-                                                    app.selected_remote,
-                                                    total_rows,
-                                                    display_height,
-                                                );
-                                                if relative_row < display_height
-                                                    && offset + relative_row < total_rows
-                                                {
-                                                    let new_idx = offset + relative_row;
-                                                    app.selected_remote = new_idx;
+                                        AppTab::Transfers => {
+                                            let local_percent =
+                                                app.cached_config.local_width_percent;
+                                            let vertical_chunks = Layout::default()
+                                                .direction(Direction::Vertical)
+                                                .constraints([
+                                                    Constraint::Min(0),
+                                                    Constraint::Length(20),
+                                                ])
+                                                .split(center_layout);
 
-                                                    // Double click to navigate
+                                            let top_area = vertical_chunks[0];
+                                            let queue_area = vertical_chunks[1];
+
+                                            if y < top_area.y + top_area.height {
+                                                let chunks = Layout::default()
+                                                    .direction(Direction::Horizontal)
+                                                    .constraints([
+                                                        Constraint::Percentage(local_percent),
+                                                        Constraint::Percentage(
+                                                            100 - local_percent,
+                                                        ),
+                                                    ])
+                                                    .split(top_area);
+
+                                                if x < chunks[0].x + chunks[0].width {
+                                                    app.focus = AppFocus::Browser;
                                                     let now = Instant::now();
                                                     let is_double_click = if let (
                                                         Some(last_time),
                                                         Some(last_pos),
-                                                    ) =
-                                                        (app.last_click_time, app.last_click_pos)
+                                                    ) = (app.last_click_time, app.last_click_pos)
                                                     {
                                                         now.duration_since(last_time)
                                                             < Duration::from_millis(500)
@@ -2321,198 +2296,240 @@ pub async fn run_tui(
 
                                                     if is_double_click {
                                                         app.last_click_time = None;
-                                                        let obj = &app.s3_objects[new_idx];
-                                                        if obj.is_dir {
-                                                            app.remote_current_path
-                                                                .push_str(&obj.name);
-                                                            app.selected_remote = 0;
-                                                            app.input_mode =
-                                                                InputMode::RemoteBrowsing;
-
-                                                            let tx = app.async_tx.clone();
-                                                            let config_clone =
-                                                                app.config.lock().await.clone();
-                                                            let current_path =
-                                                                app.remote_current_path.clone();
-                                                            tokio::spawn(async move {
-                                                                let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, Some(&current_path)).await;
-                                                                match res {
-                                                                    Ok(files) => {
-                                                                        let _ = tx.send(
-                                                                        AppEvent::RemoteFileList(
-                                                                            files,
-                                                                        ),
-                                                                    );
-                                                                    }
-                                                                    Err(e) => {
-                                                                        let _ = tx.send(
-                                                                        AppEvent::Notification(
-                                                                            format!(
-                                                                                "List Failed: {}",
-                                                                                e
-                                                                            ),
-                                                                        ),
-                                                                    );
-                                                                    }
-                                                                }
-                                                            });
+                                                        if app.input_mode == InputMode::Normal {
+                                                            app.input_mode = InputMode::Browsing;
                                                         }
                                                     } else {
                                                         app.last_click_time = Some(now);
                                                         app.last_click_pos = Some((x, y));
                                                     }
-                                                }
-                                            }
-                                        }
-                                        AppTab::Transfers => {
-                                            let hopper_percent =
-                                                app.cached_config.hopper_width_percent;
-                                            let chunks = Layout::default()
-                                                .direction(Direction::Horizontal)
-                                                .constraints([
-                                                    Constraint::Percentage(hopper_percent),
-                                                    Constraint::Percentage(100 - hopper_percent),
-                                                ])
-                                                .split(center_layout);
 
-                                            if x < chunks[0].x + chunks[0].width {
-                                                app.focus = AppFocus::Browser;
-                                                let now = Instant::now();
-                                                let is_double_click =
-                                                    if let (Some(last_time), Some(last_pos)) =
-                                                        (app.last_click_time, app.last_click_pos)
-                                                    {
-                                                        now.duration_since(last_time)
-                                                            < Duration::from_millis(500)
-                                                            && last_pos == (x, y)
-                                                    } else {
-                                                        false
-                                                    };
+                                                    let inner_y = chunks[0].y + 1;
+                                                    let has_filter =
+                                                        !app.input_buffer.is_empty()
+                                                            || app.input_mode
+                                                                == InputMode::Filter;
+                                                    let table_y =
+                                                        inner_y + if has_filter { 1 } else { 0 };
+                                                    let content_y = table_y + 1; // +1 for header
 
-                                                if is_double_click {
-                                                    app.last_click_time = None;
-                                                    if app.input_mode == InputMode::Normal {
-                                                        app.input_mode = InputMode::Browsing;
+                                                    if y >= content_y {
+                                                        let relative_row =
+                                                            (y - content_y) as usize;
+                                                        let display_height =
+                                                            chunks[0].height.saturating_sub(
+                                                                if has_filter { 4 } else { 3 },
+                                                            )
+                                                                as usize; // Border + table_y + header
+                                                        let filter = app
+                                                            .input_buffer
+                                                            .trim()
+                                                            .to_lowercase();
+                                                        let filtered_entries: Vec<usize> = app
+                                                            .picker
+                                                            .entries
+                                                            .iter()
+                                                            .enumerate()
+                                                            .filter(|(_, e)| {
+                                                                e.is_parent
+                                                                    || filter.is_empty()
+                                                                    || fuzzy_match(
+                                                                        &filter,
+                                                                        &e.name,
+                                                                    )
+                                                            })
+                                                            .map(|(i, _)| i)
+                                                            .collect();
+
+                                                        if relative_row < display_height {
+                                                            let total_rows =
+                                                                filtered_entries.len();
+                                                            let current_filtered_selected =
+                                                                filtered_entries
+                                                                    .iter()
+                                                                    .position(|&i| {
+                                                                        i == app.picker.selected
+                                                                    })
+                                                                    .unwrap_or(0);
+                                                            let offset = calculate_list_offset(
+                                                                current_filtered_selected,
+                                                                total_rows,
+                                                                display_height,
+                                                            );
+                                                            if offset + relative_row < total_rows
+                                                            {
+                                                                let target_real_idx =
+                                                                    filtered_entries
+                                                                        [offset + relative_row];
+                                                                app.picker.selected =
+                                                                    target_real_idx;
+                                                                if is_double_click {
+                                                                    let entry = app.picker.entries
+                                                                        [target_real_idx]
+                                                                        .clone();
+                                                                    if entry.is_dir {
+                                                                        if entry.is_parent {
+                                                                            app.picker.go_parent();
+                                                                        } else {
+                                                                            app.picker.try_set_cwd(
+                                                                                entry.path,
+                                                                            );
+                                                                        }
+                                                                    } else {
+                                                                        let conn_clone =
+                                                                            conn_mutex.clone();
+                                                                        let cfg_handle =
+                                                                            app.config.clone();
+                                                                        let path = entry
+                                                                            .path
+                                                                            .to_string_lossy()
+                                                                            .to_string();
+                                                                        tokio::spawn(async move {
+                                                                            let (staging, mode) = {
+                                                                                let cfg = cfg_handle
+                                                                                    .lock()
+                                                                                    .await;
+                                                                                (
+                                                                                    cfg.staging_dir
+                                                                                        .clone(),
+                                                                                    cfg.staging_mode
+                                                                                        .clone(),
+                                                                                )
+                                                                            };
+
+                                                                            let session_id =
+                                                                                Uuid::new_v4()
+                                                                                    .to_string();
+                                                                            let _ = ingest_path(
+                                                                                conn_clone,
+                                                                                &staging,
+                                                                                &mode,
+                                                                                &path,
+                                                                                &session_id,
+                                                                            )
+                                                                            .await;
+                                                                        });
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 } else {
-                                                    app.last_click_time = Some(now);
-                                                    app.last_click_pos = Some((x, y));
-                                                }
+                                                    app.focus = AppFocus::Remote;
+                                                    if app.s3_objects.is_empty() {
+                                                        request_remote_list(&app).await;
+                                                    }
 
-                                                let inner_y = chunks[0].y + 1;
-                                                let has_filter = !app.input_buffer.is_empty()
-                                                    || app.input_mode == InputMode::Filter;
-                                                let table_y =
-                                                    inner_y + if has_filter { 1 } else { 0 };
-                                                let content_y = table_y + 1; // +1 for header
-
-                                                if y >= content_y {
-                                                    let relative_row = (y - content_y) as usize;
-                                                    let display_height =
-                                                        chunks[0].height.saturating_sub(
-                                                            if has_filter { 4 } else { 3 },
-                                                        )
-                                                            as usize; // Border + table_y + header
-                                                    let filter =
-                                                        app.input_buffer.trim().to_lowercase();
-                                                    let filtered_entries: Vec<usize> = app
-                                                        .picker
-                                                        .entries
-                                                        .iter()
-                                                        .enumerate()
-                                                        .filter(|(_, e)| {
-                                                            e.is_parent
-                                                                || filter.is_empty()
-                                                                || fuzzy_match(&filter, &e.name)
-                                                        })
-                                                        .map(|(i, _)| i)
-                                                        .collect();
-
-                                                    if relative_row < display_height {
-                                                        let total_rows = filtered_entries.len();
-                                                        let current_filtered_selected =
-                                                            filtered_entries
-                                                                .iter()
-                                                                .position(|&i| {
-                                                                    i == app.picker.selected
-                                                                })
-                                                                .unwrap_or(0);
+                                                    let inner_y = chunks[1].y + 2;
+                                                    if y >= inner_y {
+                                                        let relative_row =
+                                                            (y - inner_y) as usize;
+                                                        let display_height =
+                                                            chunks[1].height.saturating_sub(3)
+                                                                as usize;
+                                                        let total_rows = app.s3_objects.len();
                                                         let offset = calculate_list_offset(
-                                                            current_filtered_selected,
+                                                            app.selected_remote,
                                                             total_rows,
                                                             display_height,
                                                         );
-                                                        if offset + relative_row < total_rows {
-                                                            let target_real_idx = filtered_entries
-                                                                [offset + relative_row];
-                                                            app.picker.selected = target_real_idx;
-                                                            if is_double_click {
-                                                                let entry = app.picker.entries
-                                                                    [target_real_idx]
-                                                                    .clone();
-                                                                if entry.is_dir {
-                                                                    if entry.is_parent {
-                                                                        app.picker.go_parent();
-                                                                    } else {
-                                                                        app.picker.try_set_cwd(
-                                                                            entry.path,
-                                                                        );
-                                                                    }
-                                                                } else {
-                                                                    let conn_clone =
-                                                                        conn_mutex.clone();
-                                                                    let cfg_handle =
-                                                                        app.config.clone();
-                                                                    let path = entry
-                                                                        .path
-                                                                        .to_string_lossy()
-                                                                        .to_string();
-                                                                    tokio::spawn(async move {
-                                                                        let (staging, mode) = {
-                                                                            let cfg = cfg_handle
-                                                                                .lock()
-                                                                                .await;
-                                                                            (
-                                                                                cfg.staging_dir
-                                                                                    .clone(),
-                                                                                cfg.staging_mode
-                                                                                    .clone(),
-                                                                            )
-                                                                        };
+                                                        if relative_row < display_height
+                                                            && offset + relative_row < total_rows
+                                                        {
+                                                            let new_idx =
+                                                                offset + relative_row;
+                                                            app.selected_remote = new_idx;
 
-                                                                        let session_id =
-                                                                            Uuid::new_v4()
-                                                                                .to_string();
-                                                                        let _ = ingest_path(
-                                                                            conn_clone,
-                                                                            &staging,
-                                                                            &mode,
-                                                                            &path,
-                                                                            &session_id,
-                                                                        )
-                                                                        .await;
+                                                            // Double click to navigate
+                                                            let now = Instant::now();
+                                                            let is_double_click = if let (
+                                                                Some(last_time),
+                                                                Some(last_pos),
+                                                            ) = (
+                                                                app.last_click_time,
+                                                                app.last_click_pos,
+                                                            ) {
+                                                                now.duration_since(last_time)
+                                                                    < Duration::from_millis(500)
+                                                                    && last_pos == (x, y)
+                                                            } else {
+                                                                false
+                                                            };
+
+                                                            if is_double_click {
+                                                                app.last_click_time = None;
+                                                                let obj =
+                                                                    &app.s3_objects[new_idx];
+                                                                if obj.is_dir {
+                                                                    app.remote_current_path
+                                                                        .push_str(&obj.name);
+                                                                    app.selected_remote = 0;
+                                                                    app.input_mode =
+                                                                        InputMode::RemoteBrowsing;
+
+                                                                    let tx =
+                                                                        app.async_tx.clone();
+                                                                    let config_clone =
+                                                                        app.config.lock().await
+                                                                            .clone();
+                                                                    let current_path =
+                                                                        app.remote_current_path
+                                                                            .clone();
+                                                                    tokio::spawn(async move {
+                                                                        let res = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, Some(&current_path)).await;
+                                                                        match res {
+                                                                            Ok(files) => {
+                                                                                let _ = tx.send(
+                                                                                AppEvent::RemoteFileList(
+                                                                                    files,
+                                                                                ),
+                                                                            );
+                                                                            }
+                                                                            Err(e) => {
+                                                                                let _ = tx.send(
+                                                                                AppEvent::Notification(
+                                                                                    format!(
+                                                                                        "List Failed: {}",
+                                                                                        e
+                                                                                    ),
+                                                                                ),
+                                                                            );
+                                                                            }
+                                                                        }
                                                                     });
                                                                 }
+                                                            } else {
+                                                                app.last_click_time = Some(now);
+                                                                app.last_click_pos = Some((x, y));
                                                             }
                                                         }
                                                     }
                                                 }
                                             } else {
                                                 app.focus = AppFocus::Queue;
-                                                let inner_y = chunks[1].y + 1;
-                                                let has_filter = !app.queue_search_query.is_empty()
-                                                    || app.input_mode == InputMode::QueueSearch;
+                                                let inner_area = Block::default()
+                                                    .borders(
+                                                        Borders::LEFT
+                                                            | Borders::RIGHT
+                                                            | Borders::BOTTOM,
+                                                    )
+                                                    .inner(queue_area);
+                                                let has_filter =
+                                                    !app.queue_search_query.is_empty()
+                                                        || app.input_mode
+                                                            == InputMode::QueueSearch;
                                                 let table_y =
-                                                    inner_y + if has_filter { 1 } else { 0 };
+                                                    inner_area.y + if has_filter { 1 } else { 0 };
                                                 let content_y = table_y + 1; // +1 for header
 
                                                 if y >= content_y {
-                                                    let relative_row = (y - content_y) as usize;
-                                                    let display_height =
-                                                        chunks[1].height.saturating_sub(
-                                                            if has_filter { 4 } else { 3 },
-                                                        )
-                                                            as usize;
+                                                    let relative_row =
+                                                        (y - content_y) as usize;
+                                                    let display_height = inner_area
+                                                        .height
+                                                        .saturating_sub(if has_filter { 1 } else { 0 })
+                                                        .saturating_sub(2)
+                                                        as usize;
                                                     let total_rows = app.visual_jobs.len();
                                                     let offset = calculate_list_offset(
                                                         app.selected,
@@ -2829,8 +2846,7 @@ pub async fn run_tui(
                                     if is_down {
                                         app.current_tab = match app.current_tab {
                                             AppTab::Transfers => AppTab::Quarantine,
-                                            AppTab::Quarantine => AppTab::Remote,
-                                            AppTab::Remote => AppTab::Logs,
+                                            AppTab::Quarantine => AppTab::Logs,
                                             AppTab::Logs => AppTab::Settings,
                                             AppTab::Settings => AppTab::Transfers,
                                         };
@@ -2838,8 +2854,7 @@ pub async fn run_tui(
                                         app.current_tab = match app.current_tab {
                                             AppTab::Transfers => AppTab::Settings,
                                             AppTab::Quarantine => AppTab::Transfers,
-                                            AppTab::Remote => AppTab::Quarantine,
-                                            AppTab::Logs => AppTab::Remote,
+                                            AppTab::Logs => AppTab::Quarantine,
                                             AppTab::Settings => AppTab::Logs,
                                         };
                                     }
@@ -2864,20 +2879,43 @@ pub async fn run_tui(
                                             }
                                         }
                                         AppTab::Transfers => {
-                                            let hopper_percent =
-                                                app.cached_config.hopper_width_percent;
-                                            let chunks = Layout::default()
-                                                .direction(Direction::Horizontal)
+                                            let local_percent =
+                                                app.cached_config.local_width_percent;
+                                            let vertical_chunks = Layout::default()
+                                                .direction(Direction::Vertical)
                                                 .constraints([
-                                                    Constraint::Percentage(hopper_percent),
-                                                    Constraint::Percentage(100 - hopper_percent),
+                                                    Constraint::Min(0),
+                                                    Constraint::Length(20),
                                                 ])
                                                 .split(center_layout);
-                                            if x < chunks[0].x + chunks[0].width {
-                                                if is_down {
-                                                    app.picker.move_down();
-                                                } else {
-                                                    app.picker.move_up();
+
+                                            let top_area = vertical_chunks[0];
+
+                                            if y < top_area.y + top_area.height {
+                                                let chunks = Layout::default()
+                                                    .direction(Direction::Horizontal)
+                                                    .constraints([
+                                                        Constraint::Percentage(local_percent),
+                                                        Constraint::Percentage(
+                                                            100 - local_percent,
+                                                        ),
+                                                    ])
+                                                    .split(top_area);
+
+                                                if x < chunks[0].x + chunks[0].width {
+                                                    if is_down {
+                                                        app.picker.move_down();
+                                                    } else {
+                                                        app.picker.move_up();
+                                                    }
+                                                } else if is_down {
+                                                    if app.selected_remote + 1
+                                                        < app.s3_objects.len()
+                                                    {
+                                                        app.selected_remote += 1;
+                                                    }
+                                                } else if app.selected_remote > 0 {
+                                                    app.selected_remote -= 1;
                                                 }
                                             } else if is_down {
                                                 if app.selected + 1 < app.visual_jobs.len() {
@@ -3005,7 +3043,6 @@ pub async fn run_tui(
                                                 }
                                             }
                                         }
-                                        _ => {}
                                     }
                                 } else if x >= right_layout.x
                                     && x < right_layout.x + right_layout.width
@@ -3047,14 +3084,14 @@ async fn adjust_layout_dimension(
 ) {
     let mut cfg = config.lock().await;
     match target {
-        LayoutTarget::Hopper => {
-            cfg.hopper_width_percent =
-                (cfg.hopper_width_percent as i16 + delta * 5).clamp(20, 80) as u16;
+        LayoutTarget::Local => {
+            cfg.local_width_percent =
+                (cfg.local_width_percent as i16 + delta * 5).clamp(20, 80) as u16;
         }
         LayoutTarget::Queue => {
-            // Queue is automatically 100 - hopper, so adjust hopper in reverse
-            cfg.hopper_width_percent =
-                (cfg.hopper_width_percent as i16 - delta * 5).clamp(20, 80) as u16;
+            // Queue is automatically 100 - local, so adjust local in reverse
+            cfg.local_width_percent =
+                (cfg.local_width_percent as i16 - delta * 5).clamp(20, 80) as u16;
         }
         LayoutTarget::History => {
             cfg.history_width = (cfg.history_width as i16 + delta).clamp(40, 100) as u16;
@@ -3065,22 +3102,70 @@ async fn adjust_layout_dimension(
 async fn reset_layout_dimension(config: &Arc<AsyncMutex<Config>>, target: LayoutTarget) {
     let mut cfg = config.lock().await;
     match target {
-        LayoutTarget::Hopper | LayoutTarget::Queue => cfg.hopper_width_percent = 50,
+        LayoutTarget::Local | LayoutTarget::Queue => cfg.local_width_percent = 50,
         LayoutTarget::History => cfg.history_width = 60,
     }
 }
 
 async fn reset_all_layout_dimensions(config: &Arc<AsyncMutex<Config>>) {
     let mut cfg = config.lock().await;
-    cfg.hopper_width_percent = 50;
+    cfg.local_width_percent = 50;
     cfg.history_width = 60;
 }
 
 async fn update_layout_message(app: &mut App, target: LayoutTarget) {
     let cfg = app.config.lock().await;
     app.layout_adjust_message = match target {
-        LayoutTarget::Hopper => format!("Hopper Width: {}% (20-80)", cfg.hopper_width_percent),
-        LayoutTarget::Queue => format!("Queue Width: {}% (20-80)", 100 - cfg.hopper_width_percent),
+        LayoutTarget::Local => format!("Local Width: {}% (20-80)", cfg.local_width_percent),
+        LayoutTarget::Queue => format!("Queue Width: {}% (20-80)", 100 - cfg.local_width_percent),
         LayoutTarget::History => format!("History Width: {} chars (40-100)", cfg.history_width),
     };
+}
+
+async fn request_remote_list(app: &App) {
+    let tx = app.async_tx.clone();
+    let config_clone = app.config.lock().await.clone();
+    let current_path = app.remote_current_path.clone();
+    tokio::spawn(async move {
+        let path_arg = if current_path.is_empty() {
+            None
+        } else {
+            Some(current_path.as_str())
+        };
+        let res =
+            crate::services::uploader::Uploader::list_bucket_contents(&config_clone, path_arg)
+                .await;
+        match res {
+            Ok(files) => {
+                let _ = tx.send(AppEvent::RemoteFileList(files));
+            }
+            Err(e) => {
+                let _ = tx.send(AppEvent::Notification(format!("List Failed: {}", e)));
+            }
+        }
+    });
+}
+
+fn s3_ready(config: &Config) -> bool {
+    let bucket_ok = config
+        .s3_bucket
+        .as_ref()
+        .map(|b| !b.trim().is_empty())
+        .unwrap_or(false);
+    if !bucket_ok {
+        return false;
+    }
+
+    let access_ok = config
+        .s3_access_key
+        .as_ref()
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    let secret_ok = config
+        .s3_secret_key
+        .as_ref()
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+
+    !(access_ok ^ secret_ok)
 }

@@ -76,8 +76,8 @@ pub struct Config {
     pub host_metrics_enabled: bool,
 
     // Layout dimensions
-    #[serde(default = "default_hopper_width_percent")]
-    pub hopper_width_percent: u16,
+    #[serde(default = "default_local_width_percent", alias = "local_width_percent")]
+    pub local_width_percent: u16,
     #[serde(default = "default_history_width")]
     pub history_width: u16,
 
@@ -92,11 +92,11 @@ fn default_log_level() -> String {
 fn default_scanner_enabled() -> bool {
     true
 }
-fn default_hopper_width_percent() -> u16 {
+fn default_local_width_percent() -> u16 {
     50
 }
 fn default_history_width() -> u16 {
-    60
+    45
 }
 
 impl Default for Config {
@@ -132,7 +132,7 @@ impl Default for Config {
             theme: Theme::default_name().to_string(),
             scanner_enabled: true,
             host_metrics_enabled: true,
-            hopper_width_percent: 50,
+            local_width_percent: 50,
             history_width: 60,
             log_level: "info".to_string(),
         }
@@ -261,7 +261,8 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         host_metrics_enabled: get("host_metrics_enabled")
             .map(|s| s == "true")
             .unwrap_or(true),
-        hopper_width_percent: get_u16("hopper_width_percent", 50),
+        local_width_percent: get_u16("local_width_percent",
+            get_u16("local_width_percent", 50)), // Fallback to old name for migration
         history_width: get_u16("history_width", 60),
         log_level: get_or("log_level", "info"),
     })
@@ -382,8 +383,8 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
 
     db::set_setting(
         conn,
-        "hopper_width_percent",
-        &cfg.hopper_width_percent.to_string(),
+        "local_width_percent",
+        &cfg.local_width_percent.to_string(),
     )?;
     db::set_setting(conn, "history_width", &cfg.history_width.to_string())?;
     db::set_setting(conn, "log_level", &cfg.log_level)?;
@@ -423,8 +424,8 @@ impl Config {
         }
 
         // Validate layout dimensions
-        if self.hopper_width_percent > 100 {
-            anyhow::bail!("hopper_width_percent must be <= 100");
+        if self.local_width_percent > 100 {
+            anyhow::bail!("local_width_percent must be <= 100");
         }
 
         Ok(())
@@ -473,7 +474,7 @@ mod tests {
         assert_eq!(config.concurrency_scan_parts, 4);
         assert!(config.scanner_enabled);
         assert!(config.host_metrics_enabled);
-        assert_eq!(config.hopper_width_percent, 50);
+        assert_eq!(config.local_width_percent, 50);
         assert_eq!(config.history_width, 60);
         assert_eq!(config.log_level, "info");
     }
@@ -568,14 +569,14 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_hopper_width_percent_over_100() {
+    fn test_validate_local_width_percent_over_100() {
         let config = Config {
-            hopper_width_percent: 101,
+            local_width_percent: 101,
             ..Config::default()
         };
 
         let result = config.validate();
-        assert!(result.is_err(), "Should fail with hopper width > 100%");
+        assert!(result.is_err(), "Should fail with local width > 100%");
     }
 
     // --- Enum Serialization Tests ---
@@ -831,7 +832,7 @@ mod tests {
             theme: "monokai".to_string(),
             scanner_enabled: false,
             host_metrics_enabled: true,
-            hopper_width_percent: 60,
+            local_width_percent: 60,
             history_width: 80,
             log_level: "debug".to_string(),
         };
@@ -875,7 +876,7 @@ mod tests {
         assert_eq!(loaded.concurrency_scan_parts, config.concurrency_scan_parts);
         assert_eq!(loaded.scanner_enabled, config.scanner_enabled);
         assert_eq!(loaded.host_metrics_enabled, config.host_metrics_enabled);
-        assert_eq!(loaded.hopper_width_percent, config.hopper_width_percent);
+        assert_eq!(loaded.local_width_percent, config.local_width_percent);
         assert_eq!(loaded.history_width, config.history_width);
         assert_eq!(loaded.log_level, config.log_level);
 

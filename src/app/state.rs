@@ -23,7 +23,6 @@ use tokio::sync::Mutex as AsyncMutex;
 pub enum AppTab {
     Transfers,
     Quarantine,
-    Remote,
     Logs,
     Settings,
 }
@@ -35,7 +34,7 @@ pub enum AppFocus {
     Queue,   // Only in Transfers tab
     History,
     Quarantine,       // Only in Quarantine tab
-    Remote,           // Only in Remote tab
+    Remote,           // Remote panel in Transfers tab
     Logs,             // Only in Logs tab
     SettingsCategory, // Switch categories
     SettingsFields,   // Edit fields
@@ -86,7 +85,7 @@ pub enum AppEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutTarget {
-    Hopper,
+    Local,
     Queue,
     History,
 }
@@ -200,6 +199,7 @@ pub struct App {
     // Mouse Interaction
     pub last_click_time: Option<Instant>,
     pub last_click_pos: Option<(u16, u16)>,
+    pub hover_pos: Option<(u16, u16)>,
 
     // Layout Adjustment
     pub layout_adjust_target: Option<LayoutTarget>,
@@ -274,6 +274,7 @@ impl App {
             visual_history: Vec::new(),
             last_click_time: None,
             last_click_pos: None,
+            hover_pos: None,
             layout_adjust_target: None,
             layout_adjust_message: String::new(),
 
