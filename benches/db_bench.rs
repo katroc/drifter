@@ -1,11 +1,10 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use drifter::db;
 use rusqlite::Connection;
-use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 
 fn bench_db_operations(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
+    let _rt = Runtime::new().unwrap();
     
     // Setup in-memory DB
     let conn = Connection::open_in_memory().unwrap();

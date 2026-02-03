@@ -606,9 +606,11 @@ mod tests {
         scanner_enabled: bool,
     ) -> Result<(Coordinator, Arc<Mutex<Connection>>)> {
         let conn = Arc::new(Mutex::new(setup_test_db()?));
-        let mut config = Config::default();
-        config.scanner_enabled = scanner_enabled;
-        config.s3_bucket = Some("test-bucket".to_string()); // Minimal config for Uploader
+        let config = Config {
+            scanner_enabled,
+            s3_bucket: Some("test-bucket".to_string()),
+            ..Default::default()
+        };
 
         let config = Arc::new(AsyncMutex::new(config));
         let progress = Arc::new(AsyncMutex::new(HashMap::new()));
