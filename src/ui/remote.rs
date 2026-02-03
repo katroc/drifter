@@ -16,14 +16,22 @@ pub fn render_remote(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         .split(area);
 
     // S3 Object List
+    let is_focused = app.focus == AppFocus::Remote;
     let items: Vec<ListItem> = app
         .s3_objects
         .iter()
         .map(|obj| {
-            let (icon, style) = if obj.is_dir {
+            let (icon, base_style) = if obj.is_dir {
                 ("📁", theme.text_style().fg(theme.info))
             } else {
                 ("📄", theme.text_style())
+            };
+
+            // Apply dimming if panel is not focused
+            let style = if !is_focused {
+                base_style.patch(theme.dim_style())
+            } else {
+                base_style
             };
 
             let size_str = if obj.is_dir {
@@ -81,10 +89,20 @@ pub fn render_remote(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         p,
         mode_indicator
     );
+
+    let is_focused = app.focus == AppFocus::Remote;
+    let panel_style = if is_focused {
+        theme.panel_style()
+    } else {
+        theme.panel_style().patch(theme.dim_style())
+    };
+
+    // Complete borders for consistency
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(Span::styled(title, theme.header_style()));
+        .title(Span::styled(title, theme.header_style()))
+        .style(panel_style);
 
     let mut state = ListState::default();
     state.select(Some(app.selected_remote));

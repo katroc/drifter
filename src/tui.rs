@@ -145,8 +145,8 @@ pub async fn run_tui(
                         if app.input_mode == InputMode::LayoutAdjust {
                             match key.code {
                                 KeyCode::Char('1') => {
-                                    app.layout_adjust_target = Some(LayoutTarget::Hopper);
-                                    update_layout_message(&mut app, LayoutTarget::Hopper).await;
+                                    app.layout_adjust_target = Some(LayoutTarget::Local);
+                                    update_layout_message(&mut app, LayoutTarget::Local).await;
                                 }
                                 KeyCode::Char('2') => {
                                     app.layout_adjust_target = Some(LayoutTarget::Queue);
@@ -456,7 +456,7 @@ pub async fn run_tui(
                                 {
                                     app.input_mode = InputMode::LayoutAdjust;
                                     app.layout_adjust_target = None;
-                                    app.layout_adjust_message = "Layout Adjustment: 1=Hopper 2=Queue 3=History | +/- adjust | r reset | R reset-all | s save | q cancel".to_string();
+                                    app.layout_adjust_message = "Layout Adjustment: 1=Local 2=Queue 3=History | +/- adjust | r reset | R reset-all | s save | q cancel".to_string();
                                     continue;
                                 }
                                 KeyCode::Char('q') if app.focus != AppFocus::Logs => {
@@ -472,12 +472,19 @@ pub async fn run_tui(
                                             AppTab::Logs => AppFocus::Logs,
                                             AppTab::Settings => AppFocus::SettingsCategory,
                                         },
-                                        AppFocus::Browser => AppFocus::Queue,
+                                        AppFocus::Browser => {
+                                            // In Transfers tab, cycle to Remote; otherwise to Queue
+                                            if app.current_tab == AppTab::Transfers {
+                                                AppFocus::Remote
+                                            } else {
+                                                AppFocus::Queue
+                                            }
+                                        }
+                                        AppFocus::Remote => AppFocus::Queue,
                                         AppFocus::Queue => AppFocus::History,
                                         AppFocus::SettingsCategory => AppFocus::SettingsFields,
                                         AppFocus::History
                                         | AppFocus::Quarantine
-                                        | AppFocus::Remote
                                         | AppFocus::Logs
                                         | AppFocus::SettingsFields => AppFocus::Rail,
                                     };
@@ -492,11 +499,18 @@ pub async fn run_tui(
                                             AppTab::Settings => AppFocus::SettingsFields,
                                         },
                                         AppFocus::History => AppFocus::Queue,
-                                        AppFocus::Queue => AppFocus::Browser,
+                                        AppFocus::Queue => {
+                                            // In Transfers tab, cycle to Remote; otherwise to Browser
+                                            if app.current_tab == AppTab::Transfers {
+                                                AppFocus::Remote
+                                            } else {
+                                                AppFocus::Browser
+                                            }
+                                        }
+                                        AppFocus::Remote => AppFocus::Browser,
                                         AppFocus::SettingsFields => AppFocus::SettingsCategory,
                                         AppFocus::Browser
                                         | AppFocus::Quarantine
-                                        | AppFocus::Remote
                                         | AppFocus::SettingsCategory
                                         | AppFocus::Logs => AppFocus::Rail,
                                     };
@@ -510,7 +524,14 @@ pub async fn run_tui(
                                             AppTab::Remote => AppFocus::Remote,
                                             AppTab::Settings => AppFocus::SettingsCategory,
                                         },
-                                        AppFocus::Browser => AppFocus::Queue,
+                                        AppFocus::Browser => {
+                                            if app.current_tab == AppTab::Transfers {
+                                                AppFocus::Remote
+                                            } else {
+                                                AppFocus::Queue
+                                            }
+                                        }
+                                        AppFocus::Remote => AppFocus::Queue,
                                         AppFocus::Queue => AppFocus::History,
                                         AppFocus::SettingsCategory => AppFocus::SettingsFields,
                                         _ => app.focus,
@@ -519,10 +540,16 @@ pub async fn run_tui(
                                 KeyCode::Left => {
                                     app.focus = match app.focus {
                                         AppFocus::History => AppFocus::Queue,
-                                        AppFocus::Queue => AppFocus::Browser,
+                                        AppFocus::Queue => {
+                                            if app.current_tab == AppTab::Transfers {
+                                                AppFocus::Remote
+                                            } else {
+                                                AppFocus::Browser
+                                            }
+                                        }
+                                        AppFocus::Remote => AppFocus::Browser,
                                         AppFocus::Browser
                                         | AppFocus::Quarantine
-                                        | AppFocus::Remote
                                         | AppFocus::SettingsCategory => AppFocus::Rail,
                                         AppFocus::SettingsFields => AppFocus::SettingsCategory,
                                         _ => app.focus,
@@ -2216,6 +2243,11 @@ pub async fn run_tui(
                         }
                     }
                     Event::Mouse(mouse) => {
+                        // Track hover position for row highlighting
+                        if mouse.kind == MouseEventKind::Moved {
+                            app.hover_pos = Some((mouse.column, mouse.row));
+                        }
+
                         let history_width = app.cached_config.history_width;
 
                         if let Ok(size) = terminal.size() {
@@ -2365,13 +2397,13 @@ pub async fn run_tui(
                                             }
                                         }
                                         AppTab::Transfers => {
-                                            let hopper_percent =
-                                                app.cached_config.hopper_width_percent;
+                                            let local_percent =
+                                                app.cached_config.local_width_percent;
                                             let chunks = Layout::default()
                                                 .direction(Direction::Horizontal)
                                                 .constraints([
-                                                    Constraint::Percentage(hopper_percent),
-                                                    Constraint::Percentage(100 - hopper_percent),
+                                                    Constraint::Percentage(local_percent),
+                                                    Constraint::Percentage(100 - local_percent),
                                                 ])
                                                 .split(center_layout);
 
@@ -2864,13 +2896,13 @@ pub async fn run_tui(
                                             }
                                         }
                                         AppTab::Transfers => {
-                                            let hopper_percent =
-                                                app.cached_config.hopper_width_percent;
+                                            let local_percent =
+                                                app.cached_config.local_width_percent;
                                             let chunks = Layout::default()
                                                 .direction(Direction::Horizontal)
                                                 .constraints([
-                                                    Constraint::Percentage(hopper_percent),
-                                                    Constraint::Percentage(100 - hopper_percent),
+                                                    Constraint::Percentage(local_percent),
+                                                    Constraint::Percentage(100 - local_percent),
                                                 ])
                                                 .split(center_layout);
                                             if x < chunks[0].x + chunks[0].width {
@@ -3047,14 +3079,14 @@ async fn adjust_layout_dimension(
 ) {
     let mut cfg = config.lock().await;
     match target {
-        LayoutTarget::Hopper => {
-            cfg.hopper_width_percent =
-                (cfg.hopper_width_percent as i16 + delta * 5).clamp(20, 80) as u16;
+        LayoutTarget::Local => {
+            cfg.local_width_percent =
+                (cfg.local_width_percent as i16 + delta * 5).clamp(20, 80) as u16;
         }
         LayoutTarget::Queue => {
-            // Queue is automatically 100 - hopper, so adjust hopper in reverse
-            cfg.hopper_width_percent =
-                (cfg.hopper_width_percent as i16 - delta * 5).clamp(20, 80) as u16;
+            // Queue is automatically 100 - local, so adjust local in reverse
+            cfg.local_width_percent =
+                (cfg.local_width_percent as i16 - delta * 5).clamp(20, 80) as u16;
         }
         LayoutTarget::History => {
             cfg.history_width = (cfg.history_width as i16 + delta).clamp(40, 100) as u16;
@@ -3065,22 +3097,22 @@ async fn adjust_layout_dimension(
 async fn reset_layout_dimension(config: &Arc<AsyncMutex<Config>>, target: LayoutTarget) {
     let mut cfg = config.lock().await;
     match target {
-        LayoutTarget::Hopper | LayoutTarget::Queue => cfg.hopper_width_percent = 50,
+        LayoutTarget::Local | LayoutTarget::Queue => cfg.local_width_percent = 50,
         LayoutTarget::History => cfg.history_width = 60,
     }
 }
 
 async fn reset_all_layout_dimensions(config: &Arc<AsyncMutex<Config>>) {
     let mut cfg = config.lock().await;
-    cfg.hopper_width_percent = 50;
+    cfg.local_width_percent = 50;
     cfg.history_width = 60;
 }
 
 async fn update_layout_message(app: &mut App, target: LayoutTarget) {
     let cfg = app.config.lock().await;
     app.layout_adjust_message = match target {
-        LayoutTarget::Hopper => format!("Hopper Width: {}% (20-80)", cfg.hopper_width_percent),
-        LayoutTarget::Queue => format!("Queue Width: {}% (20-80)", 100 - cfg.hopper_width_percent),
+        LayoutTarget::Local => format!("Local Width: {}% (20-80)", cfg.local_width_percent),
+        LayoutTarget::Queue => format!("Queue Width: {}% (20-80)", 100 - cfg.local_width_percent),
         LayoutTarget::History => format!("History Width: {} chars (40-100)", cfg.history_width),
     };
 }

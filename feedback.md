@@ -16,11 +16,6 @@
 
 ## 2. Screen Real Estate & Layout
 
-**The History Panel Gluttony**
-*   **The Flaw:** The Right Panel (History/Metrics) occupies a massive, fixed chunk of the screen at all times.
-*   **The Friction:** On small screens or splits, the active work areas (Local/Queue) are unnecessarily cramped by "dead" reference information.
-*   **The Fix:** Make the History panel **collapsible** (toggle with `h`) or move it to a bottom drawer.
-
 **The "Boxy" Fatigue**
 *   **The Flaw:** Every component is wrapped in heavy borders (Rail, Hopper, Queue, History, Footer).
 *   **The Friction:** High visual noise. The eye gets stuck on grid lines rather than content, creating a claustrophobic feel.
@@ -64,7 +59,6 @@
 3.  Add Notification Badges to Rail.
 
 ### Phase 2: Structural Refactor
-4.  Implement Collapsible History panel (`h` toggle).
 5.  Side-by-side Local/Remote "Commander" layout.
 
 ### Phase 3: Visual Polish

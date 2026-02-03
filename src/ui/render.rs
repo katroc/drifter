@@ -156,29 +156,53 @@ fn draw_rail(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    let is_focused = app.focus == AppFocus::Rail;
+    let panel_style = if is_focused {
+        app.theme.panel_style()
+    } else {
+        app.theme.panel_style().patch(app.theme.dim_style())
+    };
+
+    // Remove right border to avoid double border with main content
     let table = Table::new(rows, [Constraint::Fill(1)]).block(
         Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT)
             .border_type(app.theme.border_type)
             .title(" Navigation ")
             .border_style(focus_style)
-            .style(app.theme.panel_style()),
+            .style(panel_style),
     );
     f.render_widget(table, area);
 }
 
 fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
-    let hopper_percent = app.cached_config.hopper_width_percent;
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
+    // Commander Layout: Split vertically - (Local|Remote) on top, Queue on bottom
+    let vertical_chunks = Layout::default()
+        .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(hopper_percent),
-            Constraint::Percentage(100 - hopper_percent),
+            Constraint::Min(0),      // Top: Local | Remote browsers
+            Constraint::Length(20),  // Bottom: Queue (18 rows + 2 borders)
         ])
         .split(area);
 
-    draw_browser(f, app, chunks[0]);
-    draw_jobs(f, app, chunks[1]);
+    // Split top area horizontally: Local | Remote
+    let local_percent = app.cached_config.local_width_percent;
+    let horizontal_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(local_percent),
+            Constraint::Percentage(100 - local_percent),
+        ])
+        .split(vertical_chunks[0]);
+
+    // Render Local browser (left)
+    draw_browser(f, app, horizontal_chunks[0]);
+
+    // Render Remote browser (right)
+    crate::ui::remote::render_remote(f, app, horizontal_chunks[1], &app.theme);
+
+    // Render Queue (bottom)
+    draw_jobs(f, app, vertical_chunks[1]);
 }
 
 fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
@@ -195,25 +219,32 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
 
     let path_str = app.picker.cwd.to_string_lossy();
     let title_prefix = match app.input_mode {
-        InputMode::Browsing => " Hopper (Browsing) ",
-        InputMode::Filter => " Hopper (Filter) ",
-        InputMode::Normal if is_focused => " Hopper (Press 'a' to browse) ",
-        InputMode::Normal => " Hopper ",
-        InputMode::Confirmation => " Hopper ",
+        InputMode::Browsing => " Local (Browsing) ",
+        InputMode::Filter => " Local (Filter) ",
+        InputMode::Normal if is_focused => " Local (Press 'a' to browse) ",
+        InputMode::Normal => " Local ",
+        InputMode::Confirmation => " Local ",
         InputMode::LayoutAdjust => " Layout ",
         InputMode::LogSearch => " Search ",
         InputMode::QueueSearch => " Queue (Search) ",
         InputMode::HistorySearch => " History (Search) ",
-        _ => " Hopper ",
+        _ => " Local ",
     };
     let title = format!("{}{}", title_prefix, path_str);
 
+    let panel_style = if is_focused {
+        app.theme.panel_style()
+    } else {
+        app.theme.panel_style().patch(app.theme.dim_style())
+    };
+
+    // In Commander layout, keep right border to separate from Remote panel
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
         .title(title)
         .border_style(focus_style)
-        .style(app.theme.panel_style());
+        .style(panel_style);
 
     let inner_area = block.inner(area);
     f.render_widget(block, area);
@@ -297,6 +328,18 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
         .unwrap_or(0);
     let offset = calculate_list_offset(filtered_selected, total_rows, display_height);
 
+    // Calculate hover row index if mouse is hovering over this panel
+    let hover_row_idx = app.hover_pos.and_then(|(hx, hy)| {
+        // Check if hover is within table area (accounting for header and borders)
+        let table_start_y = area.y + 1 + if has_filter { 1 } else { 0 } + 1; // border + filter? + header
+        let table_end_y = area.y + area.height.saturating_sub(1);
+        if hx >= area.x && hx < area.x + area.width && hy >= table_start_y && hy < table_end_y {
+            Some((hy - table_start_y) as usize + offset)
+        } else {
+            None
+        }
+    });
+
     let header = Row::new(vec![
         Cell::from("Name"),
         Cell::from("Size"),
@@ -344,9 +387,13 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
             let is_selected =
                 (*orig_idx == app.picker.selected) && (app.focus == AppFocus::Browser);
             let is_staged = app.picker.selected_paths.contains(&entry.path);
+            let is_hovered = hover_row_idx == Some(*orig_idx);
 
             let mut style = if is_selected {
                 app.theme.selection_style()
+            } else if is_hovered && !is_focused {
+                // Subtle hover highlight when not focused
+                app.theme.row_style(false).add_modifier(Modifier::BOLD)
             } else if (visible_idx + offset).is_multiple_of(2) {
                 app.theme.row_style(false)
             } else {
@@ -359,6 +406,11 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
                 } else {
                     style = app.theme.status_style(StatusKind::Success);
                 }
+            }
+
+            // Apply dimming if panel is not focused
+            if !is_focused {
+                style = style.patch(app.theme.dim_style());
             }
 
             Row::new(vec![
@@ -435,6 +487,17 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
 
     let offset = calculate_list_offset(app.selected, total_rows, display_height);
 
+    // Calculate hover row index if mouse is hovering over this panel
+    let hover_row_idx = app.hover_pos.and_then(|(hx, hy)| {
+        let table_start_y = area.y + 1; // border
+        let table_end_y = area.y + area.height.saturating_sub(1);
+        if hx >= area.x && hx < area.x + area.width && hy >= table_start_y && hy < table_end_y {
+            Some((hy - table_start_y) as usize + offset)
+        } else {
+            None
+        }
+    });
+
     let rows = app
         .visual_jobs
         .iter()
@@ -443,11 +506,20 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
         .take(display_height)
         .map(|(idx, item)| {
             let is_selected = (idx == app.selected) && (app.focus == AppFocus::Queue);
-            let row_style = if is_selected {
+            let is_hovered = hover_row_idx == Some(idx);
+            let mut row_style = if is_selected {
                 app.theme.selection_style()
+            } else if is_hovered && app.focus != AppFocus::Queue {
+                app.theme.row_style(idx % 2 != 0).add_modifier(Modifier::BOLD)
             } else {
                 app.theme.row_style(idx % 2 != 0)
             };
+
+            // Apply dimming if panel is not focused
+            let is_queue_focused = app.focus == AppFocus::Queue;
+            if !is_queue_focused {
+                row_style = row_style.patch(app.theme.dim_style());
+            }
 
             let indent = " ".repeat(item.depth * 2);
             let text = if item.text.len() > 35 {
@@ -535,12 +607,20 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
             }
         });
 
+    let is_focused = app.focus == AppFocus::Queue;
+    let panel_style = if is_focused {
+        app.theme.panel_style()
+    } else {
+        app.theme.panel_style().patch(app.theme.dim_style())
+    };
+
+    // Complete borders for consistency
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
         .title(" Queue (Jobs) ")
         .border_style(focus_style)
-        .style(app.theme.panel_style());
+        .style(panel_style);
 
     f.render_widget(block, area);
 
@@ -573,12 +653,20 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
         .style(app.theme.header_style())
         .height(1);
 
+    let is_focused = app.focus == AppFocus::History;
+    let panel_style = if is_focused {
+        app.theme.panel_style()
+    } else {
+        app.theme.panel_style().patch(app.theme.dim_style())
+    };
+
+    // Complete borders for consistency
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
         .title(format!(" History [{}] ", app.history_filter.as_str()))
         .border_style(focus_style)
-        .style(app.theme.panel_style());
+        .style(panel_style);
 
     let inner_area = block.inner(area);
     f.render_widget(block, area);
@@ -624,11 +712,17 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
         .take(display_height)
         .map(|(idx, item)| {
             let is_selected = (idx == app.selected_history) && (app.focus == AppFocus::History);
-            let row_style = if is_selected {
+            let is_focused = app.focus == AppFocus::History;
+            let mut row_style = if is_selected {
                 app.theme.selection_style()
             } else {
                 app.theme.row_style(idx % 2 != 0)
             };
+
+            // Apply dimming if panel is not focused
+            if !is_focused {
+                row_style = row_style.patch(app.theme.dim_style());
+            }
 
             let indent = " ".repeat(item.depth * 2);
             let text = if item.text.len() > 30 {
@@ -715,6 +809,7 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRow) {
+    // Complete borders for consistency
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
@@ -924,11 +1019,17 @@ fn draw_quarantine(f: &mut Frame, app: &App, area: Rect) {
         .map(|(idx, job)| {
             let is_selected =
                 (idx == app.selected_quarantine) && (app.focus == AppFocus::Quarantine);
-            let row_style = if is_selected {
+            let is_focused = app.focus == AppFocus::Quarantine;
+            let mut row_style = if is_selected {
                 app.theme.selection_style()
             } else {
                 app.theme.row_style(idx % 2 != 0)
             };
+
+            // Apply dimming if panel is not focused
+            if !is_focused {
+                row_style = row_style.patch(app.theme.dim_style());
+            }
 
             let filename = std::path::Path::new(&job.source_path)
                 .file_name()
@@ -969,6 +1070,13 @@ fn draw_quarantine(f: &mut Frame, app: &App, area: Rect) {
             .style(row_style)
         });
 
+    let is_focused = app.focus == AppFocus::Quarantine;
+    let panel_style = if is_focused {
+        app.theme.panel_style()
+    } else {
+        app.theme.panel_style().patch(app.theme.dim_style())
+    };
+
     let table = Table::new(
         rows,
         [
@@ -985,7 +1093,7 @@ fn draw_quarantine(f: &mut Frame, app: &App, area: Rect) {
             .border_type(app.theme.border_type)
             .title(" Quarantine Zone ")
             .border_style(focus_style)
-            .style(app.theme.panel_style()),
+            .style(panel_style),
     );
 
     f.render_widget(table, area);
@@ -1468,22 +1576,41 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     };
     let act = |a: &str| Span::styled(format!(" {}", a), app.theme.muted_style());
 
+    // Macro to add persistent global keys to any keybinding list
+    macro_rules! add_global_keys {
+        ($spans:expr) => {{
+            let mut result = $spans;
+            if !result.is_empty() {
+                result.push(sep());
+            }
+            result.push(key("Tab"));
+            result.push(act("Navigate"));
+            // Only show quit in modes where 'q' means quit (not in Logs where it means Back)
+            if app.focus != AppFocus::Logs || app.input_mode != InputMode::Normal {
+                result.push(sep());
+                result.push(key("q"));
+                result.push(act("Quit"));
+            }
+            result
+        }};
+    }
+
     let footer_spans = match app.input_mode {
-        InputMode::LogSearch => vec![
+        InputMode::LogSearch => add_global_keys!(vec![
             key("Enter"),
             act("Search"),
             sep(),
             key("Esc"),
             act("Cancel"),
-        ],
-        InputMode::QueueSearch | InputMode::HistorySearch => vec![
+        ]),
+        InputMode::QueueSearch | InputMode::HistorySearch => add_global_keys!(vec![
             key("Type"),
             act("to filter"),
             sep(),
             key("Enter/Esc"),
             act("Done"),
-        ],
-        InputMode::Filter => vec![
+        ]),
+        InputMode::Filter => add_global_keys!(vec![
             key("Type"),
             act("to filter"),
             sep(),
@@ -1495,8 +1622,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             sep(),
             key("Esc"),
             act("Back"),
-        ],
-        InputMode::Browsing => vec![
+        ]),
+        InputMode::Browsing => add_global_keys!(vec![
             key("←/→"),
             act("Navigate"),
             sep(),
@@ -1517,8 +1644,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             sep(),
             key("Esc"),
             act("Exit"),
-        ],
-        InputMode::RemoteBrowsing => vec![
+        ]),
+        InputMode::RemoteBrowsing => add_global_keys!(vec![
             key("←/→"),
             act("Navigate"),
             sep(),
@@ -1527,12 +1654,12 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             sep(),
             key("Esc"),
             act("Exit"),
-        ],
-        InputMode::Confirmation => vec![Span::styled(
+        ]),
+        InputMode::Confirmation => add_global_keys!(vec![Span::styled(
             "Confirmation Required",
             app.theme.muted_style(),
-        )],
-        InputMode::LayoutAdjust => vec![
+        )]),
+        InputMode::LayoutAdjust => add_global_keys!(vec![
             key("1-3"),
             act("Select Panel"),
             sep(),
@@ -1547,10 +1674,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             sep(),
             key("q"),
             act("Cancel"),
-        ],
+        ]),
         InputMode::Normal => {
             if app.current_tab == AppTab::Remote {
-                vec![
+                add_global_keys!(vec![
                     key("r"),
                     act("Refresh"),
                     sep(),
@@ -1559,34 +1686,25 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     sep(),
                     key("x"),
                     act("Delete"),
-                    sep(),
-                    key("Tab"),
-                    act("Nav"),
-                ]
+                ])
             } else {
                 match app.focus {
-                    AppFocus::Logs => vec![key("q"), act("Back")],
-                    AppFocus::Rail => vec![
+                    AppFocus::Logs => add_global_keys!(vec![key("q"), act("Back")]),
+                    AppFocus::Rail => add_global_keys!(vec![
                         key("Tab/→"),
                         act("Content"),
                         sep(),
                         key("↑/↓"),
                         act("Switch Tab"),
-                        sep(),
-                        key("q"),
-                        act("Quit"),
-                    ],
-                    AppFocus::Browser => vec![
+                    ]),
+                    AppFocus::Browser => add_global_keys!(vec![
                         key("↑/↓"),
                         act("Select"),
                         sep(),
                         key("a"),
                         act("Browse"),
-                        sep(),
-                        key("Tab"),
-                        act("Next Panel"),
-                    ],
-                    AppFocus::Queue => vec![
+                    ]),
+                    AppFocus::Queue => add_global_keys!(vec![
                         key("↑/↓"),
                         act("Select"),
                         sep(),
@@ -1610,19 +1728,15 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                         sep(),
                         key("d"),
                         act("Cancel"),
-                    ],
-                    AppFocus::History => {
-                        vec![key("Tab"), act("Rail"), sep(), key("←"), act("Queue")]
-                    }
-                    AppFocus::Remote => vec![
+                    ]),
+                    AppFocus::History => add_global_keys!(vec![
+                        key("←"),
+                        act("Queue"),
+                    ]),
+                    AppFocus::Remote => add_global_keys!(vec![
                         // Handled by AppTab::Remote above mostly, but kept for completeness if needed
-                        key("Tab"),
-                        act("Rail"),
-                    ],
-                    AppFocus::Quarantine => vec![
-                        key("Tab"),
-                        act("Rail"),
-                        sep(),
+                    ]),
+                    AppFocus::Quarantine => add_global_keys!(vec![
                         key("←"),
                         act("Rail"),
                         sep(),
@@ -1631,9 +1745,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                         sep(),
                         key("R"),
                         act("Refresh"),
-                    ],
+                    ]),
                     AppFocus::SettingsCategory => match app.settings.active_category {
-                        SettingsCategory::S3 | SettingsCategory::Scanner => vec![
+                        SettingsCategory::S3 | SettingsCategory::Scanner => add_global_keys!(vec![
                             key("Tab/→"),
                             act("Fields"),
                             sep(),
@@ -1648,8 +1762,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                             sep(),
                             key("t"),
                             act("Test"),
-                        ],
-                        _ => vec![
+                        ]),
+                        _ => add_global_keys!(vec![
                             key("Tab/→"),
                             act("Fields"),
                             sep(),
@@ -1661,13 +1775,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                             sep(),
                             key("s"),
                             act("Save"),
-                        ],
+                        ]),
                     },
                     AppFocus::SettingsFields => match app.settings.active_category {
-                        SettingsCategory::S3 | SettingsCategory::Scanner => vec![
-                            key("Tab"),
-                            act("Rail"),
-                            sep(),
+                        SettingsCategory::S3 | SettingsCategory::Scanner => add_global_keys!(vec![
                             key("←"),
                             act("Category"),
                             sep(),
@@ -1679,11 +1790,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                             sep(),
                             key("t"),
                             act("Test"),
-                        ],
-                        _ => vec![
-                            key("Tab"),
-                            act("Rail"),
-                            sep(),
+                        ]),
+                        _ => add_global_keys!(vec![
                             key("←"),
                             act("Category"),
                             sep(),
@@ -1692,7 +1800,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                             sep(),
                             key("s"),
                             act("Save"),
-                        ],
+                        ]),
                     },
                 }
             }
@@ -1819,7 +1927,7 @@ fn draw_layout_adjustment_overlay(f: &mut Frame, app: &App, area: Rect) {
     let highlight = app.theme.selection_style();
     let normal = app.theme.text_style();
 
-    let queue_width = 100 - cfg.hopper_width_percent;
+    let queue_width = 100 - cfg.local_width_percent;
 
     let lines = vec![
         Line::from("Select a panel to adjust:"),
@@ -1827,13 +1935,13 @@ fn draw_layout_adjustment_overlay(f: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled(
                 "1. ",
-                if current == Some(LayoutTarget::Hopper) {
+                if current == Some(LayoutTarget::Local) {
                     highlight
                 } else {
                     normal
                 },
             ),
-            Span::styled(format!("Hopper: {}%", cfg.hopper_width_percent), normal),
+            Span::styled(format!("Local: {}%", cfg.local_width_percent), normal),
         ]),
         Line::from(vec![
             Span::styled(
@@ -1926,6 +2034,7 @@ fn draw_metrics_panel(f: &mut Frame, app: &App, area: Rect) {
     let mk_style = app.theme.accent_style().add_modifier(Modifier::BOLD);
     let mk_val = app.theme.text_style();
 
+    // Complete borders for consistency
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
