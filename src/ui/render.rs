@@ -723,6 +723,7 @@ fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRo
         .style(app.theme.panel_style());
 
     let scan_status = job.scan_status.as_deref().unwrap_or("none");
+    let upload_status = job.upload_status.as_deref().unwrap_or("none");
     let error = job.error.as_deref().unwrap_or("none");
 
     let mut text = vec![
@@ -755,6 +756,10 @@ fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRo
         Line::from(vec![
             Span::styled("Scan:   ", app.theme.highlight_style()),
             Span::styled(scan_status, app.theme.text_style()),
+        ]),
+        Line::from(vec![
+            Span::styled("Upload: ", app.theme.highlight_style()),
+            Span::styled(upload_status, app.theme.text_style()),
         ]),
     ];
 

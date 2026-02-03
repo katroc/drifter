@@ -17,6 +17,7 @@ pub struct JobRow {
     pub staged_path: Option<String>,
     pub error: Option<String>,
     pub scan_status: Option<String>,
+    pub upload_status: Option<String>,
     pub s3_upload_id: Option<String>,
     pub s3_key: Option<String>,
     pub priority: i64,
@@ -141,7 +142,7 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
     Ok(conn)
 }
 
-pub const JOB_COLUMNS: &str = "id, session_id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at, scan_duration_ms, upload_duration_ms";
+pub const JOB_COLUMNS: &str = "id, session_id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, upload_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at, scan_duration_ms, upload_duration_ms";
 
 impl<'a> TryFrom<&'a rusqlite::Row<'a>> for JobRow {
     type Error = rusqlite::Error;
@@ -157,15 +158,16 @@ impl<'a> TryFrom<&'a rusqlite::Row<'a>> for JobRow {
             staged_path: row.get(6)?,
             error: row.get(7)?,
             scan_status: row.get(8)?,
-            s3_upload_id: row.get(9)?,
-            s3_key: row.get(10)?,
-            priority: row.get(11).unwrap_or(0),
-            checksum: row.get(12)?,
-            remote_checksum: row.get(13)?,
-            retry_count: row.get(14).unwrap_or(0),
-            next_retry_at: row.get(15)?,
-            scan_duration_ms: row.get(16)?,
-            upload_duration_ms: row.get(17)?,
+            upload_status: row.get(9)?,
+            s3_upload_id: row.get(10)?,
+            s3_key: row.get(11)?,
+            priority: row.get(12).unwrap_or(0),
+            checksum: row.get(13)?,
+            remote_checksum: row.get(14)?,
+            retry_count: row.get(15).unwrap_or(0),
+            next_retry_at: row.get(16)?,
+            scan_duration_ms: row.get(17)?,
+            upload_duration_ms: row.get(18)?,
         })
     }
 }
@@ -675,7 +677,7 @@ mod tests {
     #[test]
     fn test_job_columns_count() {
         let count = JOB_COLUMNS.split(',').count();
-        assert_eq!(count, 18, "JOB_COLUMNS should have 18 fields");
+        assert_eq!(count, 19, "JOB_COLUMNS should have 19 fields");
     }
 
     #[test]
