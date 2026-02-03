@@ -5,8 +5,8 @@ use drifter::db;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::Mutex as AsyncMutex;
 use std::time::Instant;
+use tokio::sync::Mutex as AsyncMutex;
 
 fn setup_stress_db() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
@@ -42,7 +42,7 @@ fn setup_stress_db() -> Result<Connection> {
             created_at TEXT NOT NULL,
             FOREIGN KEY(job_id) REFERENCES jobs(id)
         );
-        "
+        ",
     )?;
     Ok(conn)
 }
@@ -54,12 +54,8 @@ async fn stress_test_coordinator_cycle() -> Result<()> {
     let progress = Arc::new(AsyncMutex::new(HashMap::new()));
     let cancellation_tokens = Arc::new(AsyncMutex::new(HashMap::new()));
 
-    let coordinator = Coordinator::new(
-        conn.clone(),
-        config.clone(),
-        progress,
-        cancellation_tokens,
-    )?;
+    let coordinator =
+        Coordinator::new(conn.clone(), config.clone(), progress, cancellation_tokens)?;
 
     // Create 1000 jobs
     {
@@ -78,12 +74,13 @@ async fn stress_test_coordinator_cycle() -> Result<()> {
 
     println!("Starting stress test: processing 1000 jobs through coordinator cycles...");
     let start = Instant::now();
-    
+
     // Run cycles until all jobs are at least 'scanned' or 'uploading'
-    // Note: Since we don't have a real uploader/scanner running, they will stay in 'scanning' or 'uploading' 
+    // Note: Since we don't have a real uploader/scanner running, they will stay in 'scanning' or 'uploading'
     // depending on how process_cycle spawns tasks.
-    
-    for _ in 0..100 { // Run 100 cycles
+
+    for _ in 0..100 {
+        // Run 100 cycles
         coordinator.process_cycle().await?;
     }
 
@@ -98,8 +95,11 @@ async fn stress_test_coordinator_cycle() -> Result<()> {
         (scanning, uploading)
     };
 
-    println!("Jobs in scanning: {}, Jobs in uploading: {}", scanning_count, uploading_count);
-    
+    println!(
+        "Jobs in scanning: {}, Jobs in uploading: {}",
+        scanning_count, uploading_count
+    );
+
     // We expect at least some jobs to be active
     assert!(scanning_count > 0 || uploading_count > 0);
 

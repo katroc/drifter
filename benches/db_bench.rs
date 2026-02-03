@@ -1,11 +1,11 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use drifter::db;
 use rusqlite::Connection;
 use tokio::runtime::Runtime;
 
 fn bench_db_operations(c: &mut Criterion) {
     let _rt = Runtime::new().unwrap();
-    
+
     // Setup in-memory DB
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
@@ -40,8 +40,9 @@ fn bench_db_operations(c: &mut Criterion) {
             created_at TEXT NOT NULL,
             FOREIGN KEY(job_id) REFERENCES jobs(id)
         );
-        "
-    ).unwrap();
+        ",
+    )
+    .unwrap();
 
     c.bench_function("db_create_job", |b| {
         b.iter(|| {
@@ -51,7 +52,8 @@ fn bench_db_operations(c: &mut Criterion) {
                 "/tmp/bench-file.txt",
                 1024,
                 Some("bench-key.txt"),
-            ).unwrap()
+            )
+            .unwrap()
         })
     });
 

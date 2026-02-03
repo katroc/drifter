@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use drifter::services::ingest;
 use std::path::Path;
 
@@ -15,7 +15,13 @@ fn bench_path_calculations(c: &mut Criterion) {
     });
 
     c.bench_function("calculate_staging_path", |b| {
-        b.iter(|| ingest::calculate_staging_path(black_box("/tmp/staging"), black_box(12345), black_box(file_path)))
+        b.iter(|| {
+            ingest::calculate_staging_path(
+                black_box("/tmp/staging"),
+                black_box(12345),
+                black_box(file_path),
+            )
+        })
     });
 }
 
