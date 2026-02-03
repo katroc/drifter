@@ -50,7 +50,6 @@ pub fn ui(f: &mut Frame, app: &App) {
     match app.current_tab {
         AppTab::Transfers => draw_transfers(f, app, main_layout[1]),
         AppTab::Quarantine => draw_quarantine(f, app, main_layout[1]),
-        AppTab::Remote => crate::ui::remote::render_remote(f, app, main_layout[1], &app.theme),
         AppTab::Logs => crate::ui::logs::render_logs(f, app, main_layout[1], &app.theme),
         AppTab::Settings => draw_settings(f, app, main_layout[1]),
     }
@@ -84,6 +83,7 @@ pub fn ui(f: &mut Frame, app: &App) {
             app,
             right_panel,
             &app.quarantine[app.selected_quarantine],
+            false,
         );
     } else if app.focus == AppFocus::Queue
         && !app.visual_jobs.is_empty()
@@ -92,7 +92,7 @@ pub fn ui(f: &mut Frame, app: &App) {
         // Queue focused: Show selected job details in full right panel
         let visual_item = &app.visual_jobs[app.selected];
         if let Some(idx) = visual_item.index_in_jobs.or(visual_item.first_job_index) {
-            draw_job_details(f, app, right_panel, &app.jobs[idx]);
+            draw_job_details(f, app, right_panel, &app.jobs[idx], false);
         }
     } else if app.focus == AppFocus::History
         && !app.visual_history.is_empty()
@@ -107,7 +107,7 @@ pub fn ui(f: &mut Frame, app: &App) {
         draw_history(f, app, chunks[0]);
         let visual_item = &app.visual_history[app.selected_history];
         if let Some(idx) = visual_item.index_in_jobs.or(visual_item.first_job_index) {
-            draw_job_details(f, app, chunks[1], &app.history[idx]);
+            draw_job_details(f, app, chunks[1], &app.history[idx], true);
         }
     } else {
         // Default: Full history list
@@ -129,7 +129,6 @@ fn draw_rail(f: &mut Frame, app: &App, area: Rect) {
 
     let items = [
         ("Transfers", AppTab::Transfers),
-        ("Remote", AppTab::Remote),
         ("Quarantine", AppTab::Quarantine),
         ("Logs", AppTab::Logs),
         ("Settings", AppTab::Settings),
@@ -450,7 +449,21 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
         .style(app.theme.header_style())
         .height(1);
 
-    let inner_area = Block::default().borders(Borders::ALL).inner(area);
+    let is_focused = app.focus == AppFocus::Queue;
+    let panel_style = if is_focused {
+        app.theme.panel_style()
+    } else {
+        app.theme.panel_style().patch(app.theme.dim_style())
+    };
+
+    let block = Block::default()
+        .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+        .border_type(app.theme.border_type)
+        .title(" Queue (Jobs) ")
+        .border_style(focus_style)
+        .style(panel_style);
+
+    let inner_area = block.inner(area);
 
     let has_filter = !app.queue_search_query.is_empty() || app.input_mode == InputMode::QueueSearch;
 
@@ -489,8 +502,8 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
 
     // Calculate hover row index if mouse is hovering over this panel
     let hover_row_idx = app.hover_pos.and_then(|(hx, hy)| {
-        let table_start_y = area.y + 1; // border
-        let table_end_y = area.y + area.height.saturating_sub(1);
+        let table_start_y = table_area.y + 1; // header
+        let table_end_y = table_area.y + table_area.height;
         if hx >= area.x && hx < area.x + area.width && hy >= table_start_y && hy < table_end_y {
             Some((hy - table_start_y) as usize + offset)
         } else {
@@ -607,21 +620,7 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
             }
         });
 
-    let is_focused = app.focus == AppFocus::Queue;
-    let panel_style = if is_focused {
-        app.theme.panel_style()
-    } else {
-        app.theme.panel_style().patch(app.theme.dim_style())
-    };
-
-    // Complete borders for consistency
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(app.theme.border_type)
-        .title(" Queue (Jobs) ")
-        .border_style(focus_style)
-        .style(panel_style);
-
+    // Join with the panel above to avoid double borders
     f.render_widget(block, area);
 
     let table = Table::new(
@@ -660,9 +659,9 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
         app.theme.panel_style().patch(app.theme.dim_style())
     };
 
-    // Complete borders for consistency
+    // Join with main panel to avoid double borders on the left edge
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP | Borders::BOTTOM | Borders::RIGHT)
         .border_type(app.theme.border_type)
         .title(format!(" History [{}] ", app.history_filter.as_str()))
         .border_style(focus_style)
@@ -808,10 +807,22 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(table, table_area);
 }
 
-fn draw_job_details(f: &mut Frame, app: &App, area: Rect, job: &crate::db::JobRow) {
-    // Complete borders for consistency
+fn draw_job_details(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    job: &crate::db::JobRow,
+    join_top_border: bool,
+) {
+    let borders = if join_top_border {
+        Borders::RIGHT | Borders::BOTTOM
+    } else {
+        Borders::TOP | Borders::RIGHT | Borders::BOTTOM
+    };
+
+    // Join with main panel on the left; optionally join with panel above
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(borders)
         .border_type(app.theme.border_type)
         .title(format!(" Job #{} Details ", job.id))
         .border_style(app.theme.border_style())
@@ -1675,136 +1686,125 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             key("q"),
             act("Cancel"),
         ]),
-        InputMode::Normal => {
-            if app.current_tab == AppTab::Remote {
-                add_global_keys!(vec![
-                    key("r"),
-                    act("Refresh"),
+        InputMode::Normal => match app.focus {
+            AppFocus::Logs => add_global_keys!(vec![key("q"), act("Back")]),
+            AppFocus::Rail => add_global_keys!(vec![
+                key("Tab/→"),
+                act("Content"),
+                sep(),
+                key("↑/↓"),
+                act("Switch Tab"),
+            ]),
+            AppFocus::Browser => add_global_keys!(vec![
+                key("↑/↓"),
+                act("Select"),
+                sep(),
+                key("a"),
+                act("Browse"),
+            ]),
+            AppFocus::Queue => add_global_keys!(vec![
+                key("↑/↓"),
+                act("Select"),
+                sep(),
+                key("p"),
+                act("Pause/Resume"),
+                sep(),
+                key("+/-"),
+                act("Priority"),
+                sep(),
+                key("Enter"),
+                act("Details"),
+                sep(),
+                key("c"),
+                act("Clear Done"),
+                sep(),
+                key("r"),
+                act("Retry"),
+                sep(),
+                key("←/→"),
+                act("Navigate"),
+                sep(),
+                key("d"),
+                act("Cancel"),
+            ]),
+            AppFocus::History => add_global_keys!(vec![key("←"), act("Queue")]),
+            AppFocus::Remote => add_global_keys!(vec![
+                key("r"),
+                act("Refresh"),
+                sep(),
+                key("d"),
+                act("Download"),
+                sep(),
+                key("x"),
+                act("Delete"),
+            ]),
+            AppFocus::Quarantine => add_global_keys!(vec![
+                key("←"),
+                act("Rail"),
+                sep(),
+                key("d"),
+                act("Clear"),
+                sep(),
+                key("R"),
+                act("Refresh"),
+            ]),
+            AppFocus::SettingsCategory => match app.settings.active_category {
+                SettingsCategory::S3 | SettingsCategory::Scanner => add_global_keys!(vec![
+                    key("Tab/→"),
+                    act("Fields"),
                     sep(),
-                    key("d"),
-                    act("Download"),
+                    key("←"),
+                    act("Rail"),
                     sep(),
-                    key("x"),
-                    act("Delete"),
-                ])
-            } else {
-                match app.focus {
-                    AppFocus::Logs => add_global_keys!(vec![key("q"), act("Back")]),
-                    AppFocus::Rail => add_global_keys!(vec![
-                        key("Tab/→"),
-                        act("Content"),
-                        sep(),
-                        key("↑/↓"),
-                        act("Switch Tab"),
-                    ]),
-                    AppFocus::Browser => add_global_keys!(vec![
-                        key("↑/↓"),
-                        act("Select"),
-                        sep(),
-                        key("a"),
-                        act("Browse"),
-                    ]),
-                    AppFocus::Queue => add_global_keys!(vec![
-                        key("↑/↓"),
-                        act("Select"),
-                        sep(),
-                        key("p"),
-                        act("Pause/Resume"),
-                        sep(),
-                        key("+/-"),
-                        act("Priority"),
-                        sep(),
-                        key("Enter"),
-                        act("Details"),
-                        sep(),
-                        key("c"),
-                        act("Clear Done"),
-                        sep(),
-                        key("r"),
-                        act("Retry"),
-                        sep(),
-                        key("←/→"),
-                        act("Nav"),
-                        sep(),
-                        key("d"),
-                        act("Cancel"),
-                    ]),
-                    AppFocus::History => add_global_keys!(vec![
-                        key("←"),
-                        act("Queue"),
-                    ]),
-                    AppFocus::Remote => add_global_keys!(vec![
-                        // Handled by AppTab::Remote above mostly, but kept for completeness if needed
-                    ]),
-                    AppFocus::Quarantine => add_global_keys!(vec![
-                        key("←"),
-                        act("Rail"),
-                        sep(),
-                        key("d"),
-                        act("Clear"),
-                        sep(),
-                        key("R"),
-                        act("Refresh"),
-                    ]),
-                    AppFocus::SettingsCategory => match app.settings.active_category {
-                        SettingsCategory::S3 | SettingsCategory::Scanner => add_global_keys!(vec![
-                            key("Tab/→"),
-                            act("Fields"),
-                            sep(),
-                            key("←"),
-                            act("Rail"),
-                            sep(),
-                            key("↑/↓"),
-                            act("Category"),
-                            sep(),
-                            key("s"),
-                            act("Save"),
-                            sep(),
-                            key("t"),
-                            act("Test"),
-                        ]),
-                        _ => add_global_keys!(vec![
-                            key("Tab/→"),
-                            act("Fields"),
-                            sep(),
-                            key("←"),
-                            act("Rail"),
-                            sep(),
-                            key("↑/↓"),
-                            act("Category"),
-                            sep(),
-                            key("s"),
-                            act("Save"),
-                        ]),
-                    },
-                    AppFocus::SettingsFields => match app.settings.active_category {
-                        SettingsCategory::S3 | SettingsCategory::Scanner => add_global_keys!(vec![
-                            key("←"),
-                            act("Category"),
-                            sep(),
-                            key("Enter"),
-                            act("Edit"),
-                            sep(),
-                            key("s"),
-                            act("Save"),
-                            sep(),
-                            key("t"),
-                            act("Test"),
-                        ]),
-                        _ => add_global_keys!(vec![
-                            key("←"),
-                            act("Category"),
-                            sep(),
-                            key("Enter"),
-                            act("Edit"),
-                            sep(),
-                            key("s"),
-                            act("Save"),
-                        ]),
-                    },
-                }
-            }
-        }
+                    key("↑/↓"),
+                    act("Category"),
+                    sep(),
+                    key("s"),
+                    act("Save"),
+                    sep(),
+                    key("t"),
+                    act("Test"),
+                ]),
+                _ => add_global_keys!(vec![
+                    key("Tab/→"),
+                    act("Fields"),
+                    sep(),
+                    key("←"),
+                    act("Rail"),
+                    sep(),
+                    key("↑/↓"),
+                    act("Category"),
+                    sep(),
+                    key("s"),
+                    act("Save"),
+                ]),
+            },
+            AppFocus::SettingsFields => match app.settings.active_category {
+                SettingsCategory::S3 | SettingsCategory::Scanner => add_global_keys!(vec![
+                    key("←"),
+                    act("Category"),
+                    sep(),
+                    key("Enter"),
+                    act("Edit"),
+                    sep(),
+                    key("s"),
+                    act("Save"),
+                    sep(),
+                    key("t"),
+                    act("Test"),
+                ]),
+                _ => add_global_keys!(vec![
+                    key("←"),
+                    act("Category"),
+                    sep(),
+                    key("Enter"),
+                    act("Edit"),
+                    sep(),
+                    key("s"),
+                    act("Save"),
+                ]),
+            },
+        },
     };
 
     let av_status = lock_mutex(&app.clamav_status)
@@ -2034,9 +2034,9 @@ fn draw_metrics_panel(f: &mut Frame, app: &App, area: Rect) {
     let mk_style = app.theme.accent_style().add_modifier(Modifier::BOLD);
     let mk_val = app.theme.text_style();
 
-    // Complete borders for consistency
+    // Join with the panel above and the main panel on the left
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::RIGHT | Borders::BOTTOM)
         .border_type(app.theme.border_type)
         .border_style(app.theme.border_style())
         .title(" Metrics ")

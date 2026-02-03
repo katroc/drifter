@@ -23,7 +23,6 @@ use tokio::sync::Mutex as AsyncMutex;
 pub enum AppTab {
     Transfers,
     Quarantine,
-    Remote,
     Logs,
     Settings,
 }
@@ -35,7 +34,7 @@ pub enum AppFocus {
     Queue,   // Only in Transfers tab
     History,
     Quarantine,       // Only in Quarantine tab
-    Remote,           // Only in Remote tab
+    Remote,           // Remote panel in Transfers tab
     Logs,             // Only in Logs tab
     SettingsCategory, // Switch categories
     SettingsFields,   // Edit fields

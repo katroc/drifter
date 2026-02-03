@@ -35,6 +35,7 @@ pub fn render_logs(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
+        .border_type(theme.border_type)
         .border_style(block_style)
         .style(theme.panel_style());
 
@@ -121,8 +122,9 @@ pub fn render_logs(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         };
 
         let search_block = Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .title(title)
+            .border_type(theme.border_type)
             .border_style(border_style);
 
         let query_text = format!(
