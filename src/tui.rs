@@ -72,7 +72,7 @@ pub async fn run_tui(
     let log_path = PathBuf::from("debug.log");
     crate::services::log_watcher::LogWatcher::new(log_path, log_tx).start();
 
-    let tick_rate = Duration::from_millis(200);
+    let tick_rate = Duration::from_millis(50);
     loop {
         // Update valid cached state for rendering (Pre-render sync)
         {
@@ -133,8 +133,13 @@ pub async fn run_tui(
         }
 
         if event::poll(tick_rate)? {
-            let event = event::read()?;
-            match event {
+            let mut events = vec![event::read()?];
+            while event::poll(Duration::from_secs(0))? {
+                events.push(event::read()?);
+            }
+            let mut should_quit = false;
+            for event in events {
+                match event {
                 Event::Key(key) => {
                     // Handle Layout Adjustment Mode
                     if app.input_mode == InputMode::LayoutAdjust {
@@ -311,7 +316,10 @@ pub async fn run_tui(
                     // Handle wizard mode separately
                     if app.show_wizard {
                         match key.code {
-                            KeyCode::Char('q') if !app.wizard.editing => break,
+                            KeyCode::Char('q') if !app.wizard.editing => {
+                                should_quit = true;
+                                break;
+                            }
                             KeyCode::Esc if app.wizard.editing => {
                                 app.wizard.editing = false;
                             }
@@ -438,7 +446,10 @@ pub async fn run_tui(
                                 app.layout_adjust_message = "Layout Adjustment: 1=Hopper 2=Queue 3=History | +/- adjust | r reset | R reset-all | s save | q cancel".to_string();
                                 continue;
                             }
-                            KeyCode::Char('q') if app.focus != AppFocus::Logs => break,
+                            KeyCode::Char('q') if app.focus != AppFocus::Logs => {
+                                should_quit = true;
+                                break;
+                            }
                             KeyCode::Tab => {
                                 app.focus = match app.focus {
                                     AppFocus::Rail => match app.current_tab {
@@ -2146,10 +2157,6 @@ pub async fn run_tui(
                                         app.focus = AppFocus::Rail;
                                     }
                                     2 => {
-                                        app.current_tab = AppTab::Quarantine;
-                                        app.focus = AppFocus::Rail;
-                                    }
-                                    3 => {
                                         app.current_tab = AppTab::Remote;
                                         app.focus = AppFocus::Rail;
                                         let tx = app.async_tx.clone();
@@ -2168,6 +2175,10 @@ pub async fn run_tui(
                                                 }
                                             }
                                         });
+                                    }
+                                    3 => {
+                                        app.current_tab = AppTab::Quarantine;
+                                        app.focus = AppFocus::Rail;
                                     }
                                     4 => {
                                         app.current_tab = AppTab::Logs;
@@ -2299,7 +2310,7 @@ pub async fn run_tui(
                                             let inner_y = chunks[0].y + 1;
                                             let has_filter = !app.input_buffer.is_empty()
                                                 || app.input_mode == InputMode::Filter;
-                                            let table_y = inner_y + if has_filter { 2 } else { 1 };
+                                            let table_y = inner_y + if has_filter { 1 } else { 0 };
                                             let content_y = table_y + 1; // +1 for header
 
                                             if y >= content_y {
@@ -2386,11 +2397,17 @@ pub async fn run_tui(
                                         } else {
                                             app.focus = AppFocus::Queue;
                                             let inner_y = chunks[1].y + 1;
-                                            let content_y = inner_y + 1; // +1 for header
+                                            let has_filter = !app.queue_search_query.is_empty()
+                                                || app.input_mode == InputMode::QueueSearch;
+                                            let table_y = inner_y + if has_filter { 1 } else { 0 };
+                                            let content_y = table_y + 1; // +1 for header
+
                                             if y >= content_y {
                                                 let relative_row = (y - content_y) as usize;
-                                                let display_height =
-                                                    chunks[1].height.saturating_sub(4) as usize; // Match render.rs saturating_sub(4)
+                                                let display_height = chunks[1]
+                                                    .height
+                                                    .saturating_sub(if has_filter { 4 } else { 3 })
+                                                    as usize;
                                                 let total_rows = app.visual_jobs.len();
                                                 let offset = calculate_list_offset(
                                                     app.selected,
@@ -2660,10 +2677,17 @@ pub async fn run_tui(
                                 // Right Panel Click (History)
                                 app.focus = AppFocus::History;
                                 let inner_y = right_layout.y + 1;
-                                if y > inner_y {
-                                    let relative_row = (y - inner_y - 1) as usize;
-                                    let display_height =
-                                        right_layout.height.saturating_sub(4) as usize;
+                                let has_filter = !app.history_search_query.is_empty()
+                                    || app.input_mode == InputMode::HistorySearch;
+                                let table_y = inner_y + if has_filter { 1 } else { 0 };
+                                let content_y = table_y + 1; // +1 for header
+
+                                if y >= content_y {
+                                    let relative_row = (y - content_y) as usize;
+                                    let display_height = right_layout
+                                        .height
+                                        .saturating_sub(if has_filter { 5 } else { 4 })
+                                        as usize;
                                     let total_rows = app.visual_history.len();
                                     let offset = calculate_list_offset(
                                         app.selected_history,
@@ -2871,6 +2895,10 @@ pub async fn run_tui(
                     }
                 }
                 _ => {}
+            }
+            }
+            if should_quit {
+                break;
             }
         }
     }
