@@ -224,6 +224,7 @@ pub async fn run_tui(
                                 KeyCode::Char('y') | KeyCode::Enter => {
                                     // Execute Action
                                     match app.pending_action {
+                                        ModalAction::None => {}
                                         ModalAction::ClearHistory => {
                                             let conn = lock_mutex(&conn_mutex)?;
                                             let filter_str =
@@ -590,6 +591,7 @@ pub async fn run_tui(
                             match key.code {
                                 KeyCode::Char('y') | KeyCode::Enter => {
                                     match app.pending_action {
+                                        ModalAction::None => {}
                                         ModalAction::CancelJob(id) => {
                                             {
                                                 let conn = lock_mutex(&conn_mutex)?;
@@ -651,7 +653,6 @@ pub async fn run_tui(
                                             let _ = app.refresh_jobs(&conn);
                                             app.status_message = "History cleared".to_string();
                                         }
-                                        _ => {}
                                     }
                                     app.input_mode = InputMode::Normal;
                                     app.pending_action = ModalAction::None;
@@ -3042,7 +3043,6 @@ pub async fn run_tui(
                                                 }
                                             }
                                         }
-                                        _ => {}
                                     }
                                 } else if x >= right_layout.x
                                     && x < right_layout.x + right_layout.width
