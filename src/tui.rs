@@ -336,9 +336,11 @@ pub async fn run_tui(
                                                         let res_list = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, path_arg).await;
 
                                                         if let Ok(files) = res_list {
-                                                            let _ = tx.send(
-                                                                AppEvent::RemoteFileList(path_context.clone(), files),
-                                                            );
+                                                            let _ =
+                                                                tx.send(AppEvent::RemoteFileList(
+                                                                    path_context.clone(),
+                                                                    files,
+                                                                ));
                                                         }
                                                     }
                                                     Err(e) => {
@@ -1395,12 +1397,14 @@ pub async fn run_tui(
                                                                 .remote_current_path
                                                                 .trim_end_matches('/');
                                                             if let Some(idx) = current.rfind('/') {
-                                                                app.remote_current_path.truncate(idx + 1);
+                                                                app.remote_current_path
+                                                                    .truncate(idx + 1);
                                                             } else {
                                                                 app.remote_current_path.clear();
                                                             }
                                                         } else {
-                                                            app.remote_current_path.push_str(&obj.name);
+                                                            app.remote_current_path
+                                                                .push_str(&obj.name);
                                                         }
                                                         // Use cached request
                                                         request_remote_list(&mut app, false).await;
@@ -2404,10 +2408,14 @@ pub async fn run_tui(
                                                                         let current = app
                                                                             .remote_current_path
                                                                             .trim_end_matches('/');
-                                                                        if let Some(idx) = current.rfind('/') {
-                                                                            app.remote_current_path.truncate(idx + 1);
+                                                                        if let Some(idx) =
+                                                                            current.rfind('/')
+                                                                        {
+                                                                            app.remote_current_path
+                                                                                .truncate(idx + 1);
                                                                         } else {
-                                                                            app.remote_current_path.clear();
+                                                                            app.remote_current_path
+                                                                                .clear();
                                                                         }
                                                                     } else {
                                                                         app.remote_current_path
@@ -2416,7 +2424,10 @@ pub async fn run_tui(
                                                                     app.input_mode =
                                                                         InputMode::RemoteBrowsing;
                                                                     // Use cached request
-                                                                    request_remote_list(&mut app, false).await;
+                                                                    request_remote_list(
+                                                                        &mut app, false,
+                                                                    )
+                                                                    .await;
                                                                 }
                                                             } else {
                                                                 app.last_click_time = Some(now);
@@ -3049,38 +3060,37 @@ async fn request_remote_list(app: &mut App, force_refresh: bool) -> bool {
     let current_path = app.remote_current_path.clone();
 
     // Check if request is already in-flight for this path
-    if let Some(ref pending) = app.remote_request_pending {
-        if pending == &current_path {
-            return false; // Already fetching this path
-        }
+    if let Some(ref pending) = app.remote_request_pending
+        && pending == &current_path
+    {
+        return false; // Already fetching this path
     }
 
     // Check cache (unless force refresh)
-    if !force_refresh {
-        if let Some((cached_files, fetched_at)) = app.remote_cache.get(&current_path) {
-            if fetched_at.elapsed().as_secs() < REMOTE_CACHE_TTL_SECS {
-                // Cache hit - use cached data
-                let mut files = cached_files.clone();
-                // Prepend ".." entry if not at root
-                if !current_path.is_empty() {
-                    files.insert(
-                        0,
-                        S3Object {
-                            key: "..".to_string(),
-                            name: "..".to_string(),
-                            size: 0,
-                            last_modified: String::new(),
-                            is_dir: true,
-                            is_parent: true,
-                        },
-                    );
-                }
-                app.s3_objects = files;
-                app.selected_remote = 0;
-                app.set_status(format!("Loaded {} items from cache", app.s3_objects.len()));
-                return false;
-            }
+    if !force_refresh
+        && let Some((cached_files, fetched_at)) = app.remote_cache.get(&current_path)
+        && fetched_at.elapsed().as_secs() < REMOTE_CACHE_TTL_SECS
+    {
+        // Cache hit - use cached data
+        let mut files = cached_files.clone();
+        // Prepend ".." entry if not at root
+        if !current_path.is_empty() {
+            files.insert(
+                0,
+                S3Object {
+                    key: "..".to_string(),
+                    name: "..".to_string(),
+                    size: 0,
+                    last_modified: String::new(),
+                    is_dir: true,
+                    is_parent: true,
+                },
+            );
         }
+        app.s3_objects = files;
+        app.selected_remote = 0;
+        app.set_status(format!("Loaded {} items from cache", app.s3_objects.len()));
+        return false;
     }
 
     // Mark as loading and set pending path

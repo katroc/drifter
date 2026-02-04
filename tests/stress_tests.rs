@@ -5,7 +5,7 @@ use drifter::core::config::Config;
 use drifter::db;
 use rusqlite::Connection;
 use std::collections::HashMap;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -56,8 +56,13 @@ async fn stress_test_coordinator_cycle() -> Result<()> {
     let cancellation_tokens = Arc::new(AsyncMutex::new(HashMap::new()));
     let (app_tx, _app_rx) = mpsc::channel::<AppEvent>();
 
-    let coordinator =
-        Coordinator::new(conn.clone(), config.clone(), progress, cancellation_tokens, app_tx)?;
+    let coordinator = Coordinator::new(
+        conn.clone(),
+        config.clone(),
+        progress,
+        cancellation_tokens,
+        app_tx,
+    )?;
 
     // Create 1000 jobs
     {

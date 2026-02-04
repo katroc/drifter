@@ -136,7 +136,7 @@ pub struct App {
     pub selected_remote: usize,
     pub remote_current_path: String,
     pub remote_cache: HashMap<String, (Vec<S3Object>, Instant)>, // path -> (objects, fetched_at)
-    pub remote_request_pending: Option<String>, // path currently being fetched
+    pub remote_request_pending: Option<String>,                  // path currently being fetched
     pub remote_loading: bool,
 
     pub last_refresh: Instant,

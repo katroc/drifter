@@ -7,7 +7,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 

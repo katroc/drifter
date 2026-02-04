@@ -16,7 +16,7 @@ use crate::db::init_db;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::{mpsc, Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, mpsc};
 use tokio::sync::Mutex as AsyncMutex;
 
 #[tokio::main]
