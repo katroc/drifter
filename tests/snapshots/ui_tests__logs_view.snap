@@ -1,0 +1,44 @@
+---
+source: tests/ui_tests.rs
+expression: output
+---
+╭ Navigation ───╭ System Logs [Level: INFO] (Scroll: arrows╮ History [All] ────────────────────────────────────────────╮
+│  Transfers    │                                          │File                 Status           Size       Time      │
+│  Quarantine   │                                          │                                                           │
+│▌ Logs         │                                          │                                                           │
+│  Settings     │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │───────────────────────────────────────────────────────────╯
+│               │                                          │ Metrics                                                   │
+│               │                                          │Disk Read:  0 B               Net Down: 0 B                │
+│               │                                          │Disk Write: 0 B               Net Up:   0 B                │
+╰───────────────╰──────────────────────────────────────────╯───────────────────────────────────────────────────────────╯
+q Back  │  Tab Navigate                              ClamAV: Connected  │  S3: Not Configured  │  Jobs: 0  │  Threats: 0
