@@ -92,8 +92,8 @@ async fn main() -> Result<()> {
     });
 
     // Run TUI, passing wizard flag
-    tui::run_tui(
-        conn,
+    tui::run_tui(tui::TuiArgs {
+        conn_mutex: conn,
         cfg,
         progress,
         cancellation_tokens,
@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
         log_handle,
         app_tx,
         app_rx,
-    )
+    })
     .await?;
     Ok(())
 }

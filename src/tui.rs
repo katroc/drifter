@@ -40,17 +40,29 @@ use crate::utils::lock_mutex;
 
 use tokio::sync::Mutex as AsyncMutex;
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run_tui(
-    conn_mutex: Arc<Mutex<Connection>>,
-    cfg: Arc<AsyncMutex<Config>>,
-    progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>,
-    cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
-    needs_wizard: bool,
-    log_handle: crate::logging::LogHandle,
-    app_tx: std::sync::mpsc::Sender<AppEvent>,
-    app_rx: std::sync::mpsc::Receiver<AppEvent>,
-) -> Result<()> {
+pub struct TuiArgs {
+    pub conn_mutex: Arc<Mutex<Connection>>,
+    pub cfg: Arc<AsyncMutex<Config>>,
+    pub progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>,
+    pub cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
+    pub needs_wizard: bool,
+    pub log_handle: crate::logging::LogHandle,
+    pub app_tx: std::sync::mpsc::Sender<AppEvent>,
+    pub app_rx: std::sync::mpsc::Receiver<AppEvent>,
+}
+
+pub async fn run_tui(args: TuiArgs) -> Result<()> {
+    let TuiArgs {
+        conn_mutex,
+        cfg,
+        progress,
+        cancellation_tokens,
+        needs_wizard,
+        log_handle,
+        app_tx,
+        app_rx,
+    } = args;
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
