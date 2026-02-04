@@ -1,17 +1,14 @@
-use crate::core::config::StagingMode;
-use crate::db::{create_job, insert_event, update_job_error, update_job_staged};
+use crate::db::{create_job, insert_event, update_job_staged};
 use crate::utils::lock_mutex;
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::fs;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 pub async fn ingest_path(
     conn_mutex: Arc<Mutex<Connection>>,
-    staging_dir: &str,
-    staging_mode: &StagingMode,
     path: &str,
     session_id: &str,
 ) -> Result<usize> {
@@ -66,42 +63,12 @@ pub async fn ingest_path(
             create_job(&conn, session_id, &source_str, size, Some(&relative_path))?
         };
 
-        // Stage file based on mode
-        let stage_result = match staging_mode {
-            StagingMode::Direct => {
-                let conn = lock_mutex(&conn_mutex)?;
-                insert_event(&conn, job_id, "ingest", "using direct mode (no copy)")?;
-                Ok(source_str.clone())
-            }
-            StagingMode::Copy => {
-                {
-                    let conn = lock_mutex(&conn_mutex)?;
-                    insert_event(&conn, job_id, "ingest", "queued for staging")?;
-                }
-                stage_file(staging_dir, job_id, &file_path).await
-            }
-        };
-
-        match stage_result {
-            Ok(staged_path) => {
-                let conn = lock_mutex(&conn_mutex)?;
-                update_job_staged(&conn, job_id, &staged_path, "queued")?;
-                let event_msg = if *staging_mode == StagingMode::Direct {
-                    "ready (direct mode)"
-                } else {
-                    "staged locally"
-                };
-                insert_event(&conn, job_id, "stage", event_msg)?;
-                count += 1;
-                info!("Successfully ingested job {} for {}", job_id, source_str);
-            }
-            Err(err) => {
-                error!("Failed to stage job {}: {}", job_id, err);
-                let conn = lock_mutex(&conn_mutex)?;
-                update_job_error(&conn, job_id, "failed", &err.to_string())?;
-                insert_event(&conn, job_id, "stage", "staging failed")?;
-            }
-        }
+        let conn = lock_mutex(&conn_mutex)?;
+        insert_event(&conn, job_id, "ingest", "queued for scan")?;
+        update_job_staged(&conn, job_id, &source_str, "queued")?;
+        insert_event(&conn, job_id, "stage", "ready for scan")?;
+        count += 1;
+        info!("Successfully ingested job {} for {}", job_id, source_str);
     }
     info!("Ingest complete. {} files processed.", count);
     Ok(count)
@@ -130,19 +97,6 @@ async fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-async fn stage_file(staging_dir: &str, job_id: i64, source: &Path) -> Result<String> {
-    let job_dir = Path::new(staging_dir).join(job_id.to_string());
-    fs::create_dir_all(&job_dir).await?;
-    let filename = source
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "data".to_string());
-    let dest = job_dir.join(filename);
-    debug!("Copying {:?} to {:?}", source, dest);
-    fs::copy(source, &dest).await?;
-    Ok(dest.to_string_lossy().to_string())
-}
-
 // Helper functions exposed for testing
 
 /// Calculate the base path for relative path calculations
@@ -169,17 +123,6 @@ pub fn calculate_relative_path(file_path: &Path, base_path: &Path) -> String {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "file".to_string())
         })
-}
-
-/// Calculate staging destination path
-#[allow(dead_code)]
-pub fn calculate_staging_path(staging_dir: &str, job_id: i64, source: &Path) -> PathBuf {
-    let job_dir = Path::new(staging_dir).join(job_id.to_string());
-    let filename = source
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "data".to_string());
-    job_dir.join(filename)
 }
 
 #[cfg(test)]
@@ -313,85 +256,6 @@ mod tests {
         assert!(relative.contains("file (1).txt"));
     }
 
-    // --- Staging Path Calculation Tests ---
-
-    #[test]
-    fn test_calculate_staging_path_basic() {
-        let source = PathBuf::from("/source/file.txt");
-        let staging_path = calculate_staging_path("./staging", 123, &source);
-
-        assert_eq!(staging_path, PathBuf::from("./staging/123/file.txt"));
-    }
-
-    #[test]
-    fn test_calculate_staging_path_nested_source() {
-        let source = PathBuf::from("/deep/nested/path/document.pdf");
-        let staging_path = calculate_staging_path("/tmp/staging", 456, &source);
-
-        assert_eq!(staging_path, PathBuf::from("/tmp/staging/456/document.pdf"));
-    }
-
-    #[test]
-    fn test_calculate_staging_path_preserves_extension() {
-        let test_cases = vec![
-            ("/source/file.txt", "./staging", 1, "./staging/1/file.txt"),
-            ("/source/image.png", "/tmp", 2, "/tmp/2/image.png"),
-            (
-                "/source/archive.tar.gz",
-                "./stage",
-                3,
-                "./stage/3/archive.tar.gz",
-            ),
-        ];
-
-        for (source, staging_dir, job_id, expected) in test_cases {
-            let source_path = PathBuf::from(source);
-            let result = calculate_staging_path(staging_dir, job_id, &source_path);
-            assert_eq!(result, PathBuf::from(expected));
-        }
-    }
-
-    #[test]
-    fn test_calculate_staging_path_no_extension() {
-        let source = PathBuf::from("/source/Makefile");
-        let staging_path = calculate_staging_path("./staging", 789, &source);
-
-        assert_eq!(staging_path, PathBuf::from("./staging/789/Makefile"));
-    }
-
-    #[test]
-    fn test_calculate_staging_path_special_characters() {
-        let source = PathBuf::from("/source/my file (copy).txt");
-        let staging_path = calculate_staging_path("./staging", 100, &source);
-
-        assert_eq!(
-            staging_path,
-            PathBuf::from("./staging/100/my file (copy).txt")
-        );
-    }
-
-    #[test]
-    fn test_calculate_staging_path_different_job_ids() {
-        let source = PathBuf::from("/source/file.txt");
-
-        let path1 = calculate_staging_path("./staging", 1, &source);
-        let path2 = calculate_staging_path("./staging", 2, &source);
-        let path3 = calculate_staging_path("./staging", 999, &source);
-
-        assert_eq!(path1, PathBuf::from("./staging/1/file.txt"));
-        assert_eq!(path2, PathBuf::from("./staging/2/file.txt"));
-        assert_eq!(path3, PathBuf::from("./staging/999/file.txt"));
-    }
-
-    #[test]
-    fn test_calculate_staging_path_fallback_filename() {
-        // Path with no filename component should use "data"
-        let source = PathBuf::from("/");
-        let staging_path = calculate_staging_path("./staging", 1, &source);
-
-        assert_eq!(staging_path, PathBuf::from("./staging/1/data"));
-    }
-
     // --- Path Edge Cases ---
 
     #[test]
@@ -405,17 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn test_staging_path_absolute_and_relative() {
-        let source = PathBuf::from("file.txt");
-
-        let abs_staging = calculate_staging_path("/absolute/staging", 1, &source);
-        assert_eq!(abs_staging, PathBuf::from("/absolute/staging/1/file.txt"));
-
-        let rel_staging = calculate_staging_path("./relative/staging", 1, &source);
-        assert_eq!(rel_staging, PathBuf::from("./relative/staging/1/file.txt"));
-    }
-
-    #[test]
     fn test_calculate_relative_path_unicode() {
         let file_path = PathBuf::from("/home/user/文档/файл.txt");
         let base_path = PathBuf::from("/home/user");
@@ -423,22 +276,6 @@ mod tests {
         let relative = calculate_relative_path(&file_path, &base_path);
         assert!(relative.contains("文档"));
         assert!(relative.contains("файл.txt"));
-    }
-
-    // --- Staging Mode Logic Tests (Conceptual) ---
-
-    #[test]
-    fn test_staging_mode_enum_values() {
-        // Verify enum variants exist
-        let _direct = StagingMode::Direct;
-        let _copy = StagingMode::Copy;
-    }
-
-    #[test]
-    fn test_staging_mode_equality() {
-        assert_eq!(StagingMode::Direct, StagingMode::Direct);
-        assert_eq!(StagingMode::Copy, StagingMode::Copy);
-        assert_ne!(StagingMode::Direct, StagingMode::Copy);
     }
 
     // --- Integration-like Tests ---
@@ -455,20 +292,6 @@ mod tests {
         let relative = calculate_relative_path(&file, &base);
 
         assert_eq!(relative, "report.pdf");
-    }
-
-    #[test]
-    fn test_staging_workflow_multiple_jobs() {
-        // Verify different jobs get different staging paths
-        let source1 = PathBuf::from("/source/file1.txt");
-        let source2 = PathBuf::from("/source/file2.txt");
-
-        let stage1 = calculate_staging_path("./staging", 1, &source1);
-        let stage2 = calculate_staging_path("./staging", 2, &source2);
-
-        assert_ne!(stage1, stage2);
-        assert!(stage1.to_string_lossy().contains("/1/"));
-        assert!(stage2.to_string_lossy().contains("/2/"));
     }
 
     #[test]

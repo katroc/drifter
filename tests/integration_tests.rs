@@ -7,7 +7,7 @@ use tempfile::TempDir;
 
 // Import drifter modules
 use drifter::coordinator::Coordinator;
-use drifter::core::config::{Config, ScanMode, StagingMode};
+use drifter::core::config::{Config, ScanMode};
 use drifter::db;
 use drifter::services::ingest;
 use drifter::services::reporter::Reporter;
@@ -87,11 +87,6 @@ fn setup_test_db() -> Result<Connection> {
 
 fn create_test_config(temp_dir: &TempDir) -> Config {
     Config {
-        staging_dir: temp_dir
-            .path()
-            .join("staging")
-            .to_string_lossy()
-            .to_string(),
         quarantine_dir: temp_dir
             .path()
             .join("quarantine")
@@ -166,7 +161,7 @@ fn test_job_lifecycle_state_transitions() -> Result<()> {
     assert_eq!(job.retry_count, 0);
 
     // Stage -> Queued
-    db::update_job_staged(&conn, job_id, "/staging/file.txt", "queued")?;
+    db::update_job_staged(&conn, job_id, "/data/file.txt", "queued")?;
     let job = db::get_job(&conn, job_id)?.unwrap();
     assert_eq!(job.status, "queued");
 
@@ -227,7 +222,7 @@ fn test_event_logging_integration() -> Result<()> {
 
     // Log multiple events
     db::insert_event(&conn, job_id, "ingest", "File ingested")?;
-    db::insert_event(&conn, job_id, "stage", "File staged")?;
+    db::insert_event(&conn, job_id, "stage", "Ready for scan")?;
     db::insert_event(&conn, job_id, "scan", "Scan started")?;
     db::insert_event(&conn, job_id, "scan", "Scan complete - clean")?;
 
@@ -398,32 +393,6 @@ fn test_path_workflow_end_to_end() -> Result<()> {
     let file = std::path::PathBuf::from("/home/user/documents/2024/january/report.pdf");
     let relative = ingest::calculate_relative_path(&file, &base);
     assert_eq!(relative, "report.pdf");
-
-    // Calculate staging path
-    let staging_path = ingest::calculate_staging_path("./staging", 123, &source);
-    assert_eq!(
-        staging_path,
-        std::path::PathBuf::from("./staging/123/report.pdf")
-    );
-
-    Ok(())
-}
-
-#[test]
-fn test_staging_mode_integration() -> Result<()> {
-    // Test Direct mode
-    let config_direct = Config {
-        staging_mode: StagingMode::Direct,
-        ..Config::default()
-    };
-    assert_eq!(config_direct.staging_mode, StagingMode::Direct);
-
-    // Test Copy mode
-    let config_copy = Config {
-        staging_mode: StagingMode::Copy,
-        ..Config::default()
-    };
-    assert_eq!(config_copy.staging_mode, StagingMode::Copy);
 
     Ok(())
 }
@@ -615,10 +584,9 @@ fn test_complete_job_workflow_simulation() -> Result<()> {
     )?;
     db::insert_event(&conn, job_id, "ingest", "File ingested")?;
 
-    // Step 2: Stage
-    let staging_path = "/staging/123/important_file.pdf";
-    db::update_job_staged(&conn, job_id, staging_path, "queued")?;
-    db::insert_event(&conn, job_id, "stage", "File staged")?;
+    // Step 2: Queue for scan
+    db::update_job_staged(&conn, job_id, source_path, "queued")?;
+    db::insert_event(&conn, job_id, "stage", "Ready for scan")?;
 
     // Step 3: Scan
     db::update_scan_status(&conn, job_id, "clean", "scanned")?;

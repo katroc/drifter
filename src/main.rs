@@ -56,7 +56,6 @@ async fn main() -> Result<()> {
     }
 
     // Ensure directories exist
-    std::fs::create_dir_all(&cfg.staging_dir)?;
     std::fs::create_dir_all(&cfg.quarantine_dir)?;
 
     let conn = Arc::new(StdMutex::new(conn));

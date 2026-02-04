@@ -10,13 +10,6 @@ pub enum ScanMode {
     Skip,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum StagingMode {
-    Copy,
-    Direct,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum S3KeyMode {
@@ -34,8 +27,6 @@ pub enum SseMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default = "default_staging_dir")]
-    pub staging_dir: String,
     #[serde(default = "default_quarantine_dir")]
     pub quarantine_dir: String,
     #[serde(default = "default_reports_dir")]
@@ -43,8 +34,6 @@ pub struct Config {
     #[serde(default = "default_state_dir")]
     pub state_dir: String,
     pub watch_dir: Option<String>,
-    #[serde(default = "default_staging_mode")]
-    pub staging_mode: StagingMode,
     #[serde(default)]
     pub delete_source_after_upload: bool,
     pub scan_mode: ScanMode,
@@ -102,12 +91,10 @@ fn default_history_width() -> u16 {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            staging_dir: "./staging".to_string(),
             quarantine_dir: "./quarantine".to_string(),
             reports_dir: "./reports".to_string(),
             state_dir: "./state".to_string(),
             watch_dir: None,
-            staging_mode: StagingMode::Direct,
             delete_source_after_upload: false,
             scan_mode: ScanMode::Stream,
             scan_chunk_size_mb: 24,
@@ -138,10 +125,6 @@ impl Default for Config {
         }
     }
 }
-
-fn default_staging_dir() -> String {
-    "./staging".to_string()
-}
 fn default_quarantine_dir() -> String {
     "./quarantine".to_string()
 }
@@ -153,9 +136,6 @@ fn default_state_dir() -> String {
 }
 fn default_theme() -> String {
     Theme::default_name().to_string()
-}
-fn default_staging_mode() -> StagingMode {
-    StagingMode::Direct
 }
 
 // --- Database-backed config ---
@@ -197,11 +177,6 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
             .unwrap_or(default)
     };
 
-    let staging_mode = match settings.get("staging_mode").map(|s| s.as_str()) {
-        Some("copy") => StagingMode::Copy,
-        _ => StagingMode::Direct,
-    };
-
     let scan_mode = match settings.get("scan_mode").map(|s| s.as_str()) {
         Some("full") => ScanMode::Full,
         Some("skip") => ScanMode::Skip,
@@ -225,12 +200,10 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
     let legacy_parts = get_usize("concurrency_parts_per_file", 4);
 
     Ok(Config {
-        staging_dir: get_or("staging_dir", "./staging"),
         quarantine_dir: get_or("quarantine_dir", "./quarantine"),
         reports_dir: get_or("reports_dir", "./reports"),
         state_dir: get_or("state_dir", "./state"),
         watch_dir: get("watch_dir"),
-        staging_mode,
         delete_source_after_upload: get("delete_source_after_upload")
             .map(|s| s == "true")
             .unwrap_or(false),
@@ -268,17 +241,10 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
 }
 
 pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
-    db::set_setting(conn, "staging_dir", &cfg.staging_dir)?;
     db::set_setting(conn, "quarantine_dir", &cfg.quarantine_dir)?;
     db::set_setting(conn, "reports_dir", &cfg.reports_dir)?;
     db::set_setting(conn, "state_dir", &cfg.state_dir)?;
     db::set_setting(conn, "watch_dir", cfg.watch_dir.as_deref().unwrap_or(""))?;
-
-    let staging_mode = match cfg.staging_mode {
-        StagingMode::Copy => "copy",
-        StagingMode::Direct => "direct",
-    };
-    db::set_setting(conn, "staging_mode", staging_mode)?;
     db::set_setting(
         conn,
         "delete_source_after_upload",
@@ -458,11 +424,9 @@ mod tests {
     fn test_default_config_values() {
         let config = Config::default();
 
-        assert_eq!(config.staging_dir, "./staging");
         assert_eq!(config.quarantine_dir, "./quarantine");
         assert_eq!(config.reports_dir, "./reports");
         assert_eq!(config.state_dir, "./state");
-        assert_eq!(config.staging_mode, StagingMode::Direct);
         assert!(!config.delete_source_after_upload);
         assert_eq!(config.scan_chunk_size_mb, 24);
         assert_eq!(config.clamd_host, "127.0.0.1");
@@ -605,24 +569,6 @@ mod tests {
     }
 
     #[test]
-    fn test_staging_mode_serialization() {
-        let copy = serde_json::to_string(&StagingMode::Copy).unwrap();
-        assert_eq!(copy, "\"copy\"");
-
-        let direct = serde_json::to_string(&StagingMode::Direct).unwrap();
-        assert_eq!(direct, "\"direct\"");
-    }
-
-    #[test]
-    fn test_staging_mode_deserialization() {
-        let copy: StagingMode = serde_json::from_str("\"copy\"").unwrap();
-        assert_eq!(copy, StagingMode::Copy);
-
-        let direct: StagingMode = serde_json::from_str("\"direct\"").unwrap();
-        assert_eq!(direct, StagingMode::Direct);
-    }
-
-    #[test]
     fn test_s3_key_mode_serialization() {
         let original = serde_json::to_string(&S3KeyMode::Original).unwrap();
         assert_eq!(original, "\"original\"");
@@ -671,7 +617,6 @@ mod tests {
         let conn = setup_test_db()?;
 
         let config = Config {
-            staging_dir: "/custom/staging".to_string(),
             part_size_mb: 256,
             concurrency_upload_global: 2,
             scanner_enabled: false,
@@ -683,7 +628,6 @@ mod tests {
         save_config_to_db(&conn, &config)?;
         let loaded = load_config_from_db(&conn)?;
 
-        assert_eq!(loaded.staging_dir, "/custom/staging");
         assert_eq!(loaded.part_size_mb, 256);
         assert_eq!(loaded.concurrency_upload_global, 2);
         assert!(!loaded.scanner_enabled);
@@ -698,7 +642,6 @@ mod tests {
         let conn = setup_test_db()?;
 
         let config = Config {
-            staging_mode: StagingMode::Copy,
             scan_mode: ScanMode::Skip,
             s3_key_mode: S3KeyMode::Template,
             sse: SseMode::Kms,
@@ -708,7 +651,6 @@ mod tests {
         save_config_to_db(&conn, &config)?;
         let loaded = load_config_from_db(&conn)?;
 
-        assert_eq!(loaded.staging_mode, StagingMode::Copy);
         assert!(matches!(loaded.scan_mode, ScanMode::Skip));
         assert!(matches!(loaded.s3_key_mode, S3KeyMode::Template));
         assert!(matches!(loaded.sse, SseMode::Kms));
@@ -726,7 +668,6 @@ mod tests {
         let loaded = load_config_from_db(&conn)?;
 
         // Should use default for missing values
-        assert_eq!(loaded.staging_dir, "./staging"); // default
         assert_eq!(loaded.part_size_mb, 256); // saved value
         assert_eq!(loaded.concurrency_upload_global, 1); // default
 
@@ -801,12 +742,10 @@ mod tests {
         let conn = setup_test_db()?;
 
         let config = Config {
-            staging_dir: "/staging".to_string(),
             quarantine_dir: "/quarantine".to_string(),
             reports_dir: "/reports".to_string(),
             state_dir: "/state".to_string(),
             watch_dir: Some("/watch".to_string()),
-            staging_mode: StagingMode::Copy,
             delete_source_after_upload: true,
             scan_mode: ScanMode::Full,
             scan_chunk_size_mb: 50,
@@ -840,12 +779,10 @@ mod tests {
         let loaded = load_config_from_db(&conn)?;
 
         // Verify all fields
-        assert_eq!(loaded.staging_dir, config.staging_dir);
         assert_eq!(loaded.quarantine_dir, config.quarantine_dir);
         assert_eq!(loaded.reports_dir, config.reports_dir);
         assert_eq!(loaded.state_dir, config.state_dir);
         assert_eq!(loaded.watch_dir, config.watch_dir);
-        assert_eq!(loaded.staging_mode, config.staging_mode);
         assert_eq!(
             loaded.delete_source_after_upload,
             config.delete_source_after_upload

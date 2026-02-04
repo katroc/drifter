@@ -13,16 +13,6 @@ fn bench_path_calculations(c: &mut Criterion) {
     c.bench_function("calculate_relative_path", |b| {
         b.iter(|| ingest::calculate_relative_path(black_box(file_path), black_box(base_path)))
     });
-
-    c.bench_function("calculate_staging_path", |b| {
-        b.iter(|| {
-            ingest::calculate_staging_path(
-                black_box("/tmp/staging"),
-                black_box(12345),
-                black_box(file_path),
-            )
-        })
-    });
 }
 
 criterion_group!(benches, bench_path_calculations);

@@ -13,7 +13,6 @@ pub struct WizardState {
     pub field: usize,
     pub editing: bool,
     // Paths
-    pub staging_dir: String,
     pub quarantine_dir: String,
     // Scanner
     pub clamd_host: String,
@@ -41,7 +40,6 @@ impl WizardState {
             step: WizardStep::Paths,
             field: 0,
             editing: false,
-            staging_dir: "./staging".to_string(),
             quarantine_dir: "./quarantine".to_string(),
             clamd_host: "127.0.0.1".to_string(),
             clamd_port: "3310".to_string(),
@@ -57,7 +55,7 @@ impl WizardState {
 
     pub fn field_count(&self) -> usize {
         match self.step {
-            WizardStep::Paths => 2,
+            WizardStep::Paths => 1,
             WizardStep::Scanner => 2,
             WizardStep::S3 => 5,
             WizardStep::Performance => 2,
@@ -67,8 +65,7 @@ impl WizardState {
 
     pub fn get_field_mut(&mut self) -> Option<&mut String> {
         match (self.step, self.field) {
-            (WizardStep::Paths, 0) => Some(&mut self.staging_dir),
-            (WizardStep::Paths, 1) => Some(&mut self.quarantine_dir),
+            (WizardStep::Paths, 0) => Some(&mut self.quarantine_dir),
             (WizardStep::Scanner, 0) => Some(&mut self.clamd_host),
             (WizardStep::Scanner, 1) => Some(&mut self.clamd_port),
             (WizardStep::S3, 0) => Some(&mut self.bucket),

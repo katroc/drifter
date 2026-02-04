@@ -4,8 +4,8 @@ expression: output
 ---
 ╭ Navigation ───╭ Local /test/path───╮ Remote (S3): 0 [Path╮ History [All] ────────────────────────────────────────────╮
 │▌ Transfers    │ Size      Modified │Name                 │File                 Status           Size       Time      │
-│  Quarantine   │ -         -        │                     │📄  completed_file.zi Done             9.54 MB    384d ago  │
-│  Logs         │ -         -        │                     │📄  another_upload.ta Done             23.84 MB   384d ago  │
+│  Quarantine   │ -         -        │                     │📄  completed_file.zi Done             9.54 MB    385d ago  │
+│  Logs         │ -         -        │                     │📄  another_upload.ta Done             23.84 MB   385d ago  │
 │  Settings     │ 1.0 KB    -        │                     │                                                           │
 │               │ 2.0 MB    -        │                     │                                                           │
 │               │                    │                     │                                                           │
