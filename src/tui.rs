@@ -40,6 +40,7 @@ use crate::utils::lock_mutex;
 
 use tokio::sync::Mutex as AsyncMutex;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_tui(
     conn_mutex: Arc<Mutex<Connection>>,
     cfg: Arc<AsyncMutex<Config>>,
