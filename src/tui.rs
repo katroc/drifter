@@ -397,7 +397,6 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     if app.wizard.step == WizardStep::Done {
                                         // Save config and close wizard
                                         let cfg = Config {
-                                            staging_dir: app.wizard.staging_dir.clone(),
                                             quarantine_dir: app.wizard.quarantine_dir.clone(),
                                             clamd_host: app.wizard.clamd_host.clone(),
                                             clamd_port: app
@@ -452,7 +451,6 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                         }
 
                                         // Create directories if they don't exist
-                                        let _ = std::fs::create_dir_all(&cfg.staging_dir);
                                         let _ = std::fs::create_dir_all(&cfg.quarantine_dir);
                                         let _ = std::fs::create_dir_all(&cfg.state_dir);
 
@@ -830,11 +828,6 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     {
                                                         // Only queue files on Enter or 'l', not Right arrow
                                                         let conn_clone = conn_mutex.clone();
-                                                        let cfg_guard = cfg.lock().await;
-                                                        let staging = cfg_guard.staging_dir.clone();
-                                                        let staging_mode =
-                                                            cfg_guard.staging_mode.clone();
-                                                        drop(cfg_guard);
                                                         let path = entry
                                                             .path
                                                             .to_string_lossy()
@@ -845,8 +838,6 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                 Uuid::new_v4().to_string();
                                                             let _ = ingest_path(
                                                                 conn_clone,
-                                                                &staging,
-                                                                &staging_mode,
                                                                 &path,
                                                                 &session_id,
                                                             )
@@ -883,32 +874,25 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             }
                                             KeyCode::Char('c') => app.picker.clear_selected(),
                                             KeyCode::Char('s') => {
-                                                let paths: Vec<PathBuf> = app
-                                                    .picker
-                                                    .selected_paths
-                                                    .iter()
-                                                    .cloned()
-                                                    .collect();
-                                                if !paths.is_empty() {
-                                                    let conn_clone = conn_mutex.clone();
-                                                    let cfg_guard = cfg.lock().await;
-                                                    let staging = cfg_guard.staging_dir.clone();
-                                                    let staging_mode =
-                                                        cfg_guard.staging_mode.clone();
-                                                    drop(cfg_guard);
+                                                    let paths: Vec<PathBuf> = app
+                                                        .picker
+                                                        .selected_paths
+                                                        .iter()
+                                                        .cloned()
+                                                        .collect();
+                                                    if !paths.is_empty() {
+                                                        let conn_clone = conn_mutex.clone();
 
-                                                    let paths_count = paths.len();
-                                                    tokio::spawn(async move {
-                                                        let session_id = Uuid::new_v4().to_string();
-                                                        let mut total = 0;
-                                                        for path in paths {
-                                                            if let Ok(count) = ingest_path(
-                                                                conn_clone.clone(),
-                                                                &staging,
-                                                                &staging_mode,
-                                                                &path.to_string_lossy(),
-                                                                &session_id,
-                                                            )
+                                                        let paths_count = paths.len();
+                                                        tokio::spawn(async move {
+                                                            let session_id = Uuid::new_v4().to_string();
+                                                            let mut total = 0;
+                                                            for path in paths {
+                                                                if let Ok(count) = ingest_path(
+                                                                    conn_clone.clone(),
+                                                                    &path.to_string_lossy(),
+                                                                    &session_id,
+                                                                )
                                                             .await
                                                             {
                                                                 total += count;
@@ -1590,7 +1574,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                 let field_count = match app.settings.active_category {
                                     SettingsCategory::S3 => 6,
                                     SettingsCategory::Scanner => 4,
-                                    SettingsCategory::Performance => 7,
+                                    SettingsCategory::Performance => 6,
                                     SettingsCategory::Theme => 1,
                                 };
                                 // Focus-specific rendering logic for fields is handled in render.rs,
@@ -1625,18 +1609,6 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     );
                                                 }
                                                 (SettingsCategory::Performance, 4) => {
-                                                    app.settings.staging_mode_direct =
-                                                        !app.settings.staging_mode_direct;
-                                                    app.status_message = format!(
-                                                        "Staging Mode: {}",
-                                                        if app.settings.staging_mode_direct {
-                                                            "Direct (no copy)"
-                                                        } else {
-                                                            "Copy (default)"
-                                                        }
-                                                    );
-                                                }
-                                                (SettingsCategory::Performance, 5) => {
                                                     app.settings.delete_source_after_upload =
                                                         !app.settings.delete_source_after_upload;
                                                     app.status_message = format!(
@@ -1648,7 +1620,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         }
                                                     );
                                                 }
-                                                (SettingsCategory::Performance, 6) => {
+                                                (SettingsCategory::Performance, 5) => {
                                                     app.settings.host_metrics_enabled =
                                                         !app.settings.host_metrics_enabled;
                                                     app.status_message = format!(
@@ -2335,33 +2307,16 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                     } else {
                                                                         let conn_clone =
                                                                             conn_mutex.clone();
-                                                                        let cfg_handle =
-                                                                            app.config.clone();
                                                                         let path = entry
                                                                             .path
                                                                             .to_string_lossy()
                                                                             .to_string();
                                                                         tokio::spawn(async move {
-                                                                            let (staging, mode) = {
-                                                                                let cfg =
-                                                                                    cfg_handle
-                                                                                        .lock()
-                                                                                        .await;
-                                                                                (
-                                                                                    cfg.staging_dir
-                                                                                        .clone(),
-                                                                                    cfg.staging_mode
-                                                                                        .clone(),
-                                                                                )
-                                                                            };
-
                                                                             let session_id =
                                                                                 Uuid::new_v4()
                                                                                     .to_string();
                                                                             let _ = ingest_path(
                                                                                 conn_clone,
-                                                                                &staging,
-                                                                                &mode,
                                                                                 &path,
                                                                                 &session_id,
                                                                             )
@@ -2694,17 +2649,12 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                     !app.settings.scanner_enabled;
                                                             }
                                                             (SettingsCategory::Performance, 4) => {
-                                                                app.settings.staging_mode_direct =
-                                                                    !app.settings
-                                                                        .staging_mode_direct;
-                                                            }
-                                                            (SettingsCategory::Performance, 5) => {
                                                                 app.settings
                                                                     .delete_source_after_upload =
                                                                     !app.settings
                                                                         .delete_source_after_upload;
                                                             }
-                                                            (SettingsCategory::Performance, 6) => {
+                                                            (SettingsCategory::Performance, 5) => {
                                                                 app.settings.host_metrics_enabled =
                                                                     !app.settings
                                                                         .host_metrics_enabled;

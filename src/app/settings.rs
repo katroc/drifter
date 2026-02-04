@@ -1,4 +1,4 @@
-use crate::core::config::{Config, StagingMode};
+use crate::core::config::Config;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsCategory {
@@ -29,7 +29,6 @@ pub struct SettingsState {
     pub original_theme: Option<String>,
     pub scanner_enabled: bool,
     pub host_metrics_enabled: bool,
-    pub staging_mode_direct: bool, // true = Direct mode, false = Copy mode
     pub delete_source_after_upload: bool,
 }
 
@@ -56,7 +55,6 @@ impl SettingsState {
             original_theme: None,
             scanner_enabled: cfg.scanner_enabled,
             host_metrics_enabled: cfg.host_metrics_enabled,
-            staging_mode_direct: cfg.staging_mode == StagingMode::Direct,
             delete_source_after_upload: cfg.delete_source_after_upload,
         }
     }
@@ -114,11 +112,6 @@ impl SettingsState {
         cfg.theme = self.theme.clone();
         cfg.scanner_enabled = self.scanner_enabled;
         cfg.host_metrics_enabled = self.host_metrics_enabled;
-        cfg.staging_mode = if self.staging_mode_direct {
-            StagingMode::Direct
-        } else {
-            StagingMode::Copy
-        };
         cfg.delete_source_after_upload = self.delete_source_after_upload;
     }
 }

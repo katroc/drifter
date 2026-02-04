@@ -1215,14 +1215,6 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
                 app.settings.concurrency_scan_parts.as_str(),
             ),
             (
-                "Staging Mode",
-                if app.settings.staging_mode_direct {
-                    "[X] Direct (no copy)"
-                } else {
-                    "[ ] Copy"
-                },
-            ),
-            (
                 "Delete Source After Upload",
                 if app.settings.delete_source_after_upload {
                     "[X] Enabled"
@@ -1498,10 +1490,7 @@ fn draw_wizard(f: &mut Frame, app: &App) {
     f.render_widget(title, chunks[0]);
 
     let fields: Vec<(&str, &str)> = match app.wizard.step {
-        WizardStep::Paths => vec![
-            ("Staging Directory", &app.wizard.staging_dir),
-            ("Quarantine Directory", &app.wizard.quarantine_dir),
-        ],
+        WizardStep::Paths => vec![("Quarantine Directory", &app.wizard.quarantine_dir)],
         WizardStep::Scanner => vec![
             ("ClamAV Host", &app.wizard.clamd_host),
             ("ClamAV Port", &app.wizard.clamd_port),

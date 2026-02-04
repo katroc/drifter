@@ -1000,10 +1000,10 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_job_staged(&conn, job_id, "/staging/file.txt", "queued")?;
+        update_job_staged(&conn, job_id, "/data/file.txt", "queued")?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.staged_path, Some("/staging/file.txt".to_string()));
+        assert_eq!(job.staged_path, Some("/data/file.txt".to_string()));
         assert_eq!(job.status, "queued");
         assert_eq!(job.error, None);
 

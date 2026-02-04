@@ -221,7 +221,6 @@ impl App {
         async_rx: mpsc::Receiver<AppEvent>,
     ) -> Result<Self> {
         let cfg_guard = config.lock().await;
-        let watcher_cfg = cfg_guard.clone();
         let cached_config = cfg_guard.clone();
         let settings = SettingsState::from_config(&cfg_guard);
         let theme = Theme::from_name(&cfg_guard.theme);
@@ -256,7 +255,7 @@ impl App {
             _watch_path: None,
             _watch_seen: HashSet::new(),
             last_watch_scan: Instant::now() - Duration::from_secs(10),
-            _watcher: Watcher::new(conn.clone(), watcher_cfg),
+            _watcher: Watcher::new(conn.clone()),
             current_tab: AppTab::Transfers,
             focus: AppFocus::Browser,
             settings,

@@ -338,21 +338,14 @@ impl Coordinator {
                     )?;
                 }
 
-                // Cleanup based on staging mode
-                use crate::core::config::StagingMode;
                 let staged_path = std::path::Path::new(&path);
-                match config.staging_mode {
-                    StagingMode::Copy => {
-                        let _ = std::fs::remove_file(staged_path);
-                        if let Some(parent) = staged_path.parent() {
-                            let _ = std::fs::remove_dir(parent);
-                        }
+                if job.source_path != path {
+                    let _ = std::fs::remove_file(staged_path);
+                    if let Some(parent) = staged_path.parent() {
+                        let _ = std::fs::remove_dir(parent);
                     }
-                    StagingMode::Direct => {
-                        if config.delete_source_after_upload {
-                            let _ = std::fs::remove_file(staged_path);
-                        }
-                    }
+                } else if config.delete_source_after_upload {
+                    let _ = std::fs::remove_file(staged_path);
                 }
 
                 // Signal TUI to refresh remote panel
