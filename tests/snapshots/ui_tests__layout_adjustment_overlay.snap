@@ -1,0 +1,44 @@
+---
+source: tests/ui_tests.rs
+expression: output
+---
+╭ Navigation ───╭ Layout /test/path──╮ Remote (S3): 0 [Path╮ History [All] ────────────────────────────────────────────╮
+│▌ Transfers    │ Size      Modified │Name                 │File                 Status           Size       Time      │
+│  Quarantine   │ -         -        │                     │                                                           │
+│  Logs         │ -         -        │                     │                                                           │
+│  Settings     │ 1.0 KB    -        │                     │                                                           │
+│               │ 2.0 MB    -        │                     │                                                           │
+│               │                    │                     │                                                           │
+│               │                    │                     │                                                           │
+│               │                    │                     │                                                           │
+│               │                    │                     │                                                           │
+│               │                    │                     │                                                           │
+│     ╭ Layout Adjustment Mode ──────────────────────────────────────────────────────────────────────────────────╮     │
+│     │Select a panel to adjust:                                                                                 │     │
+│     │                                                                                                          │     │
+│     │1. Local: 50%                                                                                             │     │
+│     │2. Queue: 50%                                                                                             │     │
+│     │3. History: 60 chars                                                                                      │     │
+│     │                                                                                                          │     │
+│     │Controls:                                                                                                 │     │
+│     │+/- : Adjust selected dimension                                                                           │     │
+│     │r   : Reset selected to default                                                                           │     │
+│     │R   : Reset all to defaults                                                                               │     │
+│     │s   : Save layout                                                                                         │     │
+│     │q   : Cancel (discard changes)                                                                            │     │
+│     │                                                                                                          │     │
+│     │                                                                                                          │     │
+│     │                                                                                                          │     │
+│     ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯     │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │───────────────────────────────────────────────────────────╯
+│               │                                          │ Metrics                                                   │
+│               │                                          │Disk Read:  0 B               Net Down: 0 B                │
+│               │                                          │Disk Write: 0 B               Net Up:   0 B                │
+╰───────────────╰──────────────────────────────────────────╯───────────────────────────────────────────────────────────╯
+1-3 Select Panel  │  +/- Adjust  │  r/R              ClamAV: Connected  │  S3: Not Configured  │  Jobs: 0  │  Threats: 0

@@ -1,0 +1,44 @@
+---
+source: tests/ui_tests.rs
+expression: output
+---
+╭ Navigation ───╭ Quarantine Zone ─────────────────────────╮ Job #1 Details ───────────────────────────────────────────╮
+│  Transfers    │File                 Threat Status  Time  │Status: quarantined                                        │
+│▌ Quarantine   │malware.exe          -      Detecte 384d a│Path:   /uploads/malware.exe                               │
+│  Logs         │                                          │Session: test-session                                      │
+│  Settings     │                                          │Report:  scan_report_test-session.txt                      │
+│               │                                          │Size:   488.28 KB                                          │
+│               │                                          │Scan:   infected                                           │
+│               │                                          │Upload: none                                               │
+│               │                                          │Scan Time:   500ms                                         │
+│               │                                          │                                                           │
+│               │                                          │DATA INTEGRITY (SHA256):                                   │
+│               │                                          │Local:  Calculating...                                     │
+│               │                                          │Remote: Not uploaded                                       │
+│               │                                          │                                                           │
+│               │                                          │DETAILS / ERRORS:                                          │
+│               │                                          │Infected: Win.Trojan.Agent-123456                          │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │───────────────────────────────────────────────────────────╯
+│               │                                          │ Metrics                                                   │
+│               │                                          │Disk Read:  0 B               Net Down: 0 B                │
+│               │                                          │Disk Write: 0 B               Net Up:   0 B                │
+╰───────────────╰──────────────────────────────────────────╯───────────────────────────────────────────────────────────╯
+← Rail  │  d Clear  │  R Refresh  │  Tab             ClamAV: Connected  │  S3: Not Configured  │  Jobs: 0  │  Threats: 1
