@@ -24,6 +24,27 @@
 - **Detailed Inspection**: Drill down into any job to see exact part completion status, checksums (Local vs Remote), and retry countdowns.
 - **Theming**: 10+ built-in themes (Nord, Tokyo Night, High Contrast, Transparent) with configurable border styles.
 
+## 🛠️ Development & Testing
+
+Drifter includes a comprehensive testing suite, including UI snapshot tests to verify TUI rendering without running the full application.
+
+### Running Tests
+```bash
+# Run all tests (Unit, Integration, UI)
+cargo test
+
+# Run only UI snapshot tests
+cargo test --test ui_tests
+```
+
+### UI Snapshots with `insta`
+We use [insta](https://insta.rs/) for snapshot testing. If you make changes to the UI code, tests may fail with snapshot mismatches. To review and accept changes:
+
+```bash
+cargo install cargo-insta
+cargo insta review
+```
+
 ## Installation
 
 ### Prerequisites
