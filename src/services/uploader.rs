@@ -36,6 +36,7 @@ pub struct S3Object {
     pub size: i64,
     pub last_modified: String,
     pub is_dir: bool,
+    pub is_parent: bool,
 }
 
 #[derive(Clone)]
@@ -133,6 +134,7 @@ impl Uploader {
                             size: 0,
                             last_modified: String::new(),
                             is_dir: true,
+                            is_parent: false,
                         });
                     }
                 }
@@ -167,6 +169,7 @@ impl Uploader {
                         size,
                         last_modified,
                         is_dir: false,
+                        is_parent: false,
                     });
                 }
             }

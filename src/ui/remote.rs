@@ -29,13 +29,17 @@ pub fn render_remote(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                 base_style
             };
 
-            let size_str = if obj.is_dir {
+            let size_str = if obj.is_parent {
+                "".to_string()
+            } else if obj.is_dir {
                 "DIR".to_string()
             } else {
                 format_bytes(obj.size as u64)
             };
 
-            let display_name = if obj.is_dir && !obj.name.ends_with('/') {
+            let display_name = if obj.is_parent {
+                "..".to_string()
+            } else if obj.is_dir && !obj.name.ends_with('/') {
                 format!("{}/", obj.name)
             } else {
                 obj.name.clone()
@@ -72,7 +76,9 @@ pub fn render_remote(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         app.remote_current_path.clone()
     };
 
-    let mode_indicator = if app.input_mode == InputMode::RemoteBrowsing {
+    let mode_indicator = if app.remote_loading {
+        " [Loading...]"
+    } else if app.input_mode == InputMode::RemoteBrowsing {
         " [BROWSING]"
     } else {
         ""

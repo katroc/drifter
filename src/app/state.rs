@@ -79,8 +79,9 @@ pub enum InputMode {
 #[derive(Debug)]
 pub enum AppEvent {
     Notification(String),
-    RemoteFileList(Vec<S3Object>),
+    RemoteFileList(String, Vec<S3Object>), // (path, objects)
     LogLine(String),
+    RefreshRemote,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +135,9 @@ pub struct App {
     pub s3_objects: Vec<S3Object>,
     pub selected_remote: usize,
     pub remote_current_path: String,
+    pub remote_cache: HashMap<String, (Vec<S3Object>, Instant)>, // path -> (objects, fetched_at)
+    pub remote_request_pending: Option<String>, // path currently being fetched
+    pub remote_loading: bool,
 
     pub last_refresh: Instant,
     pub status_message: String,
@@ -213,6 +217,8 @@ impl App {
         progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>,
         cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
         log_handle: crate::logging::LogHandle,
+        async_tx: mpsc::Sender<AppEvent>,
+        async_rx: mpsc::Receiver<AppEvent>,
     ) -> Result<Self> {
         let cfg_guard = config.lock().await;
         let watcher_cfg = cfg_guard.clone();
@@ -222,7 +228,7 @@ impl App {
         let initial_log_level = cfg_guard.log_level.clone();
         drop(cfg_guard);
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = (async_tx, async_rx);
 
         let mut app = Self {
             jobs: Vec::new(),
@@ -235,6 +241,9 @@ impl App {
             s3_objects: Vec::new(),
             selected_remote: 0,
             remote_current_path: String::new(),
+            remote_cache: HashMap::new(),
+            remote_request_pending: None,
+            remote_loading: false,
 
             last_refresh: Instant::now() - Duration::from_secs(5),
             status_message: "Ready".to_string(),

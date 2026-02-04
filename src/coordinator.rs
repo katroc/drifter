@@ -1,3 +1,4 @@
+use crate::app::state::AppEvent;
 use crate::core::config::Config;
 use crate::db::{self, JobRow};
 use crate::services::scanner::{ScanResult, Scanner};
@@ -6,7 +7,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -30,6 +31,7 @@ pub struct Coordinator {
     uploader: Uploader,
     progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>,
     cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
+    app_tx: mpsc::Sender<AppEvent>,
 }
 
 impl Coordinator {
@@ -38,6 +40,7 @@ impl Coordinator {
         config: Arc<AsyncMutex<Config>>,
         progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>,
         cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
+        app_tx: mpsc::Sender<AppEvent>,
     ) -> Result<Self> {
         // We need lock to init scanner/uploader but they are just helpers now or cheap to init
         // Note: Initializing services might need config, but for now we assume they don't deep copy config state
@@ -60,6 +63,7 @@ impl Coordinator {
             uploader,
             progress,
             cancellation_tokens,
+            app_tx,
         })
     }
 
@@ -351,6 +355,9 @@ impl Coordinator {
                     }
                 }
 
+                // Signal TUI to refresh remote panel
+                let _ = self.app_tx.send(AppEvent::RefreshRemote);
+
                 self.check_and_report(&job.session_id).await?;
             }
             Ok(false) => {
@@ -615,8 +622,9 @@ mod tests {
         let config = Arc::new(AsyncMutex::new(config));
         let progress = Arc::new(AsyncMutex::new(HashMap::new()));
         let cancel = Arc::new(AsyncMutex::new(HashMap::new()));
+        let (app_tx, _app_rx) = mpsc::channel();
 
-        let coord = Coordinator::new(conn.clone(), config, progress, cancel)?;
+        let coord = Coordinator::new(conn.clone(), config, progress, cancel, app_tx)?;
         Ok((coord, conn))
     }
 

@@ -9,13 +9,14 @@ mod tui;
 mod ui;
 mod utils;
 
+use crate::app::state::AppEvent;
 use crate::coordinator::Coordinator;
 use crate::core::config;
 use crate::db::init_db;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{mpsc, Arc, Mutex as StdMutex};
 use tokio::sync::Mutex as AsyncMutex;
 
 #[tokio::main]
@@ -64,10 +65,14 @@ async fn main() -> Result<()> {
     let progress = Arc::new(AsyncMutex::new(HashMap::new()));
     let cancellation_tokens = Arc::new(AsyncMutex::new(HashMap::<i64, Arc<AtomicBool>>::new()));
 
+    // Create shared event channel for coordinator -> TUI communication
+    let (app_tx, app_rx) = mpsc::channel::<AppEvent>();
+
     let coordinator_conn = conn.clone();
     let coordinator_cfg = cfg.clone();
     let coordinator_progress = progress.clone();
     let coordinator_tokens = cancellation_tokens.clone();
+    let coordinator_tx = app_tx.clone();
 
     tokio::spawn(async move {
         let coordinator = match Coordinator::new(
@@ -75,6 +80,7 @@ async fn main() -> Result<()> {
             coordinator_cfg,
             coordinator_progress,
             coordinator_tokens,
+            coordinator_tx,
         ) {
             Ok(c) => c,
             Err(e) => {
@@ -93,6 +99,8 @@ async fn main() -> Result<()> {
         cancellation_tokens,
         needs_wizard,
         log_handle,
+        app_tx,
+        app_rx,
     )
     .await?;
     Ok(())
