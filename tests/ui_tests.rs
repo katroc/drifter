@@ -24,6 +24,7 @@ use drifter::coordinator::ProgressInfo;
 use drifter::core::config::Config;
 use drifter::core::metrics::{HostMetricsSnapshot, MetricsCollector};
 use drifter::db::JobRow;
+use drifter::services::uploader::S3Object;
 use drifter::services::watch::Watcher;
 use drifter::ui::render::ui;
 use drifter::ui::theme::Theme;
@@ -80,12 +81,18 @@ struct TestAppBuilder {
     history: Vec<JobRow>,
     quarantine: Vec<JobRow>,
     picker_entries: Vec<FileEntry>,
+    staged_paths: HashSet<PathBuf>,
+    s3_objects: Vec<S3Object>,
+    input_buffer: String,
+    view_mode: ViewMode,
+    theme_name: String,
     show_wizard: bool,
     pending_action: ModalAction,
     confirmation_msg: String,
     layout_adjust_target: Option<LayoutTarget>,
 }
 
+#[allow(dead_code)]
 impl TestAppBuilder {
     fn new() -> Self {
         let conn = Arc::new(Mutex::new(setup_test_db()));
@@ -99,6 +106,11 @@ impl TestAppBuilder {
             history: Vec::new(),
             quarantine: Vec::new(),
             picker_entries: Vec::new(),
+            staged_paths: HashSet::new(),
+            s3_objects: Vec::new(),
+            input_buffer: String::new(),
+            view_mode: ViewMode::Flat,
+            theme_name: "dracula".to_string(),
             show_wizard: false,
             pending_action: ModalAction::None,
             confirmation_msg: String::new(),
@@ -141,6 +153,32 @@ impl TestAppBuilder {
         self
     }
 
+    fn with_staged_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.staged_paths = paths.into_iter().collect();
+        self
+    }
+
+    fn with_s3_objects(mut self, objects: Vec<S3Object>) -> Self {
+        self.s3_objects = objects;
+        self
+    }
+
+    fn with_filter(mut self, filter_text: &str) -> Self {
+        self.input_buffer = filter_text.to_string();
+        self.input_mode = InputMode::Filter;
+        self
+    }
+
+    fn with_view_mode(mut self, mode: ViewMode) -> Self {
+        self.view_mode = mode;
+        self
+    }
+
+    fn with_theme(mut self, theme_name: &str) -> Self {
+        self.theme_name = theme_name.to_string();
+        self
+    }
+
     fn with_wizard(mut self) -> Self {
         self.show_wizard = true;
         self
@@ -175,7 +213,7 @@ impl TestAppBuilder {
             selected: 0,
             view: PickerView::List,
             expanded: HashSet::new(),
-            selected_paths: HashSet::new(),
+            selected_paths: self.staged_paths.clone(),
             last_error: None,
             search_recursive: false,
             is_searching: false,
@@ -223,7 +261,7 @@ impl TestAppBuilder {
             ];
         }
 
-        let theme = Theme::from_name(&self.config.theme);
+        let theme = Theme::from_name(&self.theme_name);
         let settings = SettingsState::from_config(&self.config);
 
         // Build visual lists from jobs
@@ -273,9 +311,9 @@ impl TestAppBuilder {
             selected_history: 0,
             selected_quarantine: 0,
 
-            s3_objects: Vec::new(),
+            s3_objects: self.s3_objects,
             selected_remote: 0,
-            remote_current_path: String::new(),
+            remote_current_path: "uploads/".to_string(),
             remote_cache: HashMap::new(),
             remote_request_pending: None,
             remote_loading: false,
@@ -284,7 +322,7 @@ impl TestAppBuilder {
             status_message: "Ready".to_string(),
             status_message_at: None,
             input_mode: self.input_mode,
-            input_buffer: String::new(),
+            input_buffer: self.input_buffer,
             history_filter: HistoryFilter::All,
             picker,
             watch_enabled: false,
@@ -317,7 +355,7 @@ impl TestAppBuilder {
             queue_search_query: String::new(),
             history_search_query: String::new(),
 
-            view_mode: ViewMode::Flat,
+            view_mode: self.view_mode,
             visual_jobs,
             visual_history,
 
@@ -528,6 +566,132 @@ fn test_logs_view() {
     let app = TestAppBuilder::new()
         .with_tab(AppTab::Logs)
         .with_focus(AppFocus::Logs)
+        .build();
+
+    let output = render_to_string(&app, 120, 40);
+    insta::assert_snapshot!(output);
+}
+
+// =============================================================================
+// ADDITIONAL TESTS - Filter, Remote, Staged, Errors, Tree View, Themes
+// =============================================================================
+
+#[test]
+fn test_filter_mode_active() {
+    let app = TestAppBuilder::new()
+        .with_tab(AppTab::Transfers)
+        .with_focus(AppFocus::Browser)
+        .with_filter("doc")
+        .build();
+
+    let output = render_to_string(&app, 120, 40);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn test_remote_panel_with_objects() {
+    let s3_objects = vec![
+        S3Object {
+            key: "uploads/reports/".to_string(),
+            name: "reports/".to_string(),
+            size: 0,
+            last_modified: String::new(),
+            is_dir: true,
+            is_parent: false,
+        },
+        S3Object {
+            key: "uploads/backup.zip".to_string(),
+            name: "backup.zip".to_string(),
+            size: 52_428_800,
+            last_modified: "2025-01-20T14:30:00Z".to_string(),
+            is_dir: false,
+            is_parent: false,
+        },
+        S3Object {
+            key: "uploads/data.csv".to_string(),
+            name: "data.csv".to_string(),
+            size: 1_048_576,
+            last_modified: "2025-01-19T09:15:00Z".to_string(),
+            is_dir: false,
+            is_parent: false,
+        },
+    ];
+
+    let app = TestAppBuilder::new()
+        .with_tab(AppTab::Transfers)
+        .with_focus(AppFocus::Remote)
+        .with_s3_objects(s3_objects)
+        .build();
+
+    let output = render_to_string(&app, 120, 40);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn test_staged_files_selected() {
+    let staged = vec![
+        PathBuf::from("/test/path/file1.txt"),
+        PathBuf::from("/test/path/file2.pdf"),
+    ];
+
+    let app = TestAppBuilder::new()
+        .with_tab(AppTab::Transfers)
+        .with_focus(AppFocus::Browser)
+        .with_input_mode(InputMode::Browsing)
+        .with_staged_paths(staged)
+        .build();
+
+    let output = render_to_string(&app, 120, 40);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn test_job_with_error() {
+    let mut failed_job = create_sample_job(1, "broken_upload.zip", "failed", 15_000_000);
+    failed_job.error = Some("Network timeout after 3 retries".to_string());
+    failed_job.retry_count = 3;
+
+    let app = TestAppBuilder::new()
+        .with_tab(AppTab::Transfers)
+        .with_focus(AppFocus::Queue)
+        .with_jobs(vec![failed_job])
+        .build();
+
+    let output = render_to_string(&app, 120, 40);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn test_tree_view_mode() {
+    let jobs = vec![
+        create_sample_job(1, "reports/q1/sales.csv", "uploading", 500_000),
+        create_sample_job(2, "reports/q1/expenses.csv", "queued", 300_000),
+        create_sample_job(3, "reports/q2/summary.pdf", "scanning", 1_200_000),
+    ];
+
+    let app = TestAppBuilder::new()
+        .with_tab(AppTab::Transfers)
+        .with_focus(AppFocus::Queue)
+        .with_jobs(jobs)
+        .with_view_mode(ViewMode::Tree)
+        .build();
+
+    let output = render_to_string(&app, 120, 40);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn test_nord_theme() {
+    let jobs = vec![
+        create_sample_job(1, "document.pdf", "uploading", 5_000_000),
+        create_sample_job(2, "image.png", "complete", 2_500_000),
+    ];
+
+    let app = TestAppBuilder::new()
+        .with_tab(AppTab::Transfers)
+        .with_focus(AppFocus::Queue)
+        .with_jobs(jobs)
+        .with_theme("nord")
         .build();
 
     let output = render_to_string(&app, 120, 40);
