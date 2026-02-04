@@ -46,12 +46,9 @@ impl Watcher {
 
                                         tokio::spawn(async move {
                                             let session_id = Uuid::new_v4().to_string();
-                                            if let Err(e) = ingest_path(
-                                                conn_clone,
-                                                &path_str,
-                                                &session_id,
-                                            )
-                                            .await
+                                            if let Err(e) =
+                                                ingest_path(conn_clone, &path_str, &session_id)
+                                                    .await
                                             {
                                                 error!("Failed to ingest file {}: {}", path_str, e);
                                             }

@@ -874,25 +874,25 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             }
                                             KeyCode::Char('c') => app.picker.clear_selected(),
                                             KeyCode::Char('s') => {
-                                                    let paths: Vec<PathBuf> = app
-                                                        .picker
-                                                        .selected_paths
-                                                        .iter()
-                                                        .cloned()
-                                                        .collect();
-                                                    if !paths.is_empty() {
-                                                        let conn_clone = conn_mutex.clone();
+                                                let paths: Vec<PathBuf> = app
+                                                    .picker
+                                                    .selected_paths
+                                                    .iter()
+                                                    .cloned()
+                                                    .collect();
+                                                if !paths.is_empty() {
+                                                    let conn_clone = conn_mutex.clone();
 
-                                                        let paths_count = paths.len();
-                                                        tokio::spawn(async move {
-                                                            let session_id = Uuid::new_v4().to_string();
-                                                            let mut total = 0;
-                                                            for path in paths {
-                                                                if let Ok(count) = ingest_path(
-                                                                    conn_clone.clone(),
-                                                                    &path.to_string_lossy(),
-                                                                    &session_id,
-                                                                )
+                                                    let paths_count = paths.len();
+                                                    tokio::spawn(async move {
+                                                        let session_id = Uuid::new_v4().to_string();
+                                                        let mut total = 0;
+                                                        for path in paths {
+                                                            if let Ok(count) = ingest_path(
+                                                                conn_clone.clone(),
+                                                                &path.to_string_lossy(),
+                                                                &session_id,
+                                                            )
                                                             .await
                                                             {
                                                                 total += count;
