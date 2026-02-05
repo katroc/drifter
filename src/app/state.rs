@@ -46,6 +46,7 @@ pub enum ModalAction {
     ClearHistory,
     CancelJob(i64),
     DeleteRemoteObject(String, String), // key, current_path
+    QuitApp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,14 +67,15 @@ pub struct VisualItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
-    Browsing,       // In File Picker
-    Filter,         // In File Picker Filter
-    LogSearch,      // In Log Viewer Search
-    Confirmation,   // Modal
-    LayoutAdjust,   // Popout
-    QueueSearch,    // In Transfer Queue
-    HistorySearch,  // In Job History
-    RemoteBrowsing, // For navigating S3 directories
+    Browsing,           // In File Picker
+    Filter,             // In File Picker Filter
+    LogSearch,          // In Log Viewer Search
+    Confirmation,       // Modal
+    LayoutAdjust,       // Popout
+    QueueSearch,        // In Transfer Queue
+    HistorySearch,      // In Job History
+    RemoteBrowsing,     // For navigating S3 directories
+    RemoteFolderCreate, // Modal for creating new folder in Remote view
 }
 
 #[derive(Debug)]
@@ -208,6 +210,9 @@ pub struct App {
     // Layout Adjustment
     pub layout_adjust_target: Option<LayoutTarget>,
     pub layout_adjust_message: String,
+
+    // Remote Folder Creation
+    pub creating_folder_name: String,
 }
 
 impl App {
@@ -300,6 +305,9 @@ impl App {
             conn: conn.clone(),
             queue_search_query: String::new(),
             history_search_query: String::new(),
+
+            // Remote Folder Creation
+            creating_folder_name: String::new(),
         };
 
         // ClamAV checker task (Tokio)

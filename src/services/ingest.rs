@@ -11,6 +11,7 @@ pub async fn ingest_path(
     conn_mutex: Arc<Mutex<Connection>>,
     path: &str,
     session_id: &str,
+    destination_prefix: Option<&str>,
 ) -> Result<usize> {
     debug!("Ingesting path: {}", path);
     let root = PathBuf::from(path);
@@ -20,6 +21,9 @@ pub async fn ingest_path(
     }
 
     info!("Ingesting into session: {}", session_id);
+    if let Some(prefix) = destination_prefix {
+        info!("Using custom destination prefix: {}", prefix);
+    }
 
     // Determine the base for relative paths
     let base_path = root.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| {
@@ -54,13 +58,29 @@ pub async fn ingest_path(
                     .unwrap_or_else(|| "file".to_string())
             });
 
+        // Apply destination prefix if provided
+        let s3_key = if let Some(prefix) = destination_prefix {
+            // Ensure prefix ends with /
+            let normalized_prefix = if prefix.is_empty() || prefix.ends_with('/') {
+                prefix.to_string()
+            } else {
+                format!("{}/", prefix)
+            };
+            format!("{}{}", normalized_prefix, relative_path)
+        } else {
+            relative_path
+        };
+
         let size = metadata.len() as i64;
         let source_str = file_path.to_string_lossy().to_string();
-        debug!("Processing file: {} ({} bytes)", source_str, size);
+        debug!(
+            "Processing file: {} ({} bytes) -> s3_key: {}",
+            source_str, size, s3_key
+        );
 
         let job_id = {
             let conn = lock_mutex(&conn_mutex)?;
-            create_job(&conn, session_id, &source_str, size, Some(&relative_path))?
+            create_job(&conn, session_id, &source_str, size, Some(&s3_key))?
         };
 
         let conn = lock_mutex(&conn_mutex)?;

@@ -1,0 +1,44 @@
+---
+source: tests/ui_tests.rs
+expression: output
+---
+╭ Navigation ───╭ Local /test/path───╮ Remote (S3): 0 [Path╮ History [All] ────────────────────────────────────────────╮
+│▌ Transfers    │ Size      Modified │Name                 │File                 Status           Size       Time      │
+│  Quarantine   │ -         -        │                     │                                                           │
+│  Logs         │ -         -        │                     │                                                           │
+│  Settings     │ 1.0 KB    -        │                     │                                                           │
+│               │ 2.0 MB    -        │                     │                                                           │
+│               │                    │                     │                                                           │
+│               │                    │                     │                                                           │
+│               │                    │                     │                                                           │
+│               │                    │                     │                                                           │
+│               │                    │                     │                                                           │
+│               │                    │                     │                                                           │
+│               │                    │                     │                                                           │
+│               │                    │                     │                                                           │
+│               │                    │                     │                                                           │
+│               │                    │                     │                                                           │
+│               │             ╭ Confirmation ────────────────────────────────────────────╮                             │
+│               │             │                                                          │                             │
+│               ╰─────────────│         Delete folder 'archive' and all contents?        │                             │
+│               │ Queue (Jobs)│                                                          │                             │
+│               │File         │                                                          │                             │
+│               │             │            Enter/y: Confirm  |  Esc/n: Cancel            │                             │
+│               │             │                                                          │                             │
+│               │             ╰──────────────────────────────────────────────────────────╯                             │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │                                                           │
+│               │                                          │───────────────────────────────────────────────────────────╯
+│               │                                          │ Metrics                                                   │
+│               │                                          │Disk Read:  0 B               Net Down: 0 B                │
+│               │                                          │Disk Write: 0 B               Net Up:   0 B                │
+╰───────────────╰──────────────────────────────────────────╯───────────────────────────────────────────────────────────╯
+Confirmation Required  │  Tab Navigate               ClamAV: Connected  │  S3: Not Configured  │  Jobs: 0  │  Threats: 0

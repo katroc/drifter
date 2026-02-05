@@ -13,6 +13,8 @@ pub enum StatusKind {
 pub struct Theme {
     pub name: &'static str,
     pub bg: Color,
+    pub modal_bg: Color,
+    pub shadow: Color,
     pub fg: Color,
     pub muted_fg: Color,
     pub panel_bg: Color,
@@ -63,6 +65,18 @@ const THEME_PRESETS: &[ThemePreset] = &[
         make: Theme::gruvbox_dark,
     },
     ThemePreset {
+        name: "Catppuccin Latte",
+        make: Theme::catppuccin_latte,
+    },
+    ThemePreset {
+        name: "Catppuccin Frappe",
+        make: Theme::catppuccin_frappe,
+    },
+    ThemePreset {
+        name: "Catppuccin Macchiato",
+        make: Theme::catppuccin_macchiato,
+    },
+    ThemePreset {
         name: "Catppuccin Mocha",
         make: Theme::catppuccin_mocha,
     },
@@ -109,6 +123,10 @@ const THEME_PRESETS: &[ThemePreset] = &[
     ThemePreset {
         name: "Rose Pine",
         make: Theme::rose_pine,
+    },
+    ThemePreset {
+        name: "Rose Pine Moon",
+        make: Theme::rose_pine_moon,
     },
     ThemePreset {
         name: "Rose Pine Dawn",
@@ -209,6 +227,19 @@ impl Theme {
         Style::default().fg(self.dim).add_modifier(Modifier::DIM)
     }
 
+    pub fn shadow_style(&self) -> Style {
+        Style::default().bg(self.shadow).fg(self.shadow)
+    }
+
+    pub fn modal_style(&self) -> Style {
+        Style::default().bg(self.modal_bg).fg(self.fg)
+    }
+
+    pub fn modal_border_style(&self) -> Style {
+        // Non-accented border for modals
+        self.border_style()
+    }
+
     pub fn highlight_style(&self) -> Style {
         Style::default()
             .fg(self.highlight)
@@ -302,9 +333,13 @@ impl Theme {
     pub fn transparent() -> Self {
         Self {
             name: "Transparent",
+            shadow: Color::Black,
             bg: Color::Reset,
+
+            modal_bg: Color::Reset,
             fg: Color::Reset,
             muted_fg: Color::Reset,
+
             panel_bg: Color::Reset,
             panel_border: Color::Reset,
             border_type: BorderType::Rounded,
@@ -314,15 +349,20 @@ impl Theme {
             warning: Color::Yellow,
             error: Color::Red,
             info: Color::Blue,
+
             selection_bg: Color::DarkGray,
             selection_fg: Color::White,
+
             progress_bg: Color::DarkGray,
             progress_fg: Color::Green,
             table_header_fg: Color::Reset,
+
             table_header_bg: Color::Reset,
+
             table_row_alt_bg: Color::Reset,
             button_active_fg: Color::Black,
             input_fg: Color::Reset,
+
             input_bg: Color::Reset,
             input_border: Color::White,
             dim: Color::DarkGray,
@@ -333,9 +373,13 @@ impl Theme {
     pub fn nord() -> Self {
         Self {
             name: "Nord",
+            shadow: Color::Black,
             bg: Color::Rgb(46, 52, 64),
+
+            modal_bg: Color::Rgb(46, 52, 64),
             fg: Color::Rgb(216, 222, 233),
             muted_fg: Color::Rgb(166, 179, 196),
+
             panel_bg: Color::Rgb(59, 66, 82),
             panel_border: Color::Rgb(76, 86, 106),
             border_type: BorderType::Rounded,
@@ -345,15 +389,20 @@ impl Theme {
             warning: Color::Rgb(235, 203, 139),
             error: Color::Rgb(191, 97, 106),
             info: Color::Rgb(129, 161, 193),
+
             selection_bg: Color::Rgb(67, 76, 94),
             selection_fg: Color::Rgb(236, 239, 244),
+
             progress_bg: Color::Rgb(76, 86, 106),
             progress_fg: Color::Rgb(136, 192, 208),
             table_header_fg: Color::Rgb(236, 239, 244),
+
             table_header_bg: Color::Rgb(59, 66, 82),
+
             table_row_alt_bg: Color::Rgb(53, 59, 73),
             button_active_fg: Color::Rgb(46, 52, 64),
             input_fg: Color::Rgb(236, 239, 244),
+
             input_bg: Color::Rgb(67, 76, 94),
             input_border: Color::Rgb(136, 192, 208),
             dim: Color::Rgb(118, 132, 150),
@@ -364,9 +413,13 @@ impl Theme {
     pub fn gruvbox_dark() -> Self {
         Self {
             name: "Gruvbox Dark",
+            shadow: Color::Black,
             bg: Color::Rgb(40, 40, 40),
+
+            modal_bg: Color::Rgb(40, 40, 40),
             fg: Color::Rgb(235, 219, 178),
             muted_fg: Color::Rgb(168, 153, 132),
+
             panel_bg: Color::Rgb(50, 48, 47),
             panel_border: Color::Rgb(102, 92, 84),
             border_type: BorderType::Rounded,
@@ -376,15 +429,20 @@ impl Theme {
             warning: Color::Rgb(250, 189, 47),
             error: Color::Rgb(251, 73, 52),
             info: Color::Rgb(69, 133, 136),
+
             selection_bg: Color::Rgb(80, 73, 69),
             selection_fg: Color::Rgb(251, 241, 199),
+
             progress_bg: Color::Rgb(60, 56, 54),
             progress_fg: Color::Rgb(184, 187, 38),
             table_header_fg: Color::Rgb(251, 241, 199),
+
             table_header_bg: Color::Rgb(60, 56, 54),
+
             table_row_alt_bg: Color::Rgb(46, 42, 39),
             button_active_fg: Color::Rgb(40, 40, 40),
             input_fg: Color::Rgb(251, 241, 199),
+
             input_bg: Color::Rgb(60, 56, 54),
             input_border: Color::Rgb(215, 153, 33),
             dim: Color::Rgb(146, 131, 116),
@@ -392,12 +450,136 @@ impl Theme {
         }
     }
 
+    pub fn catppuccin_latte() -> Self {
+        Self {
+            name: "Catppuccin Latte",
+            shadow: Color::Black,
+            bg: Color::Rgb(239, 241, 245),
+
+            modal_bg: Color::Rgb(239, 241, 245),
+            fg: Color::Rgb(76, 79, 105),
+            muted_fg: Color::Rgb(108, 111, 133),
+
+            panel_bg: Color::Rgb(204, 208, 218),
+            panel_border: Color::Rgb(188, 192, 204),
+            border_type: BorderType::Rounded,
+            accent: Color::Rgb(30, 102, 245),
+            accent_alt: Color::Rgb(234, 118, 203),
+            success: Color::Rgb(64, 160, 43),
+            warning: Color::Rgb(223, 142, 29),
+            error: Color::Rgb(210, 15, 57),
+            info: Color::Rgb(32, 159, 181),
+
+            selection_bg: Color::Rgb(188, 192, 204),
+            selection_fg: Color::Rgb(220, 138, 120),
+
+            progress_bg: Color::Rgb(172, 176, 190),
+            progress_fg: Color::Rgb(30, 102, 245),
+            table_header_fg: Color::Rgb(220, 138, 120),
+
+            table_header_bg: Color::Rgb(204, 208, 218),
+
+            table_row_alt_bg: Color::Rgb(188, 192, 204),
+            button_active_fg: Color::Rgb(239, 241, 245),
+            input_fg: Color::Rgb(76, 79, 105),
+
+            input_bg: Color::Rgb(188, 192, 204),
+            input_border: Color::Rgb(30, 102, 245),
+            dim: Color::Rgb(156, 160, 176),
+            highlight: Color::Rgb(234, 118, 203),
+        }
+    }
+
+    pub fn catppuccin_frappe() -> Self {
+        Self {
+            name: "Catppuccin Frappe",
+            shadow: Color::Black,
+            bg: Color::Rgb(48, 52, 70),
+
+            modal_bg: Color::Rgb(48, 52, 70),
+            fg: Color::Rgb(198, 208, 245),
+            muted_fg: Color::Rgb(165, 173, 206),
+
+            panel_bg: Color::Rgb(65, 69, 89),
+            panel_border: Color::Rgb(81, 87, 109),
+            border_type: BorderType::Rounded,
+            accent: Color::Rgb(140, 170, 238),
+            accent_alt: Color::Rgb(244, 184, 228),
+            success: Color::Rgb(166, 209, 137),
+            warning: Color::Rgb(229, 200, 144),
+            error: Color::Rgb(231, 130, 132),
+            info: Color::Rgb(133, 193, 220),
+
+            selection_bg: Color::Rgb(81, 87, 109),
+            selection_fg: Color::Rgb(242, 213, 207),
+
+            progress_bg: Color::Rgb(98, 104, 128),
+            progress_fg: Color::Rgb(140, 170, 238),
+            table_header_fg: Color::Rgb(242, 213, 207),
+
+            table_header_bg: Color::Rgb(65, 69, 89),
+
+            table_row_alt_bg: Color::Rgb(81, 87, 109),
+            button_active_fg: Color::Rgb(48, 52, 70),
+            input_fg: Color::Rgb(198, 208, 245),
+
+            input_bg: Color::Rgb(81, 87, 109),
+            input_border: Color::Rgb(140, 170, 238),
+            dim: Color::Rgb(115, 121, 148),
+            highlight: Color::Rgb(244, 184, 228),
+        }
+    }
+
+    pub fn catppuccin_macchiato() -> Self {
+        Self {
+            name: "Catppuccin Macchiato",
+            shadow: Color::Black,
+            bg: Color::Rgb(36, 39, 58),
+
+            modal_bg: Color::Rgb(36, 39, 58),
+            fg: Color::Rgb(202, 211, 245),
+            muted_fg: Color::Rgb(165, 173, 203),
+
+            panel_bg: Color::Rgb(54, 58, 79),
+            panel_border: Color::Rgb(73, 77, 100),
+            border_type: BorderType::Rounded,
+            accent: Color::Rgb(138, 173, 244),
+            accent_alt: Color::Rgb(245, 189, 230),
+            success: Color::Rgb(166, 218, 149),
+            warning: Color::Rgb(238, 212, 159),
+            error: Color::Rgb(237, 135, 150),
+            info: Color::Rgb(125, 196, 228),
+
+            selection_bg: Color::Rgb(73, 77, 100),
+            selection_fg: Color::Rgb(244, 219, 214),
+
+            progress_bg: Color::Rgb(91, 96, 120),
+            progress_fg: Color::Rgb(138, 173, 244),
+            table_header_fg: Color::Rgb(244, 219, 214),
+
+            table_header_bg: Color::Rgb(54, 58, 79),
+
+            table_row_alt_bg: Color::Rgb(73, 77, 100),
+            button_active_fg: Color::Rgb(36, 39, 58),
+            input_fg: Color::Rgb(202, 211, 245),
+
+            input_bg: Color::Rgb(73, 77, 100),
+            input_border: Color::Rgb(138, 173, 244),
+            dim: Color::Rgb(110, 115, 141),
+            highlight: Color::Rgb(245, 189, 230),
+        }
+    }
+
     pub fn catppuccin_mocha() -> Self {
         Self {
             name: "Catppuccin Mocha",
+            shadow: Color::Black,
             bg: Color::Rgb(30, 30, 46),
+
+            modal_bg: Color::Rgb(30, 30, 46),
             fg: Color::Rgb(205, 214, 244),
             muted_fg: Color::Rgb(166, 173, 200),
+
             panel_bg: Color::Rgb(49, 50, 68),
             panel_border: Color::Rgb(69, 71, 90),
             border_type: BorderType::Rounded,
@@ -407,15 +589,20 @@ impl Theme {
             warning: Color::Rgb(249, 226, 175),
             error: Color::Rgb(243, 139, 168),
             info: Color::Rgb(116, 199, 236),
+
             selection_bg: Color::Rgb(69, 71, 90),
             selection_fg: Color::Rgb(245, 224, 220),
+
             progress_bg: Color::Rgb(88, 91, 112),
             progress_fg: Color::Rgb(137, 180, 250),
             table_header_fg: Color::Rgb(245, 224, 220),
+
             table_header_bg: Color::Rgb(49, 50, 68),
-            table_row_alt_bg: Color::Rgb(36, 39, 58),
+
+            table_row_alt_bg: Color::Rgb(69, 71, 90),
             button_active_fg: Color::Rgb(30, 30, 46),
             input_fg: Color::Rgb(205, 214, 244),
+
             input_bg: Color::Rgb(69, 71, 90),
             input_border: Color::Rgb(137, 180, 250),
             dim: Color::Rgb(108, 112, 134),
@@ -426,9 +613,13 @@ impl Theme {
     pub fn tokyo_night() -> Self {
         Self {
             name: "Tokyo Night",
+            shadow: Color::Black,
             bg: Color::Rgb(26, 27, 38),
+
+            modal_bg: Color::Rgb(26, 27, 38),
             fg: Color::Rgb(192, 202, 245),
             muted_fg: Color::Rgb(154, 165, 206),
+
             panel_bg: Color::Rgb(31, 35, 53),
             panel_border: Color::Rgb(59, 66, 97),
             border_type: BorderType::Rounded,
@@ -438,15 +629,20 @@ impl Theme {
             warning: Color::Rgb(224, 175, 104),
             error: Color::Rgb(247, 118, 142),
             info: Color::Rgb(125, 207, 255),
+
             selection_bg: Color::Rgb(54, 74, 130),
             selection_fg: Color::Rgb(224, 224, 224),
+
             progress_bg: Color::Rgb(42, 46, 68),
             progress_fg: Color::Rgb(122, 162, 247),
             table_header_fg: Color::Rgb(192, 202, 245),
+
             table_header_bg: Color::Rgb(31, 35, 53),
+
             table_row_alt_bg: Color::Rgb(36, 40, 59),
             button_active_fg: Color::Rgb(26, 27, 38),
             input_fg: Color::Rgb(192, 202, 245),
+
             input_bg: Color::Rgb(42, 46, 68),
             input_border: Color::Rgb(122, 162, 247),
             dim: Color::Rgb(86, 95, 137),
@@ -457,9 +653,13 @@ impl Theme {
     pub fn dracula() -> Self {
         Self {
             name: "Dracula",
+            shadow: Color::Black,
             bg: Color::Rgb(40, 42, 54),
+
+            modal_bg: Color::Rgb(40, 42, 54),
             fg: Color::Rgb(248, 248, 242),
             muted_fg: Color::Rgb(98, 114, 164),
+
             panel_bg: Color::Rgb(52, 55, 70),
             panel_border: Color::Rgb(68, 71, 90),
             border_type: BorderType::Rounded,
@@ -469,15 +669,20 @@ impl Theme {
             warning: Color::Rgb(241, 250, 140),
             error: Color::Rgb(255, 85, 85),
             info: Color::Rgb(139, 233, 253),
+
             selection_bg: Color::Rgb(68, 71, 90),
             selection_fg: Color::Rgb(248, 248, 242),
+
             progress_bg: Color::Rgb(62, 64, 83),
             progress_fg: Color::Rgb(80, 250, 123),
             table_header_fg: Color::Rgb(248, 248, 242),
+
             table_header_bg: Color::Rgb(52, 55, 70),
+
             table_row_alt_bg: Color::Rgb(47, 49, 66),
             button_active_fg: Color::Rgb(40, 42, 54),
             input_fg: Color::Rgb(248, 248, 242),
+
             input_bg: Color::Rgb(62, 64, 83),
             input_border: Color::Rgb(189, 147, 249),
             dim: Color::Rgb(98, 114, 164),
@@ -488,9 +693,13 @@ impl Theme {
     pub fn solarized_dark() -> Self {
         Self {
             name: "Solarized Dark",
+            shadow: Color::Black,
             bg: Color::Rgb(0, 43, 54),
+
+            modal_bg: Color::Rgb(0, 43, 54),
             fg: Color::Rgb(131, 148, 150),
             muted_fg: Color::Rgb(88, 110, 117),
+
             panel_bg: Color::Rgb(7, 54, 66),
             panel_border: Color::Rgb(88, 110, 117),
             border_type: BorderType::Rounded,
@@ -500,15 +709,20 @@ impl Theme {
             warning: Color::Rgb(181, 137, 0),
             error: Color::Rgb(220, 50, 47),
             info: Color::Rgb(42, 161, 152),
+
             selection_bg: Color::Rgb(11, 58, 74),
             selection_fg: Color::Rgb(238, 232, 213),
+
             progress_bg: Color::Rgb(0, 53, 65),
             progress_fg: Color::Rgb(38, 139, 210),
             table_header_fg: Color::Rgb(238, 232, 213),
+
             table_header_bg: Color::Rgb(7, 54, 66),
+
             table_row_alt_bg: Color::Rgb(0, 55, 68),
             button_active_fg: Color::Rgb(0, 43, 54),
             input_fg: Color::Rgb(238, 232, 213),
+
             input_bg: Color::Rgb(11, 58, 74),
             input_border: Color::Rgb(38, 139, 210),
             dim: Color::Rgb(101, 123, 131),
@@ -519,9 +733,13 @@ impl Theme {
     pub fn solarized_light() -> Self {
         Self {
             name: "Solarized Light",
+            shadow: Color::Black,
             bg: Color::Rgb(253, 246, 227),
+
+            modal_bg: Color::Rgb(253, 246, 227),
             fg: Color::Rgb(88, 110, 117),
             muted_fg: Color::Rgb(147, 161, 161),
+
             panel_bg: Color::Rgb(238, 232, 213),
             panel_border: Color::Rgb(147, 161, 161),
             border_type: BorderType::Thick,
@@ -531,15 +749,20 @@ impl Theme {
             warning: Color::Rgb(181, 137, 0),
             error: Color::Rgb(220, 50, 47),
             info: Color::Rgb(42, 161, 152),
+
             selection_bg: Color::Rgb(224, 215, 194),
             selection_fg: Color::Rgb(7, 54, 66),
+
             progress_bg: Color::Rgb(224, 215, 194),
             progress_fg: Color::Rgb(38, 139, 210),
             table_header_fg: Color::Rgb(7, 54, 66),
+
             table_header_bg: Color::Rgb(238, 232, 213),
+
             table_row_alt_bg: Color::Rgb(245, 239, 218),
             button_active_fg: Color::Rgb(253, 246, 227),
             input_fg: Color::Rgb(7, 54, 66),
+
             input_bg: Color::Rgb(224, 215, 194),
             input_border: Color::Rgb(38, 139, 210),
             dim: Color::Rgb(167, 181, 181),
@@ -550,9 +773,13 @@ impl Theme {
     pub fn monochrome() -> Self {
         Self {
             name: "Monochrome",
+            shadow: Color::Black,
             bg: Color::Rgb(17, 17, 17),
+
+            modal_bg: Color::Rgb(17, 17, 17),
             fg: Color::Rgb(229, 229, 229),
             muted_fg: Color::Rgb(176, 176, 176),
+
             panel_bg: Color::Rgb(27, 27, 27),
             panel_border: Color::Rgb(58, 58, 58),
             border_type: BorderType::Plain,
@@ -562,15 +789,20 @@ impl Theme {
             warning: Color::Rgb(192, 192, 192),
             error: Color::Rgb(255, 255, 255),
             info: Color::Rgb(208, 208, 208),
+
             selection_bg: Color::Rgb(51, 51, 51),
             selection_fg: Color::Rgb(255, 255, 255),
+
             progress_bg: Color::Rgb(42, 42, 42),
             progress_fg: Color::Rgb(255, 255, 255),
             table_header_fg: Color::Rgb(255, 255, 255),
+
             table_header_bg: Color::Rgb(31, 31, 31),
+
             table_row_alt_bg: Color::Rgb(22, 22, 22),
             button_active_fg: Color::Rgb(17, 17, 17),
             input_fg: Color::Rgb(255, 255, 255),
+
             input_bg: Color::Rgb(38, 38, 38),
             input_border: Color::Rgb(255, 255, 255),
             dim: Color::Rgb(138, 138, 138),
@@ -581,9 +813,13 @@ impl Theme {
     pub fn high_contrast() -> Self {
         Self {
             name: "High Contrast",
+            shadow: Color::Black,
             bg: Color::Rgb(0, 0, 0),
+
+            modal_bg: Color::Rgb(0, 0, 0),
             fg: Color::Rgb(255, 255, 255),
             muted_fg: Color::Rgb(191, 191, 191),
+
             panel_bg: Color::Rgb(10, 10, 10),
             panel_border: Color::Rgb(255, 255, 255),
             border_type: BorderType::Thick,
@@ -593,15 +829,20 @@ impl Theme {
             warning: Color::Rgb(255, 255, 0),
             error: Color::Rgb(255, 51, 51),
             info: Color::Rgb(0, 191, 255),
+
             selection_bg: Color::Rgb(255, 255, 255),
             selection_fg: Color::Rgb(0, 0, 0),
+
             progress_bg: Color::Rgb(43, 43, 43),
             progress_fg: Color::Rgb(0, 255, 255),
             table_header_fg: Color::Rgb(0, 0, 0),
+
             table_header_bg: Color::Rgb(255, 255, 255),
+
             table_row_alt_bg: Color::Rgb(17, 17, 17),
             button_active_fg: Color::Rgb(0, 0, 0),
             input_fg: Color::Rgb(255, 255, 255),
+
             input_bg: Color::Rgb(0, 0, 0),
             input_border: Color::Rgb(0, 255, 255),
             dim: Color::Rgb(128, 128, 128),
@@ -612,9 +853,13 @@ impl Theme {
     pub fn one_dark() -> Self {
         Self {
             name: "One Dark",
+            shadow: Color::Black,
             bg: Color::Rgb(40, 44, 52),
+
+            modal_bg: Color::Rgb(40, 44, 52),
             fg: Color::Rgb(171, 178, 191),
             muted_fg: Color::Rgb(89, 98, 111),
+
             panel_bg: Color::Rgb(47, 51, 61),
             panel_border: Color::Rgb(58, 63, 75),
             border_type: BorderType::Rounded,
@@ -624,15 +869,20 @@ impl Theme {
             warning: Color::Rgb(229, 193, 124),
             error: Color::Rgb(224, 108, 117),
             info: Color::Rgb(87, 182, 194),
+
             selection_bg: Color::Rgb(77, 81, 93),
             selection_fg: Color::Rgb(255, 255, 255),
+
             progress_bg: Color::Rgb(56, 61, 72),
             progress_fg: Color::Rgb(152, 195, 121),
             table_header_fg: Color::Rgb(171, 178, 191),
+
             table_header_bg: Color::Rgb(47, 51, 61),
+
             table_row_alt_bg: Color::Rgb(56, 62, 73),
             button_active_fg: Color::Rgb(40, 44, 52),
             input_fg: Color::Rgb(171, 178, 191),
+
             input_bg: Color::Rgb(56, 61, 72),
             input_border: Color::Rgb(41, 121, 255),
             dim: Color::Rgb(107, 114, 125),
@@ -643,9 +893,13 @@ impl Theme {
     pub fn one_light() -> Self {
         Self {
             name: "One Light",
+            shadow: Color::Black,
             bg: Color::Rgb(244, 244, 244),
+
+            modal_bg: Color::Rgb(244, 244, 244),
             fg: Color::Rgb(35, 35, 36),
             muted_fg: Color::Rgb(160, 161, 167),
+
             panel_bg: Color::Rgb(234, 234, 235),
             panel_border: Color::Rgb(219, 219, 220),
             border_type: BorderType::Rounded,
@@ -655,15 +909,20 @@ impl Theme {
             warning: Color::Rgb(193, 132, 1),
             error: Color::Rgb(228, 86, 74),
             info: Color::Rgb(1, 132, 188),
+
             selection_bg: Color::Rgb(255, 255, 255),
             selection_fg: Color::Rgb(35, 35, 36),
+
             progress_bg: Color::Rgb(219, 219, 220),
             progress_fg: Color::Rgb(80, 161, 78),
             table_header_fg: Color::Rgb(35, 35, 36),
+
             table_header_bg: Color::Rgb(234, 234, 235),
+
             table_row_alt_bg: Color::Rgb(255, 255, 255),
             button_active_fg: Color::Rgb(255, 255, 255),
             input_fg: Color::Rgb(35, 35, 36),
+
             input_bg: Color::Rgb(255, 255, 255),
             input_border: Color::Rgb(41, 121, 255),
             dim: Color::Rgb(184, 184, 185),
@@ -674,9 +933,13 @@ impl Theme {
     pub fn ayu_dark() -> Self {
         Self {
             name: "Ayu Dark",
+            shadow: Color::Black,
             bg: Color::Rgb(16, 20, 28),
+
+            modal_bg: Color::Rgb(16, 20, 28),
             fg: Color::Rgb(191, 189, 182),
             muted_fg: Color::Rgb(98, 106, 115),
+
             panel_bg: Color::Rgb(19, 23, 33),
             panel_border: Color::Rgb(98, 106, 115),
             border_type: BorderType::Rounded,
@@ -686,15 +949,20 @@ impl Theme {
             warning: Color::Rgb(255, 180, 84),
             error: Color::Rgb(240, 113, 120),
             info: Color::Rgb(149, 230, 203),
+
             selection_bg: Color::Rgb(39, 55, 71),
             selection_fg: Color::Rgb(191, 189, 182),
+
             progress_bg: Color::Rgb(39, 55, 71),
             progress_fg: Color::Rgb(170, 217, 76),
             table_header_fg: Color::Rgb(191, 189, 182),
+
             table_header_bg: Color::Rgb(19, 23, 33),
+
             table_row_alt_bg: Color::Rgb(39, 55, 71),
             button_active_fg: Color::Rgb(16, 20, 28),
             input_fg: Color::Rgb(191, 189, 182),
+
             input_bg: Color::Rgb(19, 23, 33),
             input_border: Color::Rgb(57, 186, 230),
             dim: Color::Rgb(98, 106, 115),
@@ -705,9 +973,13 @@ impl Theme {
     pub fn everforest_dark() -> Self {
         Self {
             name: "Everforest Dark",
+            shadow: Color::Black,
             bg: Color::Rgb(45, 53, 59),
+
+            modal_bg: Color::Rgb(45, 53, 59),
             fg: Color::Rgb(211, 198, 170),
             muted_fg: Color::Rgb(157, 169, 160),
+
             panel_bg: Color::Rgb(52, 63, 68),
             panel_border: Color::Rgb(79, 88, 94),
             border_type: BorderType::Rounded,
@@ -717,15 +989,20 @@ impl Theme {
             warning: Color::Rgb(219, 188, 127),
             error: Color::Rgb(230, 126, 128),
             info: Color::Rgb(131, 192, 146),
+
             selection_bg: Color::Rgb(71, 82, 88),
             selection_fg: Color::Rgb(211, 198, 170),
+
             progress_bg: Color::Rgb(61, 72, 77),
             progress_fg: Color::Rgb(167, 192, 128),
             table_header_fg: Color::Rgb(211, 198, 170),
+
             table_header_bg: Color::Rgb(52, 63, 68),
+
             table_row_alt_bg: Color::Rgb(61, 72, 77),
             button_active_fg: Color::Rgb(45, 53, 59),
             input_fg: Color::Rgb(211, 198, 170),
+
             input_bg: Color::Rgb(52, 63, 68),
             input_border: Color::Rgb(127, 187, 179),
             dim: Color::Rgb(122, 132, 120),
@@ -736,9 +1013,13 @@ impl Theme {
     pub fn rose_pine() -> Self {
         Self {
             name: "Rose Pine",
+            shadow: Color::Black,
             bg: Color::Rgb(25, 23, 36),
+
+            modal_bg: Color::Rgb(25, 23, 36),
             fg: Color::Rgb(224, 222, 244),
             muted_fg: Color::Rgb(110, 106, 134),
+
             panel_bg: Color::Rgb(31, 29, 46),
             panel_border: Color::Rgb(82, 79, 103),
             border_type: BorderType::Rounded,
@@ -748,16 +1029,61 @@ impl Theme {
             warning: Color::Rgb(246, 193, 119),
             error: Color::Rgb(235, 111, 146),
             info: Color::Rgb(49, 116, 143),
+
             selection_bg: Color::Rgb(64, 61, 82),
             selection_fg: Color::Rgb(224, 222, 244),
+
             progress_bg: Color::Rgb(38, 35, 58),
             progress_fg: Color::Rgb(156, 207, 216),
             table_header_fg: Color::Rgb(224, 222, 244),
+
             table_header_bg: Color::Rgb(31, 29, 46),
+
             table_row_alt_bg: Color::Rgb(38, 35, 58),
             button_active_fg: Color::Rgb(25, 23, 36),
             input_fg: Color::Rgb(224, 222, 244),
+
             input_bg: Color::Rgb(38, 35, 58),
+            input_border: Color::Rgb(196, 167, 231),
+            dim: Color::Rgb(144, 140, 170),
+            highlight: Color::Rgb(246, 193, 119),
+        }
+    }
+
+    pub fn rose_pine_moon() -> Self {
+        Self {
+            name: "Rose Pine Moon",
+            shadow: Color::Black,
+            bg: Color::Rgb(35, 33, 54),
+
+            modal_bg: Color::Rgb(35, 33, 54),
+            fg: Color::Rgb(224, 222, 244),
+            muted_fg: Color::Rgb(110, 106, 134),
+
+            panel_bg: Color::Rgb(42, 39, 63),
+            panel_border: Color::Rgb(86, 82, 110),
+            border_type: BorderType::Rounded,
+            accent: Color::Rgb(196, 167, 231),
+            accent_alt: Color::Rgb(234, 154, 151),
+            success: Color::Rgb(156, 207, 216),
+            warning: Color::Rgb(246, 193, 119),
+            error: Color::Rgb(235, 111, 146),
+            info: Color::Rgb(62, 143, 176),
+
+            selection_bg: Color::Rgb(68, 65, 90),
+            selection_fg: Color::Rgb(224, 222, 244),
+
+            progress_bg: Color::Rgb(57, 53, 82),
+            progress_fg: Color::Rgb(156, 207, 216),
+            table_header_fg: Color::Rgb(224, 222, 244),
+
+            table_header_bg: Color::Rgb(42, 39, 63),
+
+            table_row_alt_bg: Color::Rgb(57, 53, 82),
+            button_active_fg: Color::Rgb(35, 33, 54),
+            input_fg: Color::Rgb(224, 222, 244),
+
+            input_bg: Color::Rgb(57, 53, 82),
             input_border: Color::Rgb(196, 167, 231),
             dim: Color::Rgb(144, 140, 170),
             highlight: Color::Rgb(246, 193, 119),
@@ -767,9 +1093,13 @@ impl Theme {
     pub fn rose_pine_dawn() -> Self {
         Self {
             name: "Rose Pine Dawn",
+            shadow: Color::Black,
             bg: Color::Rgb(250, 244, 237),
+
+            modal_bg: Color::Rgb(250, 244, 237),
             fg: Color::Rgb(87, 82, 121),
             muted_fg: Color::Rgb(152, 147, 165),
+
             panel_bg: Color::Rgb(255, 250, 243),
             panel_border: Color::Rgb(206, 202, 205),
             border_type: BorderType::Rounded,
@@ -779,15 +1109,20 @@ impl Theme {
             warning: Color::Rgb(234, 157, 52),
             error: Color::Rgb(180, 99, 122),
             info: Color::Rgb(40, 105, 131),
+
             selection_bg: Color::Rgb(223, 218, 217),
             selection_fg: Color::Rgb(87, 82, 121),
+
             progress_bg: Color::Rgb(244, 237, 232),
             progress_fg: Color::Rgb(86, 148, 159),
             table_header_fg: Color::Rgb(87, 82, 121),
+
             table_header_bg: Color::Rgb(255, 250, 243),
-            table_row_alt_bg: Color::Rgb(242, 233, 225),
+
+            table_row_alt_bg: Color::Rgb(242, 233, 222),
             button_active_fg: Color::Rgb(250, 244, 237),
             input_fg: Color::Rgb(87, 82, 121),
+
             input_bg: Color::Rgb(255, 250, 243),
             input_border: Color::Rgb(144, 122, 169),
             dim: Color::Rgb(121, 117, 147),
@@ -798,9 +1133,13 @@ impl Theme {
     pub fn night_owl() -> Self {
         Self {
             name: "Night Owl",
+            shadow: Color::Black,
             bg: Color::Rgb(1, 22, 39),
+
+            modal_bg: Color::Rgb(1, 22, 39),
             fg: Color::Rgb(190, 197, 212),
             muted_fg: Color::Rgb(68, 89, 107),
+
             panel_bg: Color::Rgb(0, 17, 34),
             panel_border: Color::Rgb(16, 42, 68),
             border_type: BorderType::Plain,
@@ -810,15 +1149,20 @@ impl Theme {
             warning: Color::Rgb(255, 203, 139),
             error: Color::Rgb(239, 83, 80),
             info: Color::Rgb(127, 219, 202),
+
             selection_bg: Color::Rgb(68, 89, 107),
             selection_fg: Color::Rgb(255, 255, 255),
+
             progress_bg: Color::Rgb(68, 89, 107),
             progress_fg: Color::Rgb(34, 218, 110),
             table_header_fg: Color::Rgb(255, 255, 255),
+
             table_header_bg: Color::Rgb(0, 17, 34),
+
             table_row_alt_bg: Color::Rgb(1, 22, 39),
             button_active_fg: Color::Rgb(1, 22, 39),
             input_fg: Color::Rgb(190, 197, 212),
+
             input_bg: Color::Rgb(0, 17, 34),
             input_border: Color::Rgb(130, 170, 255),
             dim: Color::Rgb(68, 89, 107),
@@ -829,29 +1173,38 @@ impl Theme {
     pub fn antigravity() -> Self {
         Self {
             name: "Antigravity",
+            shadow: Color::Black,
             bg: Color::Rgb(26, 27, 38),
+
+            modal_bg: Color::Rgb(26, 27, 38),
             fg: Color::Rgb(192, 202, 245),
             muted_fg: Color::Rgb(154, 165, 206),
+
             panel_bg: Color::Rgb(31, 35, 53),
             panel_border: Color::Rgb(59, 66, 97),
             border_type: BorderType::Rounded,
-            accent: Color::Rgb(255, 158, 100),
+            accent: Color::Rgb(224, 146, 105),
             accent_alt: Color::Rgb(187, 154, 247),
             success: Color::Rgb(158, 206, 106),
             warning: Color::Rgb(224, 175, 104),
             error: Color::Rgb(247, 118, 142),
             info: Color::Rgb(122, 162, 247),
+
             selection_bg: Color::Rgb(47, 53, 85),
             selection_fg: Color::Rgb(192, 202, 245),
+
             progress_bg: Color::Rgb(31, 35, 53),
-            progress_fg: Color::Rgb(255, 158, 100),
+            progress_fg: Color::Rgb(224, 146, 105),
             table_header_fg: Color::Rgb(187, 154, 247),
+
             table_header_bg: Color::Rgb(26, 27, 38),
+
             table_row_alt_bg: Color::Rgb(31, 35, 53),
             button_active_fg: Color::Rgb(26, 27, 38),
             input_fg: Color::Rgb(192, 202, 245),
+
             input_bg: Color::Rgb(31, 35, 53),
-            input_border: Color::Rgb(255, 158, 100),
+            input_border: Color::Rgb(224, 146, 105),
             dim: Color::Rgb(86, 95, 137),
             highlight: Color::Rgb(122, 162, 247),
         }
