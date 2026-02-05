@@ -190,11 +190,6 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                         request_remote_list(&mut app, true).await;
                     }
                 }
-                AppEvent::DestinationListResponse(objects) => {
-                    app.destination_picker_objects = objects;
-                    app.destination_picker_loading = false;
-                    app.destination_picker_selected = 0;
-                }
             }
         }
 
@@ -331,19 +326,37 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             let config_clone = app.config.lock().await.clone();
 
                                             tokio::spawn(async move {
-                                                // 1. Delete the file
-                                                let res =
-                                                crate::services::uploader::Uploader::delete_file(
-                                                    &config_clone,
-                                                    &key,
-                                                )
-                                                .await;
+                                                let is_dir = key.ends_with('/');
+
+                                                let res = if is_dir {
+                                                    crate::services::uploader::Uploader::delete_folder_recursive(
+                                                        &config_clone,
+                                                        &key,
+                                                    )
+                                                    .await
+                                                    .map(|count| {
+                                                        if count == 1 {
+                                                            format!("Deleted folder {} (1 object)", key)
+                                                        } else {
+                                                            format!(
+                                                                "Deleted folder {} ({} objects)",
+                                                                key, count
+                                                            )
+                                                        }
+                                                    })
+                                                } else {
+                                                    crate::services::uploader::Uploader::delete_file(
+                                                        &config_clone,
+                                                        &key,
+                                                    )
+                                                    .await
+                                                    .map(|_| format!("Deleted {}", key))
+                                                };
 
                                                 match res {
-                                                    Ok(_) => {
-                                                        let _ = tx.send(AppEvent::Notification(
-                                                            format!("Deleted {}", key),
-                                                        ));
+                                                    Ok(msg) => {
+                                                        let _ =
+                                                            tx.send(AppEvent::Notification(msg));
 
                                                         // 2. Refresh the list using the SAME runtime
                                                         let path_arg = if path_context.is_empty() {
@@ -369,6 +382,9 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 }
                                             });
                                         }
+                                        ModalAction::QuitApp => {
+                                            should_quit = true;
+                                        }
                                     }
 
                                     // Reset
@@ -392,8 +408,9 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                         if app.show_wizard {
                             match key.code {
                                 KeyCode::Char('q') if !app.wizard.editing => {
-                                    should_quit = true;
-                                    break;
+                                    app.input_mode = InputMode::Confirmation;
+                                    app.pending_action = ModalAction::QuitApp;
+                                    app.confirmation_msg = "Quit Drifter?".to_string();
                                 }
                                 KeyCode::Esc if app.wizard.editing => {
                                     app.wizard.editing = false;
@@ -507,6 +524,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                         // Determine if we are capturing input (e.g. editing settings, browsing, or in search)
                         let capturing_input = app.input_mode == InputMode::Confirmation
+                            || app.input_mode == InputMode::RemoteFolderCreate
                             || match app.focus {
                                 AppFocus::SettingsFields => app.settings.editing,
                                 AppFocus::Browser => {
@@ -531,8 +549,9 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     continue;
                                 }
                                 KeyCode::Char('q') if app.focus != AppFocus::Logs => {
-                                    should_quit = true;
-                                    break;
+                                    app.input_mode = InputMode::Confirmation;
+                                    app.pending_action = ModalAction::QuitApp;
+                                    app.confirmation_msg = "Quit Drifter?".to_string();
                                 }
                                 KeyCode::Tab => {
                                     app.focus = match app.focus {
@@ -715,6 +734,9 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             let _ = app.refresh_jobs(&conn);
                                             app.status_message = "History cleared".to_string();
                                         }
+                                        ModalAction::QuitApp => {
+                                            should_quit = true;
+                                        }
                                     }
                                     app.input_mode = InputMode::Normal;
                                     app.pending_action = ModalAction::None;
@@ -729,201 +751,54 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                             continue;
                         }
 
-                        // Destination Picker Modal Handling
-                        if app.input_mode == InputMode::DestinationPicker {
+                        // Remote Folder Creation Modal
+                        if app.input_mode == InputMode::RemoteFolderCreate {
                             match key.code {
                                 KeyCode::Esc => {
-                                    // Cancel destination selection, use default path
-                                    app.input_mode = InputMode::Normal;
-                                    app.destination_picker_path.clear();
-                                    app.destination_picker_objects.clear();
-                                    app.destination_picker_selected = 0;
-                                    app.pending_upload_paths.clear();
-                                    app.status_message = "Upload cancelled".to_string();
-                                }
-                                KeyCode::Up | KeyCode::Char('k') => {
-                                    if app.destination_picker_selected > 0 {
-                                        app.destination_picker_selected -= 1;
-                                    }
-                                }
-                                KeyCode::Down | KeyCode::Char('j') => {
-                                    // +1 for "Select this folder" option at index 0
-                                    let count = app.destination_picker_objects
-                                        .iter()
-                                        .filter(|o| o.is_dir)
-                                        .count() + 1;
-                                    if app.destination_picker_selected + 1 < count {
-                                        app.destination_picker_selected += 1;
-                                    }
-                                }
-                                KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
-                                    if app.destination_picker_selected == 0 {
-                                        // "Select this folder" selected - confirm destination
-                                        let destination = if app.destination_picker_path.is_empty() {
-                                            None
-                                        } else {
-                                            Some(app.destination_picker_path.clone())
-                                        };
-                                        
-                                        // Now perform the ingest with the selected destination
-                                        let paths = std::mem::take(&mut app.pending_upload_paths);
-                                        let conn_clone = conn_mutex.clone();
-                                        let dest_clone = destination.clone();
-                                        
-                                        let paths_count = paths.len();
-                                        tokio::spawn(async move {
-                                            let session_id = Uuid::new_v4().to_string();
-                                            let mut total = 0;
-                                            for path in paths {
-                                                if let Ok(count) = ingest_path(
-                                                    conn_clone.clone(),
-                                                    &path,
-                                                    &session_id,
-                                                    dest_clone.as_deref(),
-                                                ).await {
-                                                    total += count;
-                                                }
-                                            }
-                                            tracing::info!(
-                                                "Ingest complete: {} files to destination {:?}",
-                                                total,
-                                                dest_clone
-                                            );
-                                        });
-                                        
-                                        app.status_message = format!(
-                                            "Ingesting {} items to '{}'",
-                                            paths_count,
-                                            if destination.is_some() { &app.destination_picker_path } else { "(bucket root)" }
-                                        );
-                                        
-                                        // Reset picker state
-                                        app.input_mode = InputMode::Normal;
-                                        app.destination_picker_path.clear();
-                                        app.destination_picker_objects.clear();
-                                        app.destination_picker_selected = 0;
-                                    } else {
-                                        // Navigate into selected folder
-                                        let folders: Vec<_> = app.destination_picker_objects
-                                            .iter()
-                                            .filter(|o| o.is_dir)
-                                            .collect();
-                                        if let Some(folder) = folders.get(app.destination_picker_selected - 1) {
-                                            app.destination_picker_path = folder.key.clone();
-                                            app.destination_picker_selected = 0;
-                                            app.destination_picker_loading = true;
-                                            
-                                            // Request listing for this path
-                                            let tx = app.async_tx.clone();
-                                            let config = app.config.lock().await.clone();
-                                            let path = app.destination_picker_path.clone();
-                                            tokio::spawn(async move {
-                                                match crate::services::uploader::Uploader::list_bucket_contents(&config, Some(&path)).await {
-                                                    Ok(objects) => {
-                                                        let _ = tx.send(AppEvent::DestinationListResponse(objects));
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = tx.send(AppEvent::Notification(format!("Failed to list: {}", e)));
-                                                    }
-                                                }
-                                            });
-                                        }
-                                    }
-                                }
-                                KeyCode::Backspace | KeyCode::Char('h') | KeyCode::Left => {
-                                    // Navigate to parent
-                                    if !app.destination_picker_path.is_empty() {
-                                        let path = app.destination_picker_path.trim_end_matches('/');
-                                        if let Some(last_slash) = path.rfind('/') {
-                                            app.destination_picker_path = path[..last_slash].to_string();
-                                        } else {
-                                            app.destination_picker_path.clear();
-                                        }
-                                        app.destination_picker_selected = 0;
-                                        app.destination_picker_loading = true;
-                                        
-                                        // Request listing for parent
-                                        let tx = app.async_tx.clone();
-                                        let config = app.config.lock().await.clone();
-                                        let path = if app.destination_picker_path.is_empty() {
-                                            None
-                                        } else {
-                                            Some(app.destination_picker_path.clone())
-                                        };
-                                        tokio::spawn(async move {
-                                            match crate::services::uploader::Uploader::list_bucket_contents(&config, path.as_deref()).await {
-                                                Ok(objects) => {
-                                                    let _ = tx.send(AppEvent::DestinationListResponse(objects));
-                                                }
-                                                Err(e) => {
-                                                    let _ = tx.send(AppEvent::Notification(format!("Failed to list: {}", e)));
-                                                }
-                                            }
-                                        });
-                                    }
-                                }
-                                KeyCode::Char('n') => {
-                                    // Switch to folder creation mode
-                                    app.input_mode = InputMode::DestinationFolderCreate;
-                                    app.creating_folder_name.clear();
-                                }
-                                _ => {}
-                            }
-                            continue;
-                        }
-
-                        // Destination Folder Creation Modal
-                        if app.input_mode == InputMode::DestinationFolderCreate {
-                            match key.code {
-                                KeyCode::Esc => {
-                                    app.input_mode = InputMode::DestinationPicker;
+                                    app.input_mode = InputMode::RemoteBrowsing;
                                     app.creating_folder_name.clear();
                                 }
                                 KeyCode::Enter => {
                                     if !app.creating_folder_name.is_empty() {
-                                        // Create folder (S3 doesn't really have folders, but we create a 0-byte object with trailing /)
-                                        let folder_key = if app.destination_picker_path.is_empty() {
-                                            format!("{}/", app.creating_folder_name)
+                                        let folder_name = app.creating_folder_name.clone();
+                                        // Construct full key
+                                        let folder_key = if app.remote_current_path.is_empty() {
+                                            format!("{}/", folder_name)
                                         } else {
-                                            format!("{}/{}/", app.destination_picker_path.trim_end_matches('/'), app.creating_folder_name)
+                                            format!(
+                                                "{}/{}/",
+                                                app.remote_current_path.trim_end_matches('/'),
+                                                folder_name
+                                            )
                                         };
-                                        
+
                                         let tx = app.async_tx.clone();
                                         let config = app.config.lock().await.clone();
-                                        let folder_key_clone = folder_key.clone();
-                                        let current_path = app.destination_picker_path.clone();
-                                        
+                                        let folder_name_clone = folder_name.clone();
+
                                         tokio::spawn(async move {
-                                            match crate::services::uploader::Uploader::create_folder(&config, &folder_key_clone).await {
+                                            match crate::services::uploader::Uploader::create_folder(&config, &folder_key).await {
                                                 Ok(_) => {
-                                                    // Refresh the listing
-                                                    let path = if current_path.is_empty() { None } else { Some(current_path) };
-                                                    match crate::services::uploader::Uploader::list_bucket_contents(&config, path.as_deref()).await {
-                                                        Ok(objects) => {
-                                                            let _ = tx.send(AppEvent::DestinationListResponse(objects));
-                                                            let _ = tx.send(AppEvent::Notification(format!("Created folder '{}'", folder_key_clone)));
-                                                        }
-                                                        Err(e) => {
-                                                            let _ = tx.send(AppEvent::Notification(format!("Failed to refresh: {}", e)));
-                                                        }
-                                                    }
+                                                    // Refresh list
+                                                    let _ = tx.send(AppEvent::RefreshRemote);
+                                                    let _ = tx.send(AppEvent::Notification(format!("Created folder '{}'", folder_name_clone)));
                                                 }
                                                 Err(e) => {
                                                     let _ = tx.send(AppEvent::Notification(format!("Failed to create folder: {}", e)));
                                                 }
                                             }
                                         });
-                                        
-                                        app.input_mode = InputMode::DestinationPicker;
+
+                                        app.input_mode = InputMode::RemoteBrowsing;
                                         app.creating_folder_name.clear();
-                                        app.status_message = format!("Creating folder '{}'...", folder_key);
+                                        app.status_message =
+                                            format!("Creating folder '{}'...", folder_name);
                                     }
                                 }
                                 KeyCode::Backspace => {
                                     app.creating_folder_name.pop();
                                 }
                                 KeyCode::Char(c) => {
-                                    // Only allow valid folder name characters
                                     if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
                                         app.creating_folder_name.push(c);
                                     }
@@ -1096,40 +971,69 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         let cfg = app.config.lock().await;
                                                         s3_ready(&cfg)
                                                     };
-                                                    
+
                                                     if s3_configured {
-                                                        // Open destination picker
-                                                        app.pending_upload_paths = paths.iter()
-                                                            .map(|p| p.to_string_lossy().to_string())
+                                                        // S3 configured, ingest with current remote path
+                                                        let destination = if app
+                                                            .remote_current_path
+                                                            .is_empty()
+                                                        {
+                                                            None
+                                                        } else {
+                                                            Some(app.remote_current_path.clone())
+                                                        };
+
+                                                        let paths_count = paths.len();
+                                                        let conn_clone = conn_mutex.clone();
+                                                        let dest_clone = destination.clone();
+
+                                                        let pending_paths: Vec<String> = paths
+                                                            .iter()
+                                                            .map(|p| {
+                                                                p.to_string_lossy().to_string()
+                                                            })
                                                             .collect();
-                                                        app.destination_picker_path.clear();
-                                                        app.destination_picker_objects.clear();
-                                                        app.destination_picker_selected = 0;
-                                                        app.destination_picker_loading = true;
-                                                        app.input_mode = InputMode::DestinationPicker;
-                                                        app.picker.clear_selected();
-                                                        
-                                                        // Request root listing
-                                                        let tx = app.async_tx.clone();
-                                                        let config = app.config.lock().await.clone();
+
                                                         tokio::spawn(async move {
-                                                            match crate::services::uploader::Uploader::list_bucket_contents(&config, None).await {
-                                                                Ok(objects) => {
-                                                                    let _ = tx.send(AppEvent::DestinationListResponse(objects));
-                                                                }
-                                                                Err(e) => {
-                                                                    let _ = tx.send(AppEvent::Notification(format!("Failed to list S3: {}", e)));
+                                                            let session_id =
+                                                                Uuid::new_v4().to_string();
+                                                            let mut total = 0;
+                                                            for path in pending_paths {
+                                                                if let Ok(count) = ingest_path(
+                                                                    conn_clone.clone(),
+                                                                    &path,
+                                                                    &session_id,
+                                                                    dest_clone.as_deref(),
+                                                                )
+                                                                .await
+                                                                {
+                                                                    total += count;
                                                                 }
                                                             }
+                                                            tracing::info!(
+                                                                "Ingest complete: {} files to destination {:?}",
+                                                                total,
+                                                                dest_clone
+                                                            );
                                                         });
-                                                        
-                                                        app.status_message = "Select upload destination...".to_string();
+
+                                                        app.status_message = format!(
+                                                            "Ingesting {} items to '{}'",
+                                                            paths_count,
+                                                            if let Some(d) = &destination {
+                                                                d
+                                                            } else {
+                                                                "(bucket root)"
+                                                            }
+                                                        );
+                                                        app.picker.clear_selected();
                                                     } else {
                                                         // S3 not configured, ingest with default path
                                                         let conn_clone = conn_mutex.clone();
                                                         let paths_count = paths.len();
                                                         tokio::spawn(async move {
-                                                            let session_id = Uuid::new_v4().to_string();
+                                                            let session_id =
+                                                                Uuid::new_v4().to_string();
                                                             let mut total = 0;
                                                             for path in paths {
                                                                 if let Ok(count) = ingest_path(
@@ -1218,8 +1122,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     | InputMode::QueueSearch
                                     | InputMode::HistorySearch
                                     | InputMode::RemoteBrowsing
-                                    | InputMode::DestinationPicker
-                                    | InputMode::DestinationFolderCreate => {}
+                                    | InputMode::RemoteFolderCreate => {}
                                 }
                             }
                             AppFocus::Queue => {
@@ -1594,7 +1497,50 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 let key = obj.key.clone();
 
                                                 if obj.is_dir {
-                                                    app.status_message = "Cannot delete non-empty folders via UI safety check.".to_string();
+                                                    let dir_key = if key.ends_with('/') {
+                                                        key.clone()
+                                                    } else {
+                                                        format!("{}/", key)
+                                                    };
+                                                    let config_clone =
+                                                        app.config.lock().await.clone();
+                                                    match crate::services::uploader::Uploader::is_folder_empty(
+                                                        &config_clone,
+                                                        &dir_key,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(true) => {
+                                                            app.input_mode = InputMode::Confirmation;
+                                                            app.pending_action =
+                                                                ModalAction::DeleteRemoteObject(
+                                                                    dir_key.clone(),
+                                                                    app.remote_current_path.clone(),
+                                                                );
+                                                            app.confirmation_msg = format!(
+                                                                "Delete empty folder '{}'?",
+                                                                obj.name
+                                                            );
+                                                        }
+                                                        Ok(false) => {
+                                                            app.input_mode = InputMode::Confirmation;
+                                                            app.pending_action =
+                                                                ModalAction::DeleteRemoteObject(
+                                                                    dir_key.clone(),
+                                                                    app.remote_current_path.clone(),
+                                                                );
+                                                            app.confirmation_msg = format!(
+                                                                "Delete folder '{}' and all contents?",
+                                                                obj.name
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            app.status_message = format!(
+                                                                "Folder check failed: {}",
+                                                                e
+                                                            );
+                                                        }
+                                                    }
                                                 } else {
                                                     app.input_mode = InputMode::Confirmation;
                                                     app.pending_action =
@@ -1618,6 +1564,10 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             KeyCode::Esc | KeyCode::Char('q') => {
                                                 app.input_mode = InputMode::Normal;
                                                 app.status_message = "Ready".to_string();
+                                            }
+                                            KeyCode::Char('n') => {
+                                                app.input_mode = InputMode::RemoteFolderCreate;
+                                                app.creating_folder_name.clear();
                                             }
                                             KeyCode::Up | KeyCode::Char('k') => {
                                                 if app.selected_remote > 0 {
@@ -1738,7 +1688,54 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     let key = obj.key.clone();
 
                                                     if obj.is_dir {
-                                                        app.status_message = "Cannot delete non-empty folders via UI safety check.".to_string();
+                                                        let dir_key = if key.ends_with('/') {
+                                                            key.clone()
+                                                        } else {
+                                                            format!("{}/", key)
+                                                        };
+                                                        let config_clone =
+                                                            app.config.lock().await.clone();
+                                                        match crate::services::uploader::Uploader::is_folder_empty(
+                                                            &config_clone,
+                                                            &dir_key,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(true) => {
+                                                                app.input_mode =
+                                                                    InputMode::Confirmation;
+                                                                app.pending_action =
+                                                                    ModalAction::DeleteRemoteObject(
+                                                                        dir_key.clone(),
+                                                                        app.remote_current_path
+                                                                            .clone(),
+                                                                    );
+                                                                app.confirmation_msg = format!(
+                                                                    "Delete empty folder '{}'?",
+                                                                    obj.name
+                                                                );
+                                                            }
+                                                            Ok(false) => {
+                                                                app.input_mode =
+                                                                    InputMode::Confirmation;
+                                                                app.pending_action =
+                                                                    ModalAction::DeleteRemoteObject(
+                                                                        dir_key.clone(),
+                                                                        app.remote_current_path
+                                                                            .clone(),
+                                                                    );
+                                                                app.confirmation_msg = format!(
+                                                                    "Delete folder '{}' and all contents?",
+                                                                    obj.name
+                                                                );
+                                                            }
+                                                            Err(e) => {
+                                                                app.status_message = format!(
+                                                                    "Folder check failed: {}",
+                                                                    e
+                                                                );
+                                                            }
+                                                        }
                                                     } else {
                                                         app.input_mode = InputMode::Confirmation;
                                                         app.pending_action =
@@ -2255,6 +2252,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         "No matches found".to_string();
                                                 }
                                             }
+
                                             KeyCode::Esc => {
                                                 app.input_mode = InputMode::Normal;
                                                 app.log_search_active = false;

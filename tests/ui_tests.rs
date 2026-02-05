@@ -367,6 +367,7 @@ impl TestAppBuilder {
             theme_names: Theme::list_names(),
             pending_action: self.pending_action,
             confirmation_msg: self.confirmation_msg,
+            creating_folder_name: String::new(),
 
             metrics: MetricsCollector::new(),
             last_metrics: HostMetricsSnapshot::default(),
@@ -543,6 +544,17 @@ fn test_confirmation_modal() {
 }
 
 #[test]
+fn test_quit_confirmation_modal() {
+    let app = TestAppBuilder::new()
+        .with_tab(AppTab::Transfers)
+        .with_confirmation(ModalAction::QuitApp, "Quit Drifter?")
+        .build();
+
+    let output = render_to_string(&app, 120, 40);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
 fn test_layout_adjustment_overlay() {
     let app = TestAppBuilder::new()
         .with_tab(AppTab::Transfers)
@@ -628,6 +640,65 @@ fn test_remote_panel_with_objects() {
 }
 
 #[test]
+fn test_remote_browsing_hints() {
+    let s3_objects = vec![
+        S3Object {
+            key: "uploads/reports/".to_string(),
+            name: "reports/".to_string(),
+            size: 0,
+            last_modified: String::new(),
+            is_dir: true,
+            is_parent: false,
+        },
+        S3Object {
+            key: "uploads/data.csv".to_string(),
+            name: "data.csv".to_string(),
+            size: 1_048_576,
+            last_modified: "2025-01-19T09:15:00Z".to_string(),
+            is_dir: false,
+            is_parent: false,
+        },
+    ];
+
+    let app = TestAppBuilder::new()
+        .with_tab(AppTab::Transfers)
+        .with_focus(AppFocus::Remote)
+        .with_input_mode(InputMode::RemoteBrowsing)
+        .with_s3_objects(s3_objects)
+        .build();
+
+    let output = render_to_string(&app, 120, 40);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn test_remote_folder_create_modal() {
+    let mut app = TestAppBuilder::new()
+        .with_tab(AppTab::Transfers)
+        .with_focus(AppFocus::Remote)
+        .with_input_mode(InputMode::RemoteFolderCreate)
+        .build();
+    app.creating_folder_name = "reports_2025".to_string();
+
+    let output = render_to_string(&app, 120, 40);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn test_remote_delete_folder_confirmation() {
+    let app = TestAppBuilder::new()
+        .with_tab(AppTab::Transfers)
+        .with_confirmation(
+            ModalAction::DeleteRemoteObject("uploads/archive/".to_string(), "uploads/".to_string()),
+            "Delete folder 'archive' and all contents?",
+        )
+        .build();
+
+    let output = render_to_string(&app, 120, 40);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
 fn test_staged_files_selected() {
     let staged = vec![
         PathBuf::from("/test/path/file1.txt"),
@@ -692,6 +763,78 @@ fn test_nord_theme() {
         .with_focus(AppFocus::Queue)
         .with_jobs(jobs)
         .with_theme("nord")
+        .build();
+
+    let output = render_to_string(&app, 120, 40);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn test_rose_pine_moon_theme() {
+    let jobs = vec![
+        create_sample_job(1, "summary.pdf", "uploading", 5_000_000),
+        create_sample_job(2, "notes.txt", "complete", 12_000),
+    ];
+
+    let app = TestAppBuilder::new()
+        .with_tab(AppTab::Transfers)
+        .with_focus(AppFocus::Queue)
+        .with_jobs(jobs)
+        .with_theme("rose pine moon")
+        .build();
+
+    let output = render_to_string(&app, 120, 40);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn test_catppuccin_latte_theme() {
+    let jobs = vec![
+        create_sample_job(1, "report.csv", "uploading", 1_200_000),
+        create_sample_job(2, "photo.jpg", "complete", 4_800_000),
+    ];
+
+    let app = TestAppBuilder::new()
+        .with_tab(AppTab::Transfers)
+        .with_focus(AppFocus::Queue)
+        .with_jobs(jobs)
+        .with_theme("catppuccin latte")
+        .build();
+
+    let output = render_to_string(&app, 120, 40);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn test_catppuccin_frappe_theme() {
+    let jobs = vec![
+        create_sample_job(1, "archive.tar.gz", "uploading", 9_800_000),
+        create_sample_job(2, "readme.md", "complete", 24_000),
+    ];
+
+    let app = TestAppBuilder::new()
+        .with_tab(AppTab::Transfers)
+        .with_focus(AppFocus::Queue)
+        .with_jobs(jobs)
+        .with_theme("catppuccin frappe")
+        .build();
+
+    let output = render_to_string(&app, 120, 40);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn test_catppuccin_macchiato_theme() {
+    let jobs = vec![
+        create_sample_job(1, "design.sketch", "uploading", 2_400_000),
+        create_sample_job(2, "spec.docx", "complete", 600_000),
+    ];
+
+    let app = TestAppBuilder::new()
+        .with_tab(AppTab::Transfers)
+        .with_focus(AppFocus::Queue)
+        .with_jobs(jobs)
+        .with_theme("catppuccin macchiato")
         .build();
 
     let output = render_to_string(&app, 120, 40);

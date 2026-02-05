@@ -3,7 +3,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap,
+    },
 };
 
 use crate::app::settings::SettingsCategory;
@@ -19,9 +21,52 @@ use crate::ui::util::{
     fuzzy_match, status_kind,
 };
 
+fn draw_shadow(f: &mut Frame, area: Rect, app: &App) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let shadow_style = app.theme.shadow_style();
+    let max = f.size();
+
+    // Drop shadow: one-cell offset to the right and bottom.
+    let right_x = area.x.saturating_add(area.width);
+    let bottom_y = area.y.saturating_add(area.height);
+
+    if right_x < max.width {
+        let height = area
+            .height
+            .min(max.height.saturating_sub(area.y.saturating_add(1)));
+        if height > 0 {
+            let right_shadow = Rect {
+                x: right_x,
+                y: area.y.saturating_add(1),
+                width: 1,
+                height,
+            };
+            f.render_widget(Block::default().style(shadow_style), right_shadow);
+        }
+    }
+
+    if bottom_y < max.height {
+        let width = area
+            .width
+            .min(max.width.saturating_sub(area.x.saturating_add(1)));
+        if width > 0 {
+            let bottom_shadow = Rect {
+                x: area.x.saturating_add(1),
+                y: bottom_y,
+                width,
+                height: 1,
+            };
+            f.render_widget(Block::default().style(shadow_style), bottom_shadow);
+        }
+    }
+}
+
 pub fn ui(f: &mut Frame, app: &App) {
     if app.show_wizard {
         draw_wizard(f, app);
+        draw_confirmation_modal(f, app, f.size());
         return;
     }
 
@@ -118,7 +163,7 @@ pub fn ui(f: &mut Frame, app: &App) {
     // Render Modals last (on top)
     draw_layout_adjustment_overlay(f, app, f.size());
     draw_confirmation_modal(f, app, f.size());
-    draw_destination_picker_modal(f, app, f.size());
+    draw_remote_folder_create_modal(f, app, f.size());
 }
 
 fn draw_rail(f: &mut Frame, app: &App, area: Rect) {
@@ -1457,7 +1502,9 @@ fn draw_wizard(f: &mut Frame, app: &App) {
     let area = f.size();
     let wizard_area = centered_rect(area, 60, 70);
 
-    f.render_widget(Block::default().style(app.theme.base_style()), area);
+    draw_shadow(f, wizard_area, app);
+    f.render_widget(Clear, wizard_area); // Ensure we clear behind it if on top of main UI
+    f.render_widget(Block::default().style(app.theme.base_style()), wizard_area); // Actually base style covers it, but let's be safe
 
     let step_title = match app.wizard.step {
         WizardStep::Paths => "Step 1/4: Directory Paths",
@@ -1471,7 +1518,7 @@ fn draw_wizard(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
         .title(format!(" {} Setup Wizard ", "🚀"))
-        .border_style(app.theme.border_active_style());
+        .border_style(app.theme.modal_border_style());
 
     let inner = block.inner(wizard_area);
     f.render_widget(block, wizard_area);
@@ -1655,8 +1702,27 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             key("↑/↓"),
             act("Select"),
             sep(),
+            key("r"),
+            act("Refresh"),
+            sep(),
+            key("d"),
+            act("Download"),
+            sep(),
+            key("x"),
+            act("Delete"),
+            sep(),
+            key("n"),
+            act("New Folder"),
+            sep(),
             key("Esc"),
             act("Exit"),
+        ]),
+        InputMode::RemoteFolderCreate => add_global_keys!(vec![
+            key("Enter"),
+            act("Create"),
+            sep(),
+            key("Esc"),
+            act("Cancel"),
         ]),
         InputMode::Confirmation => add_global_keys!(vec![Span::styled(
             "Confirmation Required",
@@ -1678,32 +1744,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             key("q"),
             act("Cancel"),
         ]),
-        InputMode::DestinationPicker => add_global_keys!(vec![
-            key("↑/↓"),
-            act("Select"),
-            sep(),
-            key("Enter"),
-            act("Open/Select"),
-            sep(),
-            key("Backspace"),
-            act("Parent"),
-            sep(),
-            key("n"),
-            act("New Folder"),
-            sep(),
-            key("Esc"),
-            act("Cancel"),
-        ]),
-        InputMode::DestinationFolderCreate => add_global_keys!(vec![
-            key("Type"),
-            act("folder name"),
-            sep(),
-            key("Enter"),
-            act("Create"),
-            sep(),
-            key("Esc"),
-            act("Cancel"),
-        ]),
+
         InputMode::Normal => match app.focus {
             AppFocus::Logs => add_global_keys!(vec![key("q"), act("Back")]),
             AppFocus::Rail => add_global_keys!(vec![
@@ -1928,12 +1969,14 @@ fn draw_layout_adjustment_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(app.theme.border_type)
+        .border_type(BorderType::Rounded)
         .title(" Layout Adjustment Mode ")
-        .style(app.theme.panel_style())
-        .border_style(app.theme.border_active_style());
+        .style(app.theme.modal_style())
+        .border_style(app.theme.modal_border_style());
 
     let popup_area = centered_fixed_rect(area, 108, 17);
+
+    draw_shadow(f, popup_area, app);
     f.render_widget(Clear, popup_area);
     f.render_widget(block.clone(), popup_area);
 
@@ -2006,18 +2049,20 @@ fn draw_confirmation_modal(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    let area = centered_fixed_rect(area, 60, 8);
+
+    draw_shadow(f, area, app);
+    f.render_widget(Clear, area);
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(app.theme.border_type)
+        .border_type(BorderType::Rounded)
         .title(" Confirmation ")
-        .style(app.theme.panel_style())
-        .border_style(app.theme.border_active_style());
-
-    let area = centered_fixed_rect(area, 60, 8);
-    f.render_widget(Clear, area);
-    f.render_widget(block.clone(), area);
+        .style(app.theme.modal_style())
+        .border_style(app.theme.modal_border_style());
 
     let content_area = block.inner(area);
+    f.render_widget(block, area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -2093,115 +2138,55 @@ fn draw_metrics_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(net_content), chunks[1]);
 }
 
-fn draw_destination_picker_modal(f: &mut Frame, app: &App, area: Rect) {
-    if app.input_mode != InputMode::DestinationPicker && app.input_mode != InputMode::DestinationFolderCreate {
+fn draw_remote_folder_create_modal(f: &mut Frame, app: &App, area: Rect) {
+    if app.input_mode != InputMode::RemoteFolderCreate {
         return;
     }
 
-    let popup_area = centered_fixed_rect(area, 70, 20);
-    f.render_widget(Clear, popup_area);
+    let area = centered_fixed_rect(area, 60, 10);
 
-    let title = if app.input_mode == InputMode::DestinationFolderCreate {
-        " Create New Folder "
-    } else {
-        " Select Upload Destination "
-    };
+    draw_shadow(f, area, app);
+    f.render_widget(Clear, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(app.theme.border_type)
-        .title(title)
-        .style(app.theme.panel_style())
-        .border_style(app.theme.border_active_style());
+        .border_type(BorderType::Rounded)
+        .border_style(app.theme.modal_border_style())
+        .title(" Create Remote Folder ")
+        .style(app.theme.modal_style());
 
-    let inner = block.inner(popup_area);
-    f.render_widget(block, popup_area);
+    f.render_widget(block, area);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
+        .margin(2)
         .constraints([
-            Constraint::Length(2), // Current path
-            Constraint::Min(0),    // Folder list
-            Constraint::Length(2), // Help text or input
+            Constraint::Length(1), // Prompt
+            Constraint::Length(3), // Input box
+            Constraint::Length(1), // Help
         ])
-        .split(inner);
+        .split(area);
 
-    // Current path display
-    let path_display = if app.destination_picker_path.is_empty() {
-        format!("s3://{}/", app.settings.bucket)
-    } else {
-        format!("s3://{}/{}/", app.settings.bucket, app.destination_picker_path)
-    };
-    let path_line = Paragraph::new(Line::from(vec![
-        Span::styled("Path: ", app.theme.muted_style()),
-        Span::styled(&path_display, app.theme.accent_style().add_modifier(Modifier::BOLD)),
-    ]));
-    f.render_widget(path_line, chunks[0]);
+    let prompt = Paragraph::new("Enter folder name:").style(app.theme.text_style());
+    f.render_widget(prompt, chunks[0]);
 
-    if app.input_mode == InputMode::DestinationFolderCreate {
-        // Folder creation mode: show input
-        let input_display = format!("{}█", app.creating_folder_name);
-        let input_line = Paragraph::new(Line::from(vec![
-            Span::styled("Folder name: ", app.theme.muted_style()),
-            Span::styled(&input_display, app.theme.input_style(true)),
-        ]));
-        f.render_widget(input_line, chunks[1]);
+    let input = Paragraph::new(app.creating_folder_name.as_str())
+        .style(app.theme.text_style().add_modifier(Modifier::BOLD))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(app.theme.border_active_style()),
+        );
+    f.render_widget(input, chunks[1]);
 
-        let help = Paragraph::new("Enter: Create  |  Esc: Cancel")
-            .style(app.theme.muted_style())
-            .alignment(ratatui::layout::Alignment::Center);
-        f.render_widget(help, chunks[2]);
-    } else {
-        // Folder browsing mode
-        if app.destination_picker_loading {
-            let loading = Paragraph::new("Loading...")
-                .style(app.theme.muted_style())
-                .alignment(ratatui::layout::Alignment::Center);
-            f.render_widget(loading, chunks[1]);
-        } else {
-            // Build items: "Select this folder" + folders only
-            let folders: Vec<_> = app.destination_picker_objects
-                .iter()
-                .filter(|o| o.is_dir)
-                .collect();
+    // Cursor
+    f.set_cursor(
+        chunks[1].x + 1 + app.creating_folder_name.len() as u16,
+        chunks[1].y + 1,
+    );
 
-            let mut items: Vec<ListItem> = vec![];
-            
-            // First item: "Select this folder" option
-            let select_style = if app.destination_picker_selected == 0 {
-                app.theme.selection_style()
-            } else {
-                app.theme.text_style()
-            };
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled("→ ", select_style),
-                Span::styled("[Select this folder]", select_style.add_modifier(Modifier::BOLD)),
-            ])));
-
-            // Add folders
-            for (i, folder) in folders.iter().enumerate() {
-                let is_selected = app.destination_picker_selected == i + 1;
-                let style = if is_selected {
-                    app.theme.selection_style()
-                } else {
-                    app.theme.text_style()
-                };
-                let prefix = if is_selected { "▸ " } else { "  " };
-                let name = folder.name.trim_end_matches('/');
-                items.push(ListItem::new(Line::from(vec![
-                    Span::styled(prefix, style),
-                    Span::styled("📁 ", style),
-                    Span::styled(name, style),
-                ])));
-            }
-
-            let list = List::new(items);
-            f.render_widget(list, chunks[1]);
-        }
-
-        let help = Paragraph::new("↑/↓: Navigate  |  Enter: Select/Open  |  ←: Parent  |  n: New Folder  |  Esc: Cancel")
-            .style(app.theme.muted_style())
-            .alignment(ratatui::layout::Alignment::Center);
-        f.render_widget(help, chunks[2]);
-    }
+    let help = Paragraph::new("Enter: Create | Esc: Cancel")
+        .style(app.theme.text_style().add_modifier(Modifier::DIM))
+        .alignment(ratatui::layout::Alignment::Center);
+    f.render_widget(help, chunks[2]);
 }

@@ -73,7 +73,10 @@ pub async fn ingest_path(
 
         let size = metadata.len() as i64;
         let source_str = file_path.to_string_lossy().to_string();
-        debug!("Processing file: {} ({} bytes) -> s3_key: {}", source_str, size, s3_key);
+        debug!(
+            "Processing file: {} ({} bytes) -> s3_key: {}",
+            source_str, size, s3_key
+        );
 
         let job_id = {
             let conn = lock_mutex(&conn_mutex)?;

@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};
 use aws_sdk_s3::error::ProvideErrorMetadata;
-use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier};
 use std::path::Path;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -228,6 +228,104 @@ impl Uploader {
             .await
             .context("Failed to delete object")?;
         Ok(())
+    }
+
+    /// Check whether a "folder" (prefix) is empty, allowing a trailing-slash marker object.
+    pub async fn is_folder_empty(config: &Config, folder_key: &str) -> Result<bool> {
+        let (client, bucket) = Self::create_client(config).await?;
+
+        let mut prefix = folder_key.to_string();
+        if !prefix.ends_with('/') {
+            prefix.push('/');
+        }
+
+        let resp = client
+            .list_objects_v2()
+            .bucket(&bucket)
+            .prefix(&prefix)
+            .delimiter("/")
+            .max_keys(2)
+            .send()
+            .await
+            .context("Failed to list folder contents")?;
+
+        let has_children = resp
+            .common_prefixes
+            .as_ref()
+            .map(|c| !c.is_empty())
+            .unwrap_or(false)
+            || resp.contents.as_ref().is_some_and(|contents| {
+                contents
+                    .iter()
+                    .any(|obj| obj.key().map(|k| k != prefix).unwrap_or(false))
+            });
+
+        Ok(!has_children)
+    }
+
+    /// Recursively delete a folder (prefix) and all its contents.
+    pub async fn delete_folder_recursive(config: &Config, folder_key: &str) -> Result<u64> {
+        let (client, bucket) = Self::create_client(config).await?;
+
+        let mut prefix = folder_key.to_string();
+        if !prefix.ends_with('/') {
+            prefix.push('/');
+        }
+
+        let mut continuation_token = None;
+        let mut deleted: u64 = 0;
+
+        loop {
+            let mut req = client.list_objects_v2().bucket(&bucket).prefix(&prefix);
+            if let Some(token) = continuation_token.take() {
+                req = req.continuation_token(token);
+            }
+
+            let resp = req.send().await.context("Failed to list folder contents")?;
+
+            let mut identifiers: Vec<ObjectIdentifier> = Vec::new();
+            let is_truncated = resp.is_truncated().unwrap_or(false);
+            let next_token = resp.next_continuation_token.clone();
+
+            let objects = resp.contents.unwrap_or_default();
+            for obj in objects {
+                if let Some(key) = obj.key {
+                    identifiers.push(ObjectIdentifier::builder().key(key).build()?);
+                }
+            }
+
+            if identifiers.is_empty() {
+                // Ensure any trailing-slash marker is removed.
+                let _ = client
+                    .delete_object()
+                    .bucket(&bucket)
+                    .key(&prefix)
+                    .send()
+                    .await;
+            } else {
+                let count = identifiers.len() as u64;
+                let delete = Delete::builder()
+                    .set_objects(Some(identifiers))
+                    .quiet(true)
+                    .build()?;
+                client
+                    .delete_objects()
+                    .bucket(&bucket)
+                    .delete(delete)
+                    .send()
+                    .await
+                    .context("Failed to delete folder objects")?;
+                deleted += count;
+            }
+
+            if is_truncated {
+                continuation_token = next_token.map(|s| s.to_string());
+            } else {
+                break;
+            }
+        }
+
+        Ok(deleted)
     }
 
     /// Create a folder in S3 by uploading a 0-byte object with a trailing slash
