@@ -230,6 +230,30 @@ impl Uploader {
         Ok(())
     }
 
+    /// Create a folder in S3 by uploading a 0-byte object with a trailing slash
+    pub async fn create_folder(config: &Config, folder_key: &str) -> Result<()> {
+        let (client, bucket) = Self::create_client(config).await?;
+
+        // Ensure the key ends with a slash
+        let key = if folder_key.ends_with('/') {
+            folder_key.to_string()
+        } else {
+            format!("{}/", folder_key)
+        };
+
+        client
+            .put_object()
+            .bucket(&bucket)
+            .key(&key)
+            .content_length(0)
+            .send()
+            .await
+            .context("Failed to create folder")?;
+
+        info!("Created S3 folder: {}", key);
+        Ok(())
+    }
+
     pub async fn check_connection(config: &Config) -> Result<String> {
         // Use helper, but construct customized error messages?
         // create_client checks basic config/creds.

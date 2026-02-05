@@ -66,20 +66,23 @@ pub struct VisualItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
-    Browsing,       // In File Picker
-    Filter,         // In File Picker Filter
-    LogSearch,      // In Log Viewer Search
-    Confirmation,   // Modal
-    LayoutAdjust,   // Popout
-    QueueSearch,    // In Transfer Queue
-    HistorySearch,  // In Job History
-    RemoteBrowsing, // For navigating S3 directories
+    Browsing,              // In File Picker
+    Filter,                // In File Picker Filter
+    LogSearch,             // In Log Viewer Search
+    Confirmation,          // Modal
+    LayoutAdjust,          // Popout
+    QueueSearch,           // In Transfer Queue
+    HistorySearch,         // In Job History
+    RemoteBrowsing,        // For navigating S3 directories
+    DestinationPicker,     // Browsing S3 to select upload destination
+    DestinationFolderCreate, // Creating a new folder in destination picker
 }
 
 #[derive(Debug)]
 pub enum AppEvent {
     Notification(String),
     RemoteFileList(String, Vec<S3Object>), // (path, objects)
+    DestinationListResponse(Vec<S3Object>), // Response for destination picker
     LogLine(String),
     RefreshRemote,
 }
@@ -208,6 +211,15 @@ pub struct App {
     // Layout Adjustment
     pub layout_adjust_target: Option<LayoutTarget>,
     pub layout_adjust_message: String,
+
+    // Destination Picker (S3 upload destination selection)
+    pub destination_picker_path: String,
+    pub destination_picker_objects: Vec<S3Object>,
+    pub destination_picker_selected: usize,
+    pub selected_destination: Option<String>,
+    pub destination_picker_loading: bool,
+    pub creating_folder_name: String,
+    pub pending_upload_paths: Vec<String>, // Paths pending upload after destination selection
 }
 
 impl App {
@@ -300,6 +312,15 @@ impl App {
             conn: conn.clone(),
             queue_search_query: String::new(),
             history_search_query: String::new(),
+
+            // Destination picker state
+            destination_picker_path: String::new(),
+            destination_picker_objects: Vec::new(),
+            destination_picker_selected: 0,
+            selected_destination: None,
+            destination_picker_loading: false,
+            creating_folder_name: String::new(),
+            pending_upload_paths: Vec::new(),
         };
 
         // ClamAV checker task (Tokio)

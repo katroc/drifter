@@ -190,6 +190,11 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                         request_remote_list(&mut app, true).await;
                     }
                 }
+                AppEvent::DestinationListResponse(objects) => {
+                    app.destination_picker_objects = objects;
+                    app.destination_picker_loading = false;
+                    app.destination_picker_selected = 0;
+                }
             }
         }
 
@@ -724,6 +729,210 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                             continue;
                         }
 
+                        // Destination Picker Modal Handling
+                        if app.input_mode == InputMode::DestinationPicker {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    // Cancel destination selection, use default path
+                                    app.input_mode = InputMode::Normal;
+                                    app.destination_picker_path.clear();
+                                    app.destination_picker_objects.clear();
+                                    app.destination_picker_selected = 0;
+                                    app.pending_upload_paths.clear();
+                                    app.status_message = "Upload cancelled".to_string();
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    if app.destination_picker_selected > 0 {
+                                        app.destination_picker_selected -= 1;
+                                    }
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    // +1 for "Select this folder" option at index 0
+                                    let count = app.destination_picker_objects
+                                        .iter()
+                                        .filter(|o| o.is_dir)
+                                        .count() + 1;
+                                    if app.destination_picker_selected + 1 < count {
+                                        app.destination_picker_selected += 1;
+                                    }
+                                }
+                                KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
+                                    if app.destination_picker_selected == 0 {
+                                        // "Select this folder" selected - confirm destination
+                                        let destination = if app.destination_picker_path.is_empty() {
+                                            None
+                                        } else {
+                                            Some(app.destination_picker_path.clone())
+                                        };
+                                        
+                                        // Now perform the ingest with the selected destination
+                                        let paths = std::mem::take(&mut app.pending_upload_paths);
+                                        let conn_clone = conn_mutex.clone();
+                                        let dest_clone = destination.clone();
+                                        
+                                        let paths_count = paths.len();
+                                        tokio::spawn(async move {
+                                            let session_id = Uuid::new_v4().to_string();
+                                            let mut total = 0;
+                                            for path in paths {
+                                                if let Ok(count) = ingest_path(
+                                                    conn_clone.clone(),
+                                                    &path,
+                                                    &session_id,
+                                                    dest_clone.as_deref(),
+                                                ).await {
+                                                    total += count;
+                                                }
+                                            }
+                                            tracing::info!(
+                                                "Ingest complete: {} files to destination {:?}",
+                                                total,
+                                                dest_clone
+                                            );
+                                        });
+                                        
+                                        app.status_message = format!(
+                                            "Ingesting {} items to '{}'",
+                                            paths_count,
+                                            if destination.is_some() { &app.destination_picker_path } else { "(bucket root)" }
+                                        );
+                                        
+                                        // Reset picker state
+                                        app.input_mode = InputMode::Normal;
+                                        app.destination_picker_path.clear();
+                                        app.destination_picker_objects.clear();
+                                        app.destination_picker_selected = 0;
+                                    } else {
+                                        // Navigate into selected folder
+                                        let folders: Vec<_> = app.destination_picker_objects
+                                            .iter()
+                                            .filter(|o| o.is_dir)
+                                            .collect();
+                                        if let Some(folder) = folders.get(app.destination_picker_selected - 1) {
+                                            app.destination_picker_path = folder.key.clone();
+                                            app.destination_picker_selected = 0;
+                                            app.destination_picker_loading = true;
+                                            
+                                            // Request listing for this path
+                                            let tx = app.async_tx.clone();
+                                            let config = app.config.lock().await.clone();
+                                            let path = app.destination_picker_path.clone();
+                                            tokio::spawn(async move {
+                                                match crate::services::uploader::Uploader::list_bucket_contents(&config, Some(&path)).await {
+                                                    Ok(objects) => {
+                                                        let _ = tx.send(AppEvent::DestinationListResponse(objects));
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = tx.send(AppEvent::Notification(format!("Failed to list: {}", e)));
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                                KeyCode::Backspace | KeyCode::Char('h') | KeyCode::Left => {
+                                    // Navigate to parent
+                                    if !app.destination_picker_path.is_empty() {
+                                        let path = app.destination_picker_path.trim_end_matches('/');
+                                        if let Some(last_slash) = path.rfind('/') {
+                                            app.destination_picker_path = path[..last_slash].to_string();
+                                        } else {
+                                            app.destination_picker_path.clear();
+                                        }
+                                        app.destination_picker_selected = 0;
+                                        app.destination_picker_loading = true;
+                                        
+                                        // Request listing for parent
+                                        let tx = app.async_tx.clone();
+                                        let config = app.config.lock().await.clone();
+                                        let path = if app.destination_picker_path.is_empty() {
+                                            None
+                                        } else {
+                                            Some(app.destination_picker_path.clone())
+                                        };
+                                        tokio::spawn(async move {
+                                            match crate::services::uploader::Uploader::list_bucket_contents(&config, path.as_deref()).await {
+                                                Ok(objects) => {
+                                                    let _ = tx.send(AppEvent::DestinationListResponse(objects));
+                                                }
+                                                Err(e) => {
+                                                    let _ = tx.send(AppEvent::Notification(format!("Failed to list: {}", e)));
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                                KeyCode::Char('n') => {
+                                    // Switch to folder creation mode
+                                    app.input_mode = InputMode::DestinationFolderCreate;
+                                    app.creating_folder_name.clear();
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
+                        // Destination Folder Creation Modal
+                        if app.input_mode == InputMode::DestinationFolderCreate {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    app.input_mode = InputMode::DestinationPicker;
+                                    app.creating_folder_name.clear();
+                                }
+                                KeyCode::Enter => {
+                                    if !app.creating_folder_name.is_empty() {
+                                        // Create folder (S3 doesn't really have folders, but we create a 0-byte object with trailing /)
+                                        let folder_key = if app.destination_picker_path.is_empty() {
+                                            format!("{}/", app.creating_folder_name)
+                                        } else {
+                                            format!("{}/{}/", app.destination_picker_path.trim_end_matches('/'), app.creating_folder_name)
+                                        };
+                                        
+                                        let tx = app.async_tx.clone();
+                                        let config = app.config.lock().await.clone();
+                                        let folder_key_clone = folder_key.clone();
+                                        let current_path = app.destination_picker_path.clone();
+                                        
+                                        tokio::spawn(async move {
+                                            match crate::services::uploader::Uploader::create_folder(&config, &folder_key_clone).await {
+                                                Ok(_) => {
+                                                    // Refresh the listing
+                                                    let path = if current_path.is_empty() { None } else { Some(current_path) };
+                                                    match crate::services::uploader::Uploader::list_bucket_contents(&config, path.as_deref()).await {
+                                                        Ok(objects) => {
+                                                            let _ = tx.send(AppEvent::DestinationListResponse(objects));
+                                                            let _ = tx.send(AppEvent::Notification(format!("Created folder '{}'", folder_key_clone)));
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx.send(AppEvent::Notification(format!("Failed to refresh: {}", e)));
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    let _ = tx.send(AppEvent::Notification(format!("Failed to create folder: {}", e)));
+                                                }
+                                            }
+                                        });
+                                        
+                                        app.input_mode = InputMode::DestinationPicker;
+                                        app.creating_folder_name.clear();
+                                        app.status_message = format!("Creating folder '{}'...", folder_key);
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    app.creating_folder_name.pop();
+                                }
+                                KeyCode::Char(c) => {
+                                    // Only allow valid folder name characters
+                                    if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                                        app.creating_folder_name.push(c);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
                         // Focus-specific handling
                         match app.focus {
                             AppFocus::Rail => match key.code {
@@ -840,6 +1049,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                 conn_clone,
                                                                 &path,
                                                                 &session_id,
+                                                                None,
                                                             )
                                                             .await;
                                                         });
@@ -881,35 +1091,70 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     .cloned()
                                                     .collect();
                                                 if !paths.is_empty() {
-                                                    let conn_clone = conn_mutex.clone();
-
-                                                    let paths_count = paths.len();
-                                                    tokio::spawn(async move {
-                                                        let session_id = Uuid::new_v4().to_string();
-                                                        let mut total = 0;
-                                                        for path in paths {
-                                                            if let Ok(count) = ingest_path(
-                                                                conn_clone.clone(),
-                                                                &path.to_string_lossy(),
-                                                                &session_id,
-                                                            )
-                                                            .await
-                                                            {
-                                                                total += count;
+                                                    // Check if S3 is configured
+                                                    let s3_configured = {
+                                                        let cfg = app.config.lock().await;
+                                                        s3_ready(&cfg)
+                                                    };
+                                                    
+                                                    if s3_configured {
+                                                        // Open destination picker
+                                                        app.pending_upload_paths = paths.iter()
+                                                            .map(|p| p.to_string_lossy().to_string())
+                                                            .collect();
+                                                        app.destination_picker_path.clear();
+                                                        app.destination_picker_objects.clear();
+                                                        app.destination_picker_selected = 0;
+                                                        app.destination_picker_loading = true;
+                                                        app.input_mode = InputMode::DestinationPicker;
+                                                        app.picker.clear_selected();
+                                                        
+                                                        // Request root listing
+                                                        let tx = app.async_tx.clone();
+                                                        let config = app.config.lock().await.clone();
+                                                        tokio::spawn(async move {
+                                                            match crate::services::uploader::Uploader::list_bucket_contents(&config, None).await {
+                                                                Ok(objects) => {
+                                                                    let _ = tx.send(AppEvent::DestinationListResponse(objects));
+                                                                }
+                                                                Err(e) => {
+                                                                    let _ = tx.send(AppEvent::Notification(format!("Failed to list S3: {}", e)));
+                                                                }
                                                             }
-                                                        }
-                                                        // We could send a notification here but app might have moved on
-                                                        tracing::info!(
-                                                            "Bulk ingest complete: {} files",
-                                                            total
-                                                        );
-                                                    });
+                                                        });
+                                                        
+                                                        app.status_message = "Select upload destination...".to_string();
+                                                    } else {
+                                                        // S3 not configured, ingest with default path
+                                                        let conn_clone = conn_mutex.clone();
+                                                        let paths_count = paths.len();
+                                                        tokio::spawn(async move {
+                                                            let session_id = Uuid::new_v4().to_string();
+                                                            let mut total = 0;
+                                                            for path in paths {
+                                                                if let Ok(count) = ingest_path(
+                                                                    conn_clone.clone(),
+                                                                    &path.to_string_lossy(),
+                                                                    &session_id,
+                                                                    None,
+                                                                )
+                                                                .await
+                                                                {
+                                                                    total += count;
+                                                                }
+                                                            }
+                                                            tracing::info!(
+                                                                "Bulk ingest complete: {} files",
+                                                                total
+                                                            );
+                                                        });
 
-                                                    app.status_message = format!(
-                                                        "Ingesting {} items in background",
-                                                        paths_count
-                                                    );
-                                                    app.picker.clear_selected();
+                                                        app.status_message = format!(
+                                                            "Ingesting {} items in background",
+                                                            paths_count
+                                                        );
+                                                        app.picker.clear_selected();
+                                                    }
                                                 }
                                             }
                                             _ => {}
@@ -972,7 +1217,9 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     | InputMode::Confirmation
                                     | InputMode::QueueSearch
                                     | InputMode::HistorySearch
-                                    | InputMode::RemoteBrowsing => {}
+                                    | InputMode::RemoteBrowsing
+                                    | InputMode::DestinationPicker
+                                    | InputMode::DestinationFolderCreate => {}
                                 }
                             }
                             AppFocus::Queue => {
@@ -2319,6 +2566,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                                 conn_clone,
                                                                                 &path,
                                                                                 &session_id,
+                                                                                None,
                                                                             )
                                                                             .await;
                                                                         });
