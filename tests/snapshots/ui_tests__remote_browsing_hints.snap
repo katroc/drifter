@@ -3,7 +3,7 @@ source: tests/ui_tests.rs
 expression: output
 ---
 ╭ Navigation ───╭ Local /test/path───╮ Remote (S3): 2 [Path╮ History [All] ────────────────────────────────────────────╮
-│▌ Transfers    │ Size      Modified │Name                 │File                 Status           Size       Time      │
+│▌ Transfers    │ Size      Modified │  Name               │File                 Status           Size       Time      │
 │  Quarantine   │ -         -        │> 📁  reports/        │                                                           │
 │  Logs         │ -         -        │  📄  data.csv        │                                                           │
 │  Settings     │ 1.0 KB    -        │                     │                                                           │

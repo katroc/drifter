@@ -1,6 +1,5 @@
 use crate::core::config::{Config, ScanMode};
 use anyhow::{Context, Result};
-use std::net::SocketAddr;
 use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -17,7 +16,9 @@ pub struct Scanner {
     mode: ScanMode,
     clamd_host: String,
     clamd_port: u16,
+    clamd_socket: Option<String>,
     scan_chunk_size_mb: u64,
+    max_scan_size_mb: Option<u64>,
     concurrency: usize,
 }
 
@@ -27,12 +28,29 @@ impl Scanner {
             mode: config.scan_mode.clone(),
             clamd_host: config.clamd_host.clone(),
             clamd_port: config.clamd_port,
+            clamd_socket: config.clamd_socket.clone().filter(|s| !s.trim().is_empty()),
             scan_chunk_size_mb: config.scan_chunk_size_mb,
+            max_scan_size_mb: config.max_scan_size_mb,
             concurrency: config.concurrency_scan_parts.max(1),
         }
     }
 
     pub async fn scan_file(&self, path: &str) -> Result<ScanResult> {
+        if let Some(max_mb) = self.max_scan_size_mb {
+            let max_bytes = max_mb.saturating_mul(1024 * 1024);
+            let file_size = tokio::fs::metadata(path)
+                .await
+                .with_context(|| format!("Failed to read metadata for {}", path))?
+                .len();
+            if file_size > max_bytes {
+                warn!(
+                    "Skipping scan for {} ({} bytes exceeds max_scan_size_mb={}MB)",
+                    path, file_size, max_mb
+                );
+                return Ok(ScanResult::Clean);
+            }
+        }
+
         match self.mode {
             ScanMode::Skip => {
                 info!("Scanning skipped for: {}", path);
@@ -65,9 +83,18 @@ impl Scanner {
                 let path = path.to_string();
                 let host = self.clamd_host.clone();
                 let port = self.clamd_port;
+                let clamd_socket = self.clamd_socket.clone();
 
                 join_set.spawn(async move {
-                    scan_chunk_at_offset(&path, chunk_offset, chunk_size, &host, port).await
+                    scan_chunk_at_offset(
+                        &path,
+                        chunk_offset,
+                        chunk_size,
+                        &host,
+                        port,
+                        clamd_socket.as_deref(),
+                    )
+                    .await
                 });
             }
         }
@@ -88,9 +115,18 @@ impl Scanner {
                         let path = path.to_string();
                         let host = self.clamd_host.clone();
                         let port = self.clamd_port;
+                        let clamd_socket = self.clamd_socket.clone();
 
                         join_set.spawn(async move {
-                            scan_chunk_at_offset(&path, chunk_offset, chunk_size, &host, port).await
+                            scan_chunk_at_offset(
+                                &path,
+                                chunk_offset,
+                                chunk_size,
+                                &host,
+                                port,
+                                clamd_socket.as_deref(),
+                            )
+                            .await
                         });
                     }
                 }
@@ -112,12 +148,12 @@ impl Scanner {
     }
 
     pub async fn check_connection(&self) -> Result<String> {
-        let address = format!("{}:{}", self.clamd_host, self.clamd_port);
-        let addr: SocketAddr = address.parse().context("Invalid clamd address")?;
-
-        let mut stream = TcpStream::connect(addr)
-            .await
-            .context("Failed to connect to clamd")?;
+        let mut stream = connect_clamd(
+            self.clamd_socket.as_deref(),
+            &self.clamd_host,
+            self.clamd_port,
+        )
+        .await?;
         stream
             .write_all(b"PING")
             .await
@@ -176,6 +212,7 @@ async fn scan_chunk_at_offset(
     chunk_size: usize,
     host: &str,
     port: u16,
+    clamd_socket: Option<&str>,
 ) -> Result<ScanResult> {
     use std::io::SeekFrom;
 
@@ -203,12 +240,7 @@ async fn scan_chunk_at_offset(
     }
 
     // Send to ClamAV
-    let address = format!("{}:{}", host, port);
-    let addr: SocketAddr = address.parse().context("Invalid clamd address")?;
-
-    let mut stream = TcpStream::connect(addr)
-        .await
-        .context("Failed to connect to clamd")?;
+    let mut stream = connect_clamd(clamd_socket, host, port).await?;
     stream
         .write_all(b"zINSTREAM\0")
         .await
@@ -255,6 +287,55 @@ async fn scan_chunk_at_offset(
     } else {
         Err(anyhow::anyhow!("ClamAV Error: {}", response_str.trim()))
     }
+}
+
+enum ClamdStream {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(tokio::net::UnixStream),
+}
+
+impl ClamdStream {
+    async fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        match self {
+            ClamdStream::Tcp(stream) => stream.write_all(data).await,
+            #[cfg(unix)]
+            ClamdStream::Unix(stream) => stream.write_all(data).await,
+        }
+    }
+
+    async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> std::io::Result<usize> {
+        match self {
+            ClamdStream::Tcp(stream) => stream.read_to_end(buf).await,
+            #[cfg(unix)]
+            ClamdStream::Unix(stream) => stream.read_to_end(buf).await,
+        }
+    }
+}
+
+async fn connect_clamd(clamd_socket: Option<&str>, host: &str, port: u16) -> Result<ClamdStream> {
+    if let Some(socket_path) = clamd_socket.filter(|s| !s.trim().is_empty()) {
+        #[cfg(unix)]
+        {
+            let stream = tokio::net::UnixStream::connect(socket_path)
+                .await
+                .with_context(|| format!("Failed to connect to clamd socket {}", socket_path))?;
+            return Ok(ClamdStream::Unix(stream));
+        }
+        #[cfg(not(unix))]
+        {
+            warn!(
+                "clamd_socket '{}' is configured but unix sockets are unsupported on this platform; falling back to TCP",
+                socket_path
+            );
+        }
+    }
+
+    let address = format!("{}:{}", host, port);
+    let stream = TcpStream::connect(address.as_str())
+        .await
+        .with_context(|| format!("Failed to connect to clamd at {}", address))?;
+    Ok(ClamdStream::Tcp(stream))
 }
 
 #[cfg(test)]

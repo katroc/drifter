@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/katroc/drifter/workflows/Tests/badge.svg)](https://github.com/katroc/drifter/actions?query=workflow%3ATests)
 
-**Drifter** is a mission-critical, TUI-based S3 multipart uploader designed for high-assurance environments. It acts as a robust "tiered storage" airlock, allowing you to stage files, scan them for malware using ClamAV, and upload them to S3-compatible storage with cryptographic integrity verification.
+**Drifter** is a TUI-based S3 multipart uploader featuring resumable transfers and ClamAV integration. It acts as a robust "tiered storage" airlock, allowing you to stage files, scan them for malware using ClamAV, and upload them to S3-compatible storage with cryptographic integrity verification.
 
 ![Drifter TUI](assets/drifter.png)
 

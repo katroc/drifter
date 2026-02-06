@@ -41,4 +41,4 @@ expression: output
 │               │                                          │Disk Read:  0 B               Net Down: 0 B                │
 │               │                                          │Disk Write: 0 B               Net Up:   0 B                │
 ╰───────────────╰──────────────────────────────────────────╯───────────────────────────────────────────────────────────╯
-Confirmation Required  │  Tab Navigate               ClamAV: Connected  │  S3: Not Configured  │  Jobs: 0  │  Threats: 0
+Enter/y Confirm  │  Esc/n Cancel                     ClamAV: Connected  │  S3: Not Configured  │  Jobs: 0  │  Threats: 0

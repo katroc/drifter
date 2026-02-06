@@ -310,6 +310,23 @@ impl App {
             creating_folder_name: String::new(),
         };
 
+        if let Some(watch_dir) = app
+            .cached_config
+            .watch_dir
+            .clone()
+            .filter(|w| !w.trim().is_empty())
+        {
+            let watch_path = PathBuf::from(&watch_dir);
+            if watch_path.exists() {
+                app._watcher.start(watch_path.clone());
+                app._watch_path = Some(watch_path);
+                app.watch_enabled = true;
+                app.status_message = format!("Watching {}", watch_dir);
+            } else {
+                app.status_message = format!("Watch path not found: {}", watch_dir);
+            }
+        }
+
         // ClamAV checker task (Tokio)
         let status_clone = app.clamav_status.clone();
         let config_clone = config.clone();
@@ -937,7 +954,9 @@ impl App {
                 self.status_message = format!("Failed to set priority: {}", e);
             } else {
                 self.status_message = format!("Priority set to {}", new_priority);
-                let _ = self.refresh_jobs(&conn);
+                if let Err(e) = self.refresh_jobs(&conn) {
+                    self.status_message = format!("Failed to refresh jobs: {}", e);
+                }
 
                 if let Some(pos) = self.jobs.iter().position(|j| j.id == job_id)
                     && self.view_mode == ViewMode::Flat

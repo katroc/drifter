@@ -85,7 +85,7 @@ fn default_local_width_percent() -> u16 {
     50
 }
 fn default_history_width() -> u16 {
-    45
+    60
 }
 
 impl Default for Config {
@@ -119,8 +119,8 @@ impl Default for Config {
             theme: Theme::default_name().to_string(),
             scanner_enabled: true,
             host_metrics_enabled: true,
-            local_width_percent: 50,
-            history_width: 60,
+            local_width_percent: default_local_width_percent(),
+            history_width: default_history_width(),
             log_level: "info".to_string(),
         }
     }
@@ -234,8 +234,8 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         host_metrics_enabled: get("host_metrics_enabled")
             .map(|s| s == "true")
             .unwrap_or(true),
-        local_width_percent: get_u16("local_width_percent", get_u16("local_width_percent", 50)), // Fallback to old name for migration
-        history_width: get_u16("history_width", 60),
+        local_width_percent: get_u16("local_width_percent", default_local_width_percent()),
+        history_width: get_u16("history_width", default_history_width()),
         log_level: get_or("log_level", "info"),
     })
 }
@@ -363,6 +363,28 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
 }
 
 impl Config {
+    pub fn has_matching_s3_credentials(&self) -> bool {
+        let access_ok = self
+            .s3_access_key
+            .as_ref()
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
+        // Presence check only: avoid touching secret contents in UI readiness logic.
+        let secret_ok = self.s3_secret_key.is_some();
+
+        !(access_ok ^ secret_ok)
+    }
+
+    pub fn is_s3_ready(&self) -> bool {
+        let bucket_ok = self
+            .s3_bucket
+            .as_ref()
+            .map(|b| !b.trim().is_empty())
+            .unwrap_or(false);
+
+        bucket_ok && self.has_matching_s3_credentials()
+    }
+
     /// Validate configuration values
     /// Returns errors for invalid configurations
     #[allow(dead_code)]

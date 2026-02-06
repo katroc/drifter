@@ -13,7 +13,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::utils::{lock_async_mutex, lock_mutex};
 use std::collections::HashMap;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct ProgressInfo {
@@ -27,8 +27,6 @@ pub struct ProgressInfo {
 pub struct Coordinator {
     conn: Arc<Mutex<Connection>>,
     config: Arc<AsyncMutex<Config>>,
-    scanner: Scanner,
-    uploader: Uploader,
     progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>,
     cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
     app_tx: mpsc::Sender<AppEvent>,
@@ -42,25 +40,9 @@ impl Coordinator {
         cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
         app_tx: mpsc::Sender<AppEvent>,
     ) -> Result<Self> {
-        // We need lock to init scanner/uploader but they are just helpers now or cheap to init
-        // Note: Initializing services might need config, but for now we assume they don't deep copy config state
-        // OR we need to async lock here. But new() is sync.
-        // Scanner/Uploader::new take &Config.
-        // Block on the lock since we are in initialization phase (likely sync main) or create detached?
-        // Actually Uploader::new takes &Config but just creates Self {}. It doesn't use it.
-        // Scanner::new takes &Config and stores clamav host/port.
-        // We need to peek at config.
-
-        let cfg = futures::executor::block_on(config.lock());
-        let scanner = Scanner::new(&cfg);
-        let uploader = Uploader::new(&cfg);
-        drop(cfg);
-
         Ok(Self {
             conn,
             config,
-            scanner,
-            uploader,
             progress,
             cancellation_tokens,
             app_tx,
@@ -152,7 +134,9 @@ impl Coordinator {
             if let Some(job) = queued_job {
                 let coord = self.clone();
                 tokio::spawn(async move {
-                    let _ = coord.process_scan(&job).await;
+                    if let Err(e) = coord.process_scan(&job).await {
+                        error!("Scan orchestration failed for job {}: {}", job.id, e);
+                    }
                 });
             }
         }
@@ -181,7 +165,9 @@ impl Coordinator {
             if let Some(job) = scanned_job {
                 let coord = self.clone();
                 tokio::spawn(async move {
-                    let _ = coord.process_upload(&job).await;
+                    if let Err(e) = coord.process_upload(&job).await {
+                        error!("Upload orchestration failed for job {}: {}", job.id, e);
+                    }
                 });
             }
         }
@@ -199,8 +185,13 @@ impl Coordinator {
             }
         };
 
+        let scanner = {
+            let cfg = lock_async_mutex(&self.config).await.clone();
+            Scanner::new(&cfg)
+        };
+
         let start_time = std::time::Instant::now();
-        match self.scanner.scan_file(path).await {
+        match scanner.scan_file(path).await {
             Ok(ScanResult::Clean) => {
                 let duration = start_time.elapsed().as_millis() as i64;
                 let conn = lock_mutex(&self.conn)?;
@@ -222,8 +213,13 @@ impl Coordinator {
                     )
                 };
 
-                if !quarantine_dir.exists() {
-                    let _ = std::fs::create_dir_all(&quarantine_dir);
+                if !quarantine_dir.exists()
+                    && let Err(e) = std::fs::create_dir_all(&quarantine_dir)
+                {
+                    error!(
+                        "Failed to create quarantine directory {:?}: {}",
+                        quarantine_dir, e
+                    );
                 }
 
                 let file_name = std::path::Path::new(path).file_name();
@@ -250,12 +246,17 @@ impl Coordinator {
                         &format!("Infected: {}", virus_name),
                     )?;
 
-                    if !quarantine_path_str.is_empty() {
-                        let _ = db::update_job_staged(
+                    if !quarantine_path_str.is_empty()
+                        && let Err(e) = db::update_job_staged(
                             &conn,
                             job.id,
                             &quarantine_path_str,
                             "quarantined",
+                        )
+                    {
+                        warn!(
+                            "Failed to update quarantined staged path for job {}: {}",
+                            job.id, e
                         );
                     }
                     db::insert_event(
@@ -288,6 +289,7 @@ impl Coordinator {
             let config_guard = lock_async_mutex(&self.config).await;
             config_guard.clone()
         };
+        let uploader = Uploader::new(&config);
 
         // Set status to "uploading" BEFORE starting upload
         {
@@ -303,8 +305,7 @@ impl Coordinator {
         }
 
         let start_time = std::time::Instant::now();
-        let res = self
-            .uploader
+        let res = uploader
             .upload_file(
                 &config,
                 &path,
@@ -340,16 +341,18 @@ impl Coordinator {
 
                 let staged_path = std::path::Path::new(&path);
                 if job.source_path != path {
-                    let _ = std::fs::remove_file(staged_path);
+                    Self::remove_file_if_exists(staged_path, "staged file");
                     if let Some(parent) = staged_path.parent() {
-                        let _ = std::fs::remove_dir(parent);
+                        Self::remove_dir_if_exists(parent, "staging directory");
                     }
                 } else if config.delete_source_after_upload {
-                    let _ = std::fs::remove_file(staged_path);
+                    Self::remove_file_if_exists(staged_path, "source file");
                 }
 
                 // Signal TUI to refresh remote panel
-                let _ = self.app_tx.send(AppEvent::RefreshRemote);
+                if let Err(e) = self.app_tx.send(AppEvent::RefreshRemote) {
+                    warn!("Failed to send RefreshRemote event: {}", e);
+                }
 
                 self.check_and_report(&job.session_id).await?;
             }
@@ -434,6 +437,23 @@ impl Coordinator {
     /// Results: 5s, 10s, 20s, 40s, 80s...
     pub fn calculate_backoff_seconds(retry_count: i64) -> u64 {
         5 * (2_u64.pow(retry_count as u32))
+    }
+
+    fn remove_file_if_exists(path: &std::path::Path, label: &str) {
+        if let Err(e) = std::fs::remove_file(path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!("Failed to remove {} {:?}: {}", label, path, e);
+        }
+    }
+
+    fn remove_dir_if_exists(path: &std::path::Path, label: &str) {
+        if let Err(e) = std::fs::remove_dir(path)
+            && e.kind() != std::io::ErrorKind::NotFound
+            && e.kind() != std::io::ErrorKind::DirectoryNotEmpty
+        {
+            warn!("Failed to remove {} {:?}: {}", label, path, e);
+        }
     }
 }
 

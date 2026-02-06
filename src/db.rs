@@ -5,8 +5,12 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tracing::{debug, error, info, warn};
+
+static ENCRYPTION_KEY: OnceLock<[u8; 32]> = OnceLock::new();
+static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct JobRow {
@@ -43,6 +47,18 @@ pub struct UploadPart {
 
 pub fn init_db(state_dir: &str) -> Result<Connection> {
     debug!("Initializing database in: {}", state_dir);
+    let configured_state_dir = PathBuf::from(state_dir);
+    if let Some(existing) = STATE_DIR.get() {
+        if existing != &configured_state_dir {
+            warn!(
+                "State dir already set to {:?}; ignoring new value {:?}",
+                existing, configured_state_dir
+            );
+        }
+    } else {
+        let _ = STATE_DIR.set(configured_state_dir.clone());
+    }
+
     if !Path::new(state_dir).exists() {
         info!("Creating state directory: {}", state_dir);
         fs::create_dir_all(state_dir).context("create state dir")?;
@@ -53,7 +69,7 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
     if let Err(e) = conn.execute_batch(
         "
         PRAGMA journal_mode = WAL;
-        PRAGMA foreign_keys = OFF;
+        PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT NOT NULL DEFAULT 'legacy',
@@ -119,29 +135,56 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
     }
 
     // Migration for existing databases
-    let _ = conn.execute(
+    apply_optional_migration(
+        &conn,
         "ALTER TABLE jobs ADD COLUMN session_id TEXT DEFAULT 'legacy'",
-        [],
-    );
-    let _ = conn.execute("ALTER TABLE jobs ADD COLUMN s3_upload_id TEXT", []);
+    )?;
+    apply_optional_migration(&conn, "ALTER TABLE jobs ADD COLUMN s3_upload_id TEXT")?;
     // Migration for priority
-    let _ = conn.execute("ALTER TABLE jobs ADD COLUMN priority INTEGER DEFAULT 0", []);
+    apply_optional_migration(
+        &conn,
+        "ALTER TABLE jobs ADD COLUMN priority INTEGER DEFAULT 0",
+    )?;
     // Migration for checksums
-    let _ = conn.execute("ALTER TABLE jobs ADD COLUMN checksum TEXT", []);
-    let _ = conn.execute("ALTER TABLE jobs ADD COLUMN remote_checksum TEXT", []);
-    let _ = conn.execute("ALTER TABLE parts ADD COLUMN checksum_sha256 TEXT", []);
+    apply_optional_migration(&conn, "ALTER TABLE jobs ADD COLUMN checksum TEXT")?;
+    apply_optional_migration(&conn, "ALTER TABLE jobs ADD COLUMN remote_checksum TEXT")?;
+    apply_optional_migration(&conn, "ALTER TABLE parts ADD COLUMN checksum_sha256 TEXT")?;
     // Migration for retries
-    let _ = conn.execute(
+    apply_optional_migration(
+        &conn,
         "ALTER TABLE jobs ADD COLUMN retry_count INTEGER DEFAULT 0",
-        [],
-    );
-    let _ = conn.execute("ALTER TABLE jobs ADD COLUMN next_retry_at TEXT", []);
+    )?;
+    apply_optional_migration(&conn, "ALTER TABLE jobs ADD COLUMN next_retry_at TEXT")?;
     // Migration for timing
-    let _ = conn.execute("ALTER TABLE jobs ADD COLUMN scan_duration_ms INTEGER", []);
-    let _ = conn.execute("ALTER TABLE jobs ADD COLUMN upload_duration_ms INTEGER", []);
+    apply_optional_migration(
+        &conn,
+        "ALTER TABLE jobs ADD COLUMN scan_duration_ms INTEGER",
+    )?;
+    apply_optional_migration(
+        &conn,
+        "ALTER TABLE jobs ADD COLUMN upload_duration_ms INTEGER",
+    )?;
 
     info!("Database initialized successfully at {:?}", db_path);
     Ok(conn)
+}
+
+fn apply_optional_migration(conn: &Connection, sql: &str) -> Result<()> {
+    match conn.execute(sql, []) {
+        Ok(_) => {
+            info!("Applied migration: {}", sql);
+            Ok(())
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("duplicate column name") {
+                debug!("Skipping existing migration '{}': {}", sql, msg);
+                Ok(())
+            } else {
+                Err(e).with_context(|| format!("Migration failed: {}", sql))
+            }
+        }
+    }
 }
 
 pub const JOB_COLUMNS: &str = "id, session_id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, upload_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at, scan_duration_ms, upload_duration_ms";
@@ -343,7 +386,10 @@ pub fn retry_job(conn: &Connection, job_id: i64) -> Result<()> {
     let mut rows = stmt.query(params![job_id])?;
     if let Some(row) = rows.next()? {
         let status: Option<String> = row.get(0)?;
-        if status.as_deref() == Some("completed") {
+        if status.as_deref() == Some("completed")
+            || status.as_deref() == Some("clean")
+            || status.as_deref() == Some("scanned")
+        {
             scan_completed = true;
         }
     }
@@ -372,10 +418,15 @@ pub fn retry_job(conn: &Connection, job_id: i64) -> Result<()> {
 
 pub fn delete_job(conn: &Connection, job_id: i64) -> Result<()> {
     info!("Deleting job ID {}", job_id);
-    // Delete associated events first (foreign key constraint)
-    conn.execute("DELETE FROM events WHERE job_id = ?", params![job_id])?;
-    // Delete the job
-    conn.execute("DELETE FROM jobs WHERE id = ?", params![job_id])?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM parts WHERE upload_id IN (SELECT id FROM uploads WHERE job_id = ?)",
+        params![job_id],
+    )?;
+    tx.execute("DELETE FROM uploads WHERE job_id = ?", params![job_id])?;
+    tx.execute("DELETE FROM events WHERE job_id = ?", params![job_id])?;
+    tx.execute("DELETE FROM jobs WHERE id = ?", params![job_id])?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -607,14 +658,12 @@ fn deobfuscate_legacy(input: &str) -> Result<String> {
 }
 
 fn get_or_create_key() -> Result<[u8; 32]> {
-    use std::sync::OnceLock;
-    static CACHED_KEY: OnceLock<[u8; 32]> = OnceLock::new();
-
-    if let Some(key) = CACHED_KEY.get() {
+    if let Some(key) = ENCRYPTION_KEY.get() {
         return Ok(*key);
     }
 
-    let keyfile = Path::new("./state/keyfile");
+    let keyfile = state_dir().join("keyfile");
+    let keyfile = keyfile.as_path();
     let key = if keyfile.exists() {
         let data = fs::read(keyfile).context("read keyfile")?;
         match <[u8; 32]>::try_from(data.as_slice()) {
@@ -628,8 +677,15 @@ fn get_or_create_key() -> Result<[u8; 32]> {
         generate_and_write_keyfile(keyfile)?
     };
 
-    let _ = CACHED_KEY.set(key);
+    let _ = ENCRYPTION_KEY.set(key);
     Ok(key)
+}
+
+fn state_dir() -> PathBuf {
+    STATE_DIR
+        .get()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("./state"))
 }
 
 fn generate_and_write_keyfile(keyfile: &Path) -> Result<[u8; 32]> {

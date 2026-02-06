@@ -1,4 +1,5 @@
 use crate::core::config::Config;
+mod helpers;
 
 use crate::services::ingest::ingest_path;
 use crate::services::uploader::S3Object;
@@ -29,6 +30,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use self::helpers::{
+    adjust_layout_dimension, prepare_remote_delete, request_remote_list,
+    reset_all_layout_dimensions, reset_layout_dimension, s3_ready, selected_remote_object,
+    start_remote_download, update_layout_message,
+};
 use crate::app::settings::{SettingsCategory, SettingsState};
 use crate::app::state::{
     App, AppEvent, AppFocus, AppTab, HistoryFilter, InputMode, LayoutTarget, ModalAction, ViewMode,
@@ -39,6 +45,7 @@ use crate::ui::util::{calculate_list_offset, fuzzy_match};
 use crate::utils::lock_mutex;
 
 use tokio::sync::Mutex as AsyncMutex;
+use tracing::warn;
 
 pub struct TuiArgs {
     pub conn_mutex: Arc<Mutex<Connection>>,
@@ -301,7 +308,10 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     "History cleared ({})",
                                                     app.history_filter.as_str()
                                                 );
-                                                let _ = app.refresh_jobs(&conn);
+                                                if let Err(e) = app.refresh_jobs(&conn) {
+                                                    app.status_message =
+                                                        format!("Refresh failed: {}", e);
+                                                }
                                             }
                                         }
                                         ModalAction::CancelJob(id) => {
@@ -314,11 +324,18 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                                             // Update DB status (Soft Delete / Cancel)
                                             let conn = lock_mutex(&conn_mutex)?;
-                                            let _ = crate::db::cancel_job(&conn, id);
-                                            app.status_message = format!("Cancelled job {}", id);
-
-                                            // Refresh to update list
-                                            let _ = app.refresh_jobs(&conn);
+                                            if let Err(e) = crate::db::cancel_job(&conn, id) {
+                                                app.status_message =
+                                                    format!("Failed to cancel job {}: {}", id, e);
+                                            } else {
+                                                app.status_message =
+                                                    format!("Cancelled job {}", id);
+                                                // Refresh to update list
+                                                if let Err(e) = app.refresh_jobs(&conn) {
+                                                    app.status_message =
+                                                        format!("Refresh failed: {}", e);
+                                                }
+                                            }
                                         }
                                         ModalAction::DeleteRemoteObject(key, path_context) => {
                                             app.status_message = format!("Deleting {}...", key);
@@ -355,8 +372,14 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                                                 match res {
                                                     Ok(msg) => {
-                                                        let _ =
-                                                            tx.send(AppEvent::Notification(msg));
+                                                        if let Err(send_err) =
+                                                            tx.send(AppEvent::Notification(msg))
+                                                        {
+                                                            warn!(
+                                                                "Failed to send delete notification: {}",
+                                                                send_err
+                                                            );
+                                                        }
 
                                                         // 2. Refresh the list using the SAME runtime
                                                         let path_arg = if path_context.is_empty() {
@@ -366,18 +389,48 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         };
                                                         let res_list = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, path_arg).await;
 
-                                                        if let Ok(files) = res_list {
-                                                            let _ =
-                                                                tx.send(AppEvent::RemoteFileList(
-                                                                    path_context.clone(),
-                                                                    files,
-                                                                ));
+                                                        match res_list {
+                                                            Ok(files) => {
+                                                                if let Err(send_err) = tx.send(
+                                                                    AppEvent::RemoteFileList(
+                                                                        path_context.clone(),
+                                                                        files,
+                                                                    ),
+                                                                ) {
+                                                                    warn!(
+                                                                        "Failed to send remote refresh after delete: {}",
+                                                                        send_err
+                                                                    );
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                if let Err(send_err) =
+                                                                    tx.send(AppEvent::Notification(
+                                                                        format!(
+                                                                            "Refresh Failed: {}",
+                                                                            e
+                                                                        ),
+                                                                    ))
+                                                                {
+                                                                    warn!(
+                                                                        "Failed to send remote refresh error notification: {}",
+                                                                        send_err
+                                                                    );
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                     Err(e) => {
-                                                        let _ = tx.send(AppEvent::Notification(
-                                                            format!("Delete Failed: {}", e),
-                                                        ));
+                                                        if let Err(send_err) =
+                                                            tx.send(AppEvent::Notification(
+                                                                format!("Delete Failed: {}", e),
+                                                            ))
+                                                        {
+                                                            warn!(
+                                                                "Failed to send delete failure notification: {}",
+                                                                send_err
+                                                            );
+                                                        }
                                                     }
                                                 }
                                             });
@@ -468,13 +521,26 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                                         {
                                             let conn = lock_mutex(&conn_mutex)?;
-                                            let _ =
-                                                crate::core::config::save_config_to_db(&conn, &cfg);
+                                            if let Err(e) =
+                                                crate::core::config::save_config_to_db(&conn, &cfg)
+                                            {
+                                                app.status_message =
+                                                    format!("Failed to save setup config: {}", e);
+                                            }
                                         }
 
                                         // Create directories if they don't exist
-                                        let _ = std::fs::create_dir_all(&cfg.quarantine_dir);
-                                        let _ = std::fs::create_dir_all(&cfg.state_dir);
+                                        if let Err(e) = std::fs::create_dir_all(&cfg.quarantine_dir)
+                                        {
+                                            app.status_message = format!(
+                                                "Failed to create quarantine directory: {}",
+                                                e
+                                            );
+                                        }
+                                        if let Err(e) = std::fs::create_dir_all(&cfg.state_dir) {
+                                            app.status_message =
+                                                format!("Failed to create state directory: {}", e);
+                                        }
 
                                         // Update shared config
                                         let mut shared_cfg = app.config.lock().await;
@@ -696,11 +762,17 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             match crate::services::uploader::Uploader::create_folder(&config, &folder_key).await {
                                                 Ok(_) => {
                                                     // Refresh list
-                                                    let _ = tx.send(AppEvent::RefreshRemote);
-                                                    let _ = tx.send(AppEvent::Notification(format!("Created folder '{}'", folder_name_clone)));
+                                                    if let Err(send_err) = tx.send(AppEvent::RefreshRemote) {
+                                                        warn!("Failed to send RefreshRemote after folder create: {}", send_err);
+                                                    }
+                                                    if let Err(send_err) = tx.send(AppEvent::Notification(format!("Created folder '{}'", folder_name_clone))) {
+                                                        warn!("Failed to send folder created notification: {}", send_err);
+                                                    }
                                                 }
                                                 Err(e) => {
-                                                    let _ = tx.send(AppEvent::Notification(format!("Failed to create folder: {}", e)));
+                                                    if let Err(send_err) = tx.send(AppEvent::Notification(format!("Failed to create folder: {}", e))) {
+                                                        warn!("Failed to send folder creation failure notification: {}", send_err);
+                                                    }
                                                 }
                                             }
                                         });
@@ -828,6 +900,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     {
                                                         // Only queue files on Enter or 'l', not Right arrow
                                                         let conn_clone = conn_mutex.clone();
+                                                        let tx = app.async_tx.clone();
                                                         let path = entry
                                                             .path
                                                             .to_string_lossy()
@@ -836,13 +909,25 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         tokio::spawn(async move {
                                                             let session_id =
                                                                 Uuid::new_v4().to_string();
-                                                            let _ = ingest_path(
+                                                            if let Err(e) = ingest_path(
                                                                 conn_clone,
                                                                 &path,
                                                                 &session_id,
                                                                 None,
                                                             )
-                                                            .await;
+                                                            .await
+                                                                && let Err(send_err) = tx.send(
+                                                                    AppEvent::Notification(format!(
+                                                                        "Failed to queue file: {}",
+                                                                        e
+                                                                    )),
+                                                                )
+                                                            {
+                                                                warn!(
+                                                                    "Failed to send queue failure notification: {}",
+                                                                    send_err
+                                                                );
+                                                            }
                                                         });
 
                                                         app.status_message =
@@ -1063,7 +1148,10 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 app.status_message =
                                                     format!("Switched to {:?} View", app.view_mode);
                                                 let conn = lock_mutex(&conn_mutex)?;
-                                                let _ = app.refresh_jobs(&conn);
+                                                if let Err(e) = app.refresh_jobs(&conn) {
+                                                    app.status_message =
+                                                        format!("Refresh failed: {}", e);
+                                                }
                                             }
                                             KeyCode::Char('p') => {
                                                 app.toggle_pause_selected_job().await;
@@ -1081,7 +1169,10 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             }
                                             KeyCode::Char('R') => {
                                                 let conn = lock_mutex(&conn_mutex)?;
-                                                let _ = app.refresh_jobs(&conn);
+                                                if let Err(e) = app.refresh_jobs(&conn) {
+                                                    app.status_message =
+                                                        format!("Refresh failed: {}", e);
+                                                }
                                             }
                                             KeyCode::Char('r') => {
                                                 if !app.visual_jobs.is_empty()
@@ -1091,9 +1182,14 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 {
                                                     let id = app.jobs[idx].id;
                                                     let conn = lock_mutex(&conn_mutex)?;
-                                                    let _ = crate::db::retry_job(&conn, id);
-                                                    app.status_message =
-                                                        format!("Retried job {}", id);
+                                                    if let Err(e) = crate::db::retry_job(&conn, id)
+                                                    {
+                                                        app.status_message =
+                                                            format!("Retry failed: {}", e);
+                                                    } else {
+                                                        app.status_message =
+                                                            format!("Retried job {}", id);
+                                                    }
                                                 }
                                             }
                                             KeyCode::Char('d') | KeyCode::Delete => {
@@ -1121,10 +1217,24 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     } else {
                                                         // Just do it (Soft delete/Cancel)
                                                         let conn = lock_mutex(&conn_mutex)?;
-                                                        let _ = crate::db::cancel_job(&conn, id);
-                                                        app.status_message =
-                                                            format!("Removed job {}", id);
-                                                        let _ = app.refresh_jobs(&conn);
+                                                        if let Err(e) =
+                                                            crate::db::cancel_job(&conn, id)
+                                                        {
+                                                            app.status_message = format!(
+                                                                "Failed to remove job {}: {}",
+                                                                id, e
+                                                            );
+                                                        } else {
+                                                            app.status_message =
+                                                                format!("Removed job {}", id);
+                                                            if let Err(e) = app.refresh_jobs(&conn)
+                                                            {
+                                                                app.status_message = format!(
+                                                                    "Refresh failed: {}",
+                                                                    e
+                                                                );
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1138,13 +1248,31 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     .map(|j| j.id)
                                                     .collect();
                                                 let count = ids_to_delete.len();
+                                                let mut failed = 0usize;
                                                 for id in ids_to_delete {
-                                                    let _ = crate::db::delete_job(&conn, id);
+                                                    if let Err(e) = crate::db::delete_job(&conn, id)
+                                                    {
+                                                        failed += 1;
+                                                        tracing::error!(
+                                                            "Failed deleting completed job {}: {}",
+                                                            id,
+                                                            e
+                                                        );
+                                                    }
                                                 }
-                                                if count > 0 {
+                                                if count > 0 && failed == 0 {
                                                     app.status_message =
                                                         format!("Cleared {} completed jobs", count);
-                                                    let _ = app.refresh_jobs(&conn);
+                                                    if let Err(e) = app.refresh_jobs(&conn) {
+                                                        app.status_message =
+                                                            format!("Refresh failed: {}", e);
+                                                    }
+                                                } else if failed > 0 {
+                                                    app.status_message = format!(
+                                                        "Cleared {} jobs ({} failed)",
+                                                        count.saturating_sub(failed),
+                                                        failed
+                                                    );
                                                 }
                                             }
                                             _ => {}
@@ -1199,7 +1327,10 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     ViewMode::Tree => ViewMode::Flat,
                                                 };
                                                 let conn = lock_mutex(&conn_mutex)?;
-                                                let _ = app.refresh_jobs(&conn);
+                                                if let Err(e) = app.refresh_jobs(&conn) {
+                                                    app.status_message =
+                                                        format!("Refresh failed: {}", e);
+                                                }
                                             }
                                             KeyCode::Char('/') => {
                                                 app.input_mode = InputMode::HistorySearch;
@@ -1215,7 +1346,10 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     app.history_filter.as_str()
                                                 );
                                                 let conn = lock_mutex(&conn_mutex)?;
-                                                let _ = app.refresh_jobs(&conn);
+                                                if let Err(e) = app.refresh_jobs(&conn) {
+                                                    app.status_message =
+                                                        format!("Refresh failed: {}", e);
+                                                }
                                             }
                                             KeyCode::Char('c') => {
                                                 // Trigger confirmation logic for History
@@ -1241,14 +1375,22 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     let job = &app.history[idx];
                                                     let id = job.id;
                                                     let conn = lock_mutex(&conn_mutex)?;
-                                                    let _ = crate::db::delete_job(&conn, id);
-                                                    let _ = app.refresh_jobs(&conn);
-                                                    // Auto-fix happens in refresh_jobs
+                                                    if let Err(e) = crate::db::delete_job(&conn, id)
+                                                    {
+                                                        app.status_message =
+                                                            format!("Delete failed: {}", e);
+                                                    } else if let Err(e) = app.refresh_jobs(&conn) {
+                                                        app.status_message =
+                                                            format!("Refresh failed: {}", e);
+                                                    }
                                                 }
                                             }
                                             KeyCode::Char('R') => {
                                                 let conn = lock_mutex(&conn_mutex)?;
-                                                let _ = app.refresh_jobs(&conn);
+                                                if let Err(e) = app.refresh_jobs(&conn) {
+                                                    app.status_message =
+                                                        format!("Refresh failed: {}", e);
+                                                }
                                             }
                                             _ => {}
                                         }
@@ -1300,21 +1442,36 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                         let q_path = job.staged_path.clone();
 
                                         let conn = lock_mutex(&conn_mutex)?;
-                                        let _ = crate::db::update_scan_status(
+                                        let mut quarantine_removed = true;
+                                        if let Err(e) = crate::db::update_scan_status(
                                             &conn,
                                             id,
                                             "removed",
                                             "quarantined_removed",
-                                        );
-
-                                        if let Some(p) = q_path {
-                                            let _ = std::fs::remove_file(p);
+                                        ) {
+                                            quarantine_removed = false;
+                                            app.status_message = format!(
+                                                "Failed to update quarantine status: {}",
+                                                e
+                                            );
                                         }
 
-                                        app.status_message = format!(
-                                            "Threat neutralized: File '{}' deleted",
-                                            job.source_path
-                                        );
+                                        if let Some(p) = q_path
+                                            && let Err(e) = std::fs::remove_file(&p)
+                                        {
+                                            quarantine_removed = false;
+                                            app.status_message = format!(
+                                                "Failed to remove quarantined file {}: {}",
+                                                p, e
+                                            );
+                                        }
+
+                                        if quarantine_removed {
+                                            app.status_message = format!(
+                                                "Threat neutralized: File '{}' deleted",
+                                                job.source_path
+                                            );
+                                        }
 
                                         if app.selected_quarantine >= app.quarantine.len()
                                             && app.selected_quarantine > 0
@@ -1325,7 +1482,9 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                 }
                                 KeyCode::Char('R') => {
                                     let conn = lock_mutex(&conn_mutex)?;
-                                    let _ = app.refresh_jobs(&conn);
+                                    if let Err(e) = app.refresh_jobs(&conn) {
+                                        app.status_message = format!("Refresh failed: {}", e);
+                                    }
                                 }
                                 _ => {}
                             },
@@ -1347,126 +1506,23 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             app.status_message = "Browsing Remote...".to_string();
                                         }
                                         KeyCode::Char('d') => {
-                                            if !app.s3_objects.is_empty()
-                                                && app.selected_remote < app.s3_objects.len()
-                                            {
-                                                let key =
-                                                    app.s3_objects[app.selected_remote].key.clone();
-                                                let is_dir =
-                                                    app.s3_objects[app.selected_remote].is_dir;
-
-                                                if is_dir {
-                                                    app.status_message =
+                                            if let Some(obj) = selected_remote_object(&app) {
+                                                if obj.is_dir {
+                                                    app.set_status(
                                                         "Cannot download directories yet."
-                                                            .to_string();
-                                                } else {
-                                                    app.status_message =
-                                                        format!("Downloading {}...", key);
-                                                    let tx = app.async_tx.clone();
-                                                    let config_clone =
-                                                        app.config.lock().await.clone();
-
-                                                    let download_dir = dirs::download_dir()
-                                                        .unwrap_or(PathBuf::from("."));
-                                                    let dest = download_dir.join(
-                                                        std::path::Path::new(&key)
-                                                            .file_name()
-                                                            .unwrap_or(std::ffi::OsStr::new(
-                                                                "downloaded_file",
-                                                            )),
+                                                            .to_string(),
                                                     );
-                                                    let dest_clone = dest.clone();
-
-                                                    tokio::spawn(async move {
-                                                        let res = crate::services::uploader::Uploader::download_file(&config_clone, &key, &dest_clone).await;
-                                                        match res {
-                                                            Ok(_) => {
-                                                                let _ = tx.send(
-                                                                    AppEvent::Notification(
-                                                                        format!(
-                                                                            "Downloaded to {:?}",
-                                                                            dest_clone
-                                                                        ),
-                                                                    ),
-                                                                );
-                                                            }
-                                                            Err(e) => {
-                                                                let _ = tx.send(
-                                                                    AppEvent::Notification(
-                                                                        format!(
-                                                                            "Download Failed: {}",
-                                                                            e
-                                                                        ),
-                                                                    ),
-                                                                );
-                                                            }
-                                                        }
-                                                    });
+                                                } else {
+                                                    start_remote_download(&mut app, obj.key).await;
                                                 }
                                             }
                                         }
                                         KeyCode::Char('x') => {
-                                            if !app.s3_objects.is_empty()
-                                                && app.selected_remote < app.s3_objects.len()
-                                            {
-                                                let obj = &app.s3_objects[app.selected_remote];
-                                                let key = obj.key.clone();
-
-                                                if obj.is_dir {
-                                                    let dir_key = if key.ends_with('/') {
-                                                        key.clone()
-                                                    } else {
-                                                        format!("{}/", key)
-                                                    };
-                                                    let config_clone =
-                                                        app.config.lock().await.clone();
-                                                    match crate::services::uploader::Uploader::is_folder_empty(
-                                                        &config_clone,
-                                                        &dir_key,
-                                                    )
-                                                    .await
-                                                    {
-                                                        Ok(true) => {
-                                                            app.input_mode = InputMode::Confirmation;
-                                                            app.pending_action =
-                                                                ModalAction::DeleteRemoteObject(
-                                                                    dir_key.clone(),
-                                                                    app.remote_current_path.clone(),
-                                                                );
-                                                            app.confirmation_msg = format!(
-                                                                "Delete empty folder '{}'?",
-                                                                obj.name
-                                                            );
-                                                        }
-                                                        Ok(false) => {
-                                                            app.input_mode = InputMode::Confirmation;
-                                                            app.pending_action =
-                                                                ModalAction::DeleteRemoteObject(
-                                                                    dir_key.clone(),
-                                                                    app.remote_current_path.clone(),
-                                                                );
-                                                            app.confirmation_msg = format!(
-                                                                "Delete folder '{}' and all contents?",
-                                                                obj.name
-                                                            );
-                                                        }
-                                                        Err(e) => {
-                                                            app.status_message = format!(
-                                                                "Folder check failed: {}",
-                                                                e
-                                                            );
-                                                        }
-                                                    }
-                                                } else {
-                                                    app.input_mode = InputMode::Confirmation;
-                                                    app.pending_action =
-                                                        ModalAction::DeleteRemoteObject(
-                                                            key.clone(),
-                                                            app.remote_current_path.clone(),
-                                                        );
-                                                    app.confirmation_msg =
-                                                        format!("Delete '{}'?", obj.name);
-                                                }
+                                            if let Some(obj) = selected_remote_object(&app) {
+                                                prepare_remote_delete(
+                                                    &mut app, obj.key, obj.name, obj.is_dir,
+                                                )
+                                                .await;
                                             }
                                         }
                                         KeyCode::Char('r') => {
@@ -1537,131 +1593,24 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             }
                                             // Allow downloading/deleting in browsing mode too
                                             KeyCode::Char('d') => {
-                                                if !app.s3_objects.is_empty()
-                                                    && app.selected_remote < app.s3_objects.len()
-                                                {
-                                                    let key = app.s3_objects[app.selected_remote]
-                                                        .key
-                                                        .clone();
-                                                    let is_dir =
-                                                        app.s3_objects[app.selected_remote].is_dir;
-
-                                                    if is_dir {
-                                                        app.status_message =
+                                                if let Some(obj) = selected_remote_object(&app) {
+                                                    if obj.is_dir {
+                                                        app.set_status(
                                                             "Cannot download directories yet."
-                                                                .to_string();
-                                                    } else {
-                                                        app.status_message =
-                                                            format!("Downloading {}...", key);
-                                                        let tx = app.async_tx.clone();
-                                                        let config_clone =
-                                                            app.config.lock().await.clone();
-
-                                                        let download_dir = dirs::download_dir()
-                                                            .unwrap_or(PathBuf::from("."));
-                                                        let dest = download_dir.join(
-                                                            std::path::Path::new(&key)
-                                                                .file_name()
-                                                                .unwrap_or(std::ffi::OsStr::new(
-                                                                    "downloaded_file",
-                                                                )),
+                                                                .to_string(),
                                                         );
-                                                        let dest_clone = dest.clone();
-
-                                                        tokio::spawn(async move {
-                                                            let res = crate::services::uploader::Uploader::download_file(&config_clone, &key, &dest_clone).await;
-                                                            match res {
-                                                                Ok(_) => {
-                                                                    let _ = tx.send(
-                                                                    AppEvent::Notification(
-                                                                        format!(
-                                                                            "Downloaded to {:?}",
-                                                                            dest_clone
-                                                                        ),
-                                                                    ),
-                                                                );
-                                                                }
-                                                                Err(e) => {
-                                                                    let _ = tx.send(
-                                                                    AppEvent::Notification(
-                                                                        format!(
-                                                                            "Download Failed: {}",
-                                                                            e
-                                                                        ),
-                                                                    ),
-                                                                );
-                                                                }
-                                                            }
-                                                        });
+                                                    } else {
+                                                        start_remote_download(&mut app, obj.key)
+                                                            .await;
                                                     }
                                                 }
                                             }
                                             KeyCode::Char('x') => {
-                                                if !app.s3_objects.is_empty()
-                                                    && app.selected_remote < app.s3_objects.len()
-                                                {
-                                                    let obj = &app.s3_objects[app.selected_remote];
-                                                    let key = obj.key.clone();
-
-                                                    if obj.is_dir {
-                                                        let dir_key = if key.ends_with('/') {
-                                                            key.clone()
-                                                        } else {
-                                                            format!("{}/", key)
-                                                        };
-                                                        let config_clone =
-                                                            app.config.lock().await.clone();
-                                                        match crate::services::uploader::Uploader::is_folder_empty(
-                                                            &config_clone,
-                                                            &dir_key,
-                                                        )
-                                                        .await
-                                                        {
-                                                            Ok(true) => {
-                                                                app.input_mode =
-                                                                    InputMode::Confirmation;
-                                                                app.pending_action =
-                                                                    ModalAction::DeleteRemoteObject(
-                                                                        dir_key.clone(),
-                                                                        app.remote_current_path
-                                                                            .clone(),
-                                                                    );
-                                                                app.confirmation_msg = format!(
-                                                                    "Delete empty folder '{}'?",
-                                                                    obj.name
-                                                                );
-                                                            }
-                                                            Ok(false) => {
-                                                                app.input_mode =
-                                                                    InputMode::Confirmation;
-                                                                app.pending_action =
-                                                                    ModalAction::DeleteRemoteObject(
-                                                                        dir_key.clone(),
-                                                                        app.remote_current_path
-                                                                            .clone(),
-                                                                    );
-                                                                app.confirmation_msg = format!(
-                                                                    "Delete folder '{}' and all contents?",
-                                                                    obj.name
-                                                                );
-                                                            }
-                                                            Err(e) => {
-                                                                app.status_message = format!(
-                                                                    "Folder check failed: {}",
-                                                                    e
-                                                                );
-                                                            }
-                                                        }
-                                                    } else {
-                                                        app.input_mode = InputMode::Confirmation;
-                                                        app.pending_action =
-                                                            ModalAction::DeleteRemoteObject(
-                                                                key.clone(),
-                                                                app.remote_current_path.clone(),
-                                                            );
-                                                        app.confirmation_msg =
-                                                            format!("Delete '{}'?", obj.name);
-                                                    }
+                                                if let Some(obj) = selected_remote_object(&app) {
+                                                    prepare_remote_delete(
+                                                        &mut app, obj.key, obj.name, obj.is_dir,
+                                                    )
+                                                    .await;
                                                 }
                                             }
                                             KeyCode::Char('r') => {
@@ -2127,7 +2076,14 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     Ok(s) => s,
                                                     Err(e) => format!("Connection Failed: {}", e),
                                                 };
-                                                let _ = tx.send(AppEvent::Notification(msg));
+                                                if let Err(send_err) =
+                                                    tx.send(AppEvent::Notification(msg))
+                                                {
+                                                    warn!(
+                                                        "Failed to send scanner connection notification: {}",
+                                                        send_err
+                                                    );
+                                                }
                                             });
                                         }
                                     }
@@ -2463,6 +2419,8 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                     } else {
                                                                         let conn_clone =
                                                                             conn_mutex.clone();
+                                                                        let tx =
+                                                                            app.async_tx.clone();
                                                                         let path = entry
                                                                             .path
                                                                             .to_string_lossy()
@@ -2471,13 +2429,25 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                             let session_id =
                                                                                 Uuid::new_v4()
                                                                                     .to_string();
-                                                                            let _ = ingest_path(
+                                                                            if let Err(e) = ingest_path(
                                                                                 conn_clone,
                                                                                 &path,
                                                                                 &session_id,
                                                                                 None,
                                                                             )
-                                                                            .await;
+                                                                            .await
+                                                                                && let Err(send_err) = tx.send(
+                                                                                    AppEvent::Notification(format!(
+                                                                                        "Failed to queue file: {}",
+                                                                                        e
+                                                                                    )),
+                                                                                )
+                                                                            {
+                                                                                warn!(
+                                                                                    "Failed to send queue failure notification: {}",
+                                                                                    send_err
+                                                                                );
+                                                                            }
                                                                         });
                                                                     }
                                                                 }
@@ -2726,9 +2696,13 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                         .apply_to_config(&mut cfg);
                                                                     let conn =
                                                                         lock_mutex(&conn_mutex)?;
-                                                                    let _ = crate::core::config::save_config_to_db(&conn, &cfg);
-                                                                    app.status_message =
-                                                                        "Theme saved".to_string();
+                                                                    if let Err(e) = crate::core::config::save_config_to_db(&conn, &cfg) {
+                                                                        app.status_message =
+                                                                            format!("Failed to save theme: {}", e);
+                                                                    } else {
+                                                                        app.status_message =
+                                                                            "Theme saved".to_string();
+                                                                    }
                                                                     app.last_click_time = None;
                                                                 } else {
                                                                     app.last_click_time = Some(now);
@@ -2817,10 +2791,16 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         let mut cfg = app.config.lock().await;
                                                         app.settings.apply_to_config(&mut cfg);
                                                         let conn = lock_mutex(&conn_mutex)?;
-                                                        let _ =
+                                                        if let Err(e) =
                                                             crate::core::config::save_config_to_db(
                                                                 &conn, &cfg,
+                                                            )
+                                                        {
+                                                            app.status_message = format!(
+                                                                "Failed to save settings: {}",
+                                                                e
                                                             );
+                                                        }
                                                     } else {
                                                         // Double click for other fields
                                                         let now = Instant::now();
@@ -3117,145 +3097,4 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
     )?;
     terminal.show_cursor()?;
     Ok(())
-}
-
-async fn adjust_layout_dimension(
-    config: &Arc<AsyncMutex<Config>>,
-    target: LayoutTarget,
-    delta: i16,
-) {
-    let mut cfg = config.lock().await;
-    match target {
-        LayoutTarget::Local => {
-            cfg.local_width_percent =
-                (cfg.local_width_percent as i16 + delta * 5).clamp(20, 80) as u16;
-        }
-        LayoutTarget::Queue => {
-            // Queue is automatically 100 - local, so adjust local in reverse
-            cfg.local_width_percent =
-                (cfg.local_width_percent as i16 - delta * 5).clamp(20, 80) as u16;
-        }
-        LayoutTarget::History => {
-            cfg.history_width = (cfg.history_width as i16 + delta).clamp(40, 100) as u16;
-        }
-    }
-}
-
-async fn reset_layout_dimension(config: &Arc<AsyncMutex<Config>>, target: LayoutTarget) {
-    let mut cfg = config.lock().await;
-    match target {
-        LayoutTarget::Local | LayoutTarget::Queue => cfg.local_width_percent = 50,
-        LayoutTarget::History => cfg.history_width = 60,
-    }
-}
-
-async fn reset_all_layout_dimensions(config: &Arc<AsyncMutex<Config>>) {
-    let mut cfg = config.lock().await;
-    cfg.local_width_percent = 50;
-    cfg.history_width = 60;
-}
-
-async fn update_layout_message(app: &mut App, target: LayoutTarget) {
-    let cfg = app.config.lock().await;
-    app.layout_adjust_message = match target {
-        LayoutTarget::Local => format!("Local Width: {}% (20-80)", cfg.local_width_percent),
-        LayoutTarget::Queue => format!("Queue Width: {}% (20-80)", 100 - cfg.local_width_percent),
-        LayoutTarget::History => format!("History Width: {} chars (40-100)", cfg.history_width),
-    };
-}
-
-const REMOTE_CACHE_TTL_SECS: u64 = 30;
-
-/// Request remote list with caching and deduplication.
-/// Returns true if a request was initiated, false if served from cache or skipped.
-async fn request_remote_list(app: &mut App, force_refresh: bool) -> bool {
-    let current_path = app.remote_current_path.clone();
-
-    // Check if request is already in-flight for this path
-    if let Some(ref pending) = app.remote_request_pending
-        && pending == &current_path
-    {
-        return false; // Already fetching this path
-    }
-
-    // Check cache (unless force refresh)
-    if !force_refresh
-        && let Some((cached_files, fetched_at)) = app.remote_cache.get(&current_path)
-        && fetched_at.elapsed().as_secs() < REMOTE_CACHE_TTL_SECS
-    {
-        // Cache hit - use cached data
-        let mut files = cached_files.clone();
-        // Prepend ".." entry if not at root
-        if !current_path.is_empty() {
-            files.insert(
-                0,
-                S3Object {
-                    key: "..".to_string(),
-                    name: "..".to_string(),
-                    size: 0,
-                    last_modified: String::new(),
-                    is_dir: true,
-                    is_parent: true,
-                },
-            );
-        }
-        app.s3_objects = files;
-        app.selected_remote = 0;
-        app.set_status(format!("Loaded {} items from cache", app.s3_objects.len()));
-        return false;
-    }
-
-    // Mark as loading and set pending path
-    app.remote_loading = true;
-    app.remote_request_pending = Some(current_path.clone());
-    app.set_status("Loading remote...".to_string());
-
-    let tx = app.async_tx.clone();
-    let config_clone = app.config.lock().await.clone();
-    let path_for_request = current_path.clone();
-
-    tokio::spawn(async move {
-        let path_arg = if path_for_request.is_empty() {
-            None
-        } else {
-            Some(path_for_request.as_str())
-        };
-        let res =
-            crate::services::uploader::Uploader::list_bucket_contents(&config_clone, path_arg)
-                .await;
-        match res {
-            Ok(files) => {
-                let _ = tx.send(AppEvent::RemoteFileList(path_for_request, files));
-            }
-            Err(e) => {
-                let _ = tx.send(AppEvent::Notification(format!("List Failed: {}", e)));
-            }
-        }
-    });
-
-    true
-}
-
-fn s3_ready(config: &Config) -> bool {
-    let bucket_ok = config
-        .s3_bucket
-        .as_ref()
-        .map(|b| !b.trim().is_empty())
-        .unwrap_or(false);
-    if !bucket_ok {
-        return false;
-    }
-
-    let access_ok = config
-        .s3_access_key
-        .as_ref()
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false);
-    let secret_ok = config
-        .s3_secret_key
-        .as_ref()
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false);
-
-    !(access_ok ^ secret_ok)
 }

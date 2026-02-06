@@ -26,11 +26,11 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting Drifter application...");
 
-    // Bootstrap: always use ./state for DB location
-    let state_dir = "./state";
-    std::fs::create_dir_all(state_dir)?;
+    // Bootstrap using default configured state directory.
+    let state_dir = config::Config::default().state_dir;
+    std::fs::create_dir_all(&state_dir)?;
 
-    let conn = init_db(state_dir)?;
+    let conn = init_db(&state_dir)?;
 
     // Check if first run (no settings in DB)
     let needs_wizard = !db::has_settings(&conn)?;

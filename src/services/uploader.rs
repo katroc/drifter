@@ -1,9 +1,11 @@
-use crate::core::config::Config;
+use crate::core::config::{Config, S3KeyMode, SseMode};
 use anyhow::{Context, Result};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};
 use aws_sdk_s3::error::ProvideErrorMetadata;
-use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier};
+use aws_sdk_s3::types::{
+    CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier, ServerSideEncryption,
+};
 use std::path::Path;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -80,6 +82,84 @@ impl Uploader {
         }
         let client = Client::from_conf(client_builder.build());
         Ok((client, bucket.to_string()))
+    }
+
+    fn apply_sse_create_multipart(
+        mut req: aws_sdk_s3::operation::create_multipart_upload::builders::CreateMultipartUploadFluentBuilder,
+        config: &Config,
+    ) -> aws_sdk_s3::operation::create_multipart_upload::builders::CreateMultipartUploadFluentBuilder
+    {
+        match config.sse {
+            SseMode::Off => req,
+            SseMode::S3 => req.server_side_encryption(ServerSideEncryption::Aes256),
+            SseMode::Kms => {
+                req = req.server_side_encryption(ServerSideEncryption::AwsKms);
+                if let Some(kms_key_id) = config.kms_key_id.as_deref().filter(|s| !s.is_empty()) {
+                    req = req.ssekms_key_id(kms_key_id);
+                }
+                req
+            }
+        }
+    }
+
+    fn apply_sse_put_object(
+        mut req: aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder,
+        config: &Config,
+    ) -> aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder {
+        match config.sse {
+            SseMode::Off => req,
+            SseMode::S3 => req.server_side_encryption(ServerSideEncryption::Aes256),
+            SseMode::Kms => {
+                req = req.server_side_encryption(ServerSideEncryption::AwsKms);
+                if let Some(kms_key_id) = config.kms_key_id.as_deref().filter(|s| !s.is_empty()) {
+                    req = req.ssekms_key_id(kms_key_id);
+                }
+                req
+            }
+        }
+    }
+
+    fn derive_key_from_mode(config: &Config, source_path: &str, fallback_path: &Path) -> String {
+        let fallback_name = fallback_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string());
+        let source = Path::new(source_path);
+
+        if matches!(config.s3_key_mode, S3KeyMode::Template)
+            && let Some(template) = config.s3_key_template.as_deref().filter(|s| !s.is_empty())
+        {
+            let filename = source
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| fallback_name.clone());
+            let stem = source
+                .file_stem()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| filename.clone());
+            let ext = source
+                .extension()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+            let rendered = template
+                .replace("{filename}", &filename)
+                .replace("{basename}", &stem)
+                .replace("{ext}", &ext)
+                .replace("{date}", &date)
+                .replace("{source}", source_path);
+
+            let normalized = rendered.trim_matches('/').to_string();
+            if !normalized.is_empty() {
+                return normalized;
+            }
+        }
+
+        source
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or(fallback_name)
     }
 
     pub async fn list_bucket_contents(
@@ -339,14 +419,13 @@ impl Uploader {
             format!("{}/", folder_key)
         };
 
-        client
+        let put_req = client
             .put_object()
             .bucket(&bucket)
             .key(&key)
-            .content_length(0)
-            .send()
-            .await
-            .context("Failed to create folder")?;
+            .content_length(0);
+        let put_req = Self::apply_sse_put_object(put_req, config);
+        put_req.send().await.context("Failed to create folder")?;
 
         info!("Created S3 folder: {}", key);
         Ok(())
@@ -401,23 +480,10 @@ impl Uploader {
                 if let Some(key) = job.s3_key {
                     key
                 } else {
-                    // Fallback to source path filename
-                    let source = Path::new(&job.source_path);
-                    source
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| {
-                            file_path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "file".to_string())
-                        })
+                    Self::derive_key_from_mode(config, &job.source_path, file_path)
                 }
             } else {
-                file_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "file".to_string())
+                Self::derive_key_from_mode(config, path, file_path)
             }
         };
         let key = format!("{}{}", prefix, s3_key_path);
@@ -489,33 +555,32 @@ impl Uploader {
 
         // 2. Create new upload if needed
         if upload_id.is_none() {
-            let create_output = client
+            let create_req = client
                 .create_multipart_upload()
                 .bucket(&bucket)
                 .key(&key)
-                .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::Sha256)
-                .send()
-                .await
-                .map_err(|e| {
-                    let service_err = match e.as_service_error() {
-                        Some(s) => format!(
-                            "{}: {}",
-                            s.code().unwrap_or("Unknown"),
-                            s.message().unwrap_or("No message")
-                        ),
-                        None => e.to_string(),
-                    };
-                    error!(
-                        "Failed to create multipart upload: {} (Bucket: {}, Key: {})",
-                        service_err, bucket, key
-                    );
-                    anyhow::anyhow!(
-                        "Failed to create multipart upload: {} (Bucket: {}, Key: {})",
-                        service_err,
-                        bucket,
-                        key
-                    )
-                })?;
+                .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::Sha256);
+            let create_req = Self::apply_sse_create_multipart(create_req, config);
+            let create_output = create_req.send().await.map_err(|e| {
+                let service_err = match e.as_service_error() {
+                    Some(s) => format!(
+                        "{}: {}",
+                        s.code().unwrap_or("Unknown"),
+                        s.message().unwrap_or("No message")
+                    ),
+                    None => e.to_string(),
+                };
+                error!(
+                    "Failed to create multipart upload: {} (Bucket: {}, Key: {})",
+                    service_err, bucket, key
+                );
+                anyhow::anyhow!(
+                    "Failed to create multipart upload: {} (Bucket: {}, Key: {})",
+                    service_err,
+                    bucket,
+                    key
+                )
+            })?;
 
             let new_uid = create_output
                 .upload_id()

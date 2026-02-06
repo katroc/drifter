@@ -1,9 +1,9 @@
 use crate::app::state::{App, InputMode};
-use crate::ui::theme::Theme;
+use crate::ui::theme::{StatusKind, Theme};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::Modifier,
     text::Line,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
@@ -52,24 +52,26 @@ pub fn render_logs(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             // Basic log level highlighting
             let mut style = theme.text_style();
             if line.contains("ERROR") {
-                style = style.fg(Color::Red);
+                style = theme.status_style(StatusKind::Error);
             } else if line.contains("WARN") {
-                style = style.fg(Color::Yellow);
+                style = theme.status_style(StatusKind::Warning);
             } else if line.contains("INFO") {
-                style = style.fg(Color::Cyan);
+                style = theme.status_style(StatusKind::Info);
             } else if line.contains("DEBUG") {
-                style = style.fg(Color::Blue);
+                style = theme.accent_alt_style();
             } else if line.contains("TRACE") {
-                style = style.fg(Color::Magenta);
+                style = theme.dim_style();
             }
 
             let is_current = !app.log_search_results.is_empty()
                 && app.log_search_results.get(app.log_search_current) == Some(&i);
 
             if is_current {
-                style = style.bg(Color::White).fg(Color::Black); // Explicit highlight
+                style = theme.selection_style();
             } else if is_match {
-                style = style.bg(Color::DarkGray);
+                style = style
+                    .bg(theme.table_row_alt_bg)
+                    .add_modifier(Modifier::BOLD);
             }
 
             // Apply horizontal scroll safely
@@ -102,7 +104,7 @@ pub fn render_logs(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     f.render_stateful_widget(
         List::new(items)
             .block(block)
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+            .highlight_style(theme.selection_style()),
         list_area,
         &mut state,
     );

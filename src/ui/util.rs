@@ -146,6 +146,21 @@ pub fn fuzzy_match(pattern: &str, text: &str) -> bool {
     text.contains(&pattern)
 }
 
+pub fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    if input.chars().count() <= max_chars {
+        return input.to_string();
+    }
+
+    let keep = max_chars.saturating_sub(1);
+    let mut out: String = input.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
 pub fn status_kind(status: &str) -> StatusKind {
     match status {
         "complete" => StatusKind::Success,
@@ -154,6 +169,64 @@ pub fn status_kind(status: &str) -> StatusKind {
         "uploading" | "scanning" => StatusKind::Info,
         _ => StatusKind::Warning,
     }
+}
+
+pub fn status_kind_for_message(message: &str) -> StatusKind {
+    let lower = message.to_lowercase();
+
+    if lower.is_empty() || lower == "ready" {
+        return StatusKind::Info;
+    }
+
+    if [
+        "fail",
+        "error",
+        "cannot",
+        "invalid",
+        "denied",
+        "timed out",
+        "panic",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        return StatusKind::Error;
+    }
+
+    if [
+        "warning",
+        "retry",
+        "pending",
+        "disconnected",
+        "not found",
+        "skipped",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        return StatusKind::Warning;
+    }
+
+    if [
+        "saved",
+        "complete",
+        "completed",
+        "success",
+        "connected",
+        "loaded",
+        "created",
+        "deleted",
+        "downloaded",
+        "queued",
+        "watching",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        return StatusKind::Success;
+    }
+
+    StatusKind::Info
 }
 
 pub fn extract_threat_name(scan_status: &str) -> String {
@@ -173,11 +246,7 @@ pub fn extract_threat_name(scan_status: &str) -> String {
             }
         }
         // Fallback
-        if scan_status.len() > 20 {
-            format!("{}...", &scan_status[..20])
-        } else {
-            scan_status.to_string()
-        }
+        truncate_with_ellipsis(scan_status, 21)
     } else {
         "-".to_string()
     }
