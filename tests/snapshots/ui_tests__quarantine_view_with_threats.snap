@@ -4,7 +4,7 @@ expression: output
 ---
 ╭ Navigation ───╭ Quarantine Zone ─────────────────────────╮ Job #1 Details ───────────────────────────────────────────╮
 │  Transfers    │File                 Threat Status  Time  │Status: quarantined                                        │
-│▌ Quarantine   │malware.exe          -      Detecte 385d a│Path:   /uploads/malware.exe                               │
+│▌ Quarantine   │malware.exe          -      Detecte 2h ago│Path:   /uploads/malware.exe                               │
 │  Logs         │                                          │Session: test-session                                      │
 │  Settings     │                                          │Report:  scan_report_test-session.txt                      │
 │               │                                          │Size:   488.28 KB                                          │

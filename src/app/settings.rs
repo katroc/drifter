@@ -8,6 +8,17 @@ pub enum SettingsCategory {
     Theme,
 }
 
+impl SettingsCategory {
+    pub fn field_count(&self) -> usize {
+        match self {
+            SettingsCategory::S3 => 6,
+            SettingsCategory::Scanner => 4,
+            SettingsCategory::Performance => 6,
+            SettingsCategory::Theme => 1,
+        }
+    }
+}
+
 pub struct SettingsState {
     pub endpoint: String,
     pub bucket: String,

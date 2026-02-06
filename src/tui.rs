@@ -667,90 +667,6 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                             }
                         }
 
-                        // Global Modal Handling (Confirmation & ProfileInput)
-                        if app.input_mode == InputMode::Confirmation {
-                            match key.code {
-                                KeyCode::Char('y') | KeyCode::Enter => {
-                                    match app.pending_action {
-                                        ModalAction::None => {}
-                                        ModalAction::CancelJob(id) => {
-                                            {
-                                                let conn = lock_mutex(&conn_mutex)?;
-                                                let _ = crate::db::cancel_job(&conn, id);
-                                                let _ = app.refresh_jobs(&conn);
-                                            }
-                                            if let Some(token) =
-                                                app.cancellation_tokens.lock().await.get(&id)
-                                            {
-                                                token.store(
-                                                    true,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                );
-                                            }
-                                            app.status_message = format!("Cancelled job {}", id);
-                                        }
-                                        ModalAction::DeleteRemoteObject(ref key, _) => {
-                                            let tx = app.async_tx.clone();
-                                            let config_clone = app.config.lock().await.clone();
-                                            let key_clone = key.clone();
-                                            tokio::spawn(async move {
-                                                let res =
-                                                crate::services::uploader::Uploader::delete_file(
-                                                    &config_clone,
-                                                    &key_clone,
-                                                )
-                                                .await;
-                                                match res {
-                                                    Ok(_) => {
-                                                        let _ = tx.send(AppEvent::Notification(
-                                                            format!("Deleted '{}'", key_clone),
-                                                        ));
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = tx.send(AppEvent::Notification(
-                                                            format!("Delete Failed: {}", e),
-                                                        ));
-                                                    }
-                                                }
-                                            });
-                                            app.status_message = format!("Deleting {}...", key);
-                                        }
-                                        ModalAction::ClearHistory => {
-                                            let conn = lock_mutex(&conn_mutex)?;
-                                            match app.history_filter {
-                                                HistoryFilter::All => {
-                                                    let _ = conn.execute("DELETE FROM jobs WHERE status IN ('complete','cancelled','error')", []);
-                                                }
-                                                HistoryFilter::Complete => {
-                                                    let _ = conn.execute(
-                                                    "DELETE FROM jobs WHERE status = 'complete'",
-                                                    [],
-                                                );
-                                                }
-                                                HistoryFilter::Quarantined => {
-                                                    let _ = conn.execute("DELETE FROM jobs WHERE scan_status = 'quarantined' OR status = 'quarantined'", []);
-                                                }
-                                            }
-                                            let _ = app.refresh_jobs(&conn);
-                                            app.status_message = "History cleared".to_string();
-                                        }
-                                        ModalAction::QuitApp => {
-                                            should_quit = true;
-                                        }
-                                    }
-                                    app.input_mode = InputMode::Normal;
-                                    app.pending_action = ModalAction::None;
-                                }
-                                KeyCode::Char('n') | KeyCode::Esc => {
-                                    app.input_mode = InputMode::Normal;
-                                    app.pending_action = ModalAction::None;
-                                    app.status_message = "Cancelled".to_string();
-                                }
-                                _ => {}
-                            }
-                            continue;
-                        }
-
                         // Remote Folder Creation Modal
                         if app.input_mode == InputMode::RemoteFolderCreate {
                             match key.code {
@@ -1815,12 +1731,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                 }
                             }
                             AppFocus::SettingsFields => {
-                                let field_count = match app.settings.active_category {
-                                    SettingsCategory::S3 => 6,
-                                    SettingsCategory::Scanner => 4,
-                                    SettingsCategory::Performance => 6,
-                                    SettingsCategory::Theme => 1,
-                                };
+                                let field_count = app.settings.active_category.field_count();
                                 // Focus-specific rendering logic for fields is handled in render.rs,
                                 // input handling is primarily navigation here unless specific overrides needed.
 
@@ -2845,12 +2756,8 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 // Normal Fields selection
                                                 let rel_y = y.saturating_sub(center_layout.y + 1);
                                                 let clicked_idx = rel_y / 3;
-                                                let count = match app.settings.active_category {
-                                                    SettingsCategory::S3 => 6,
-                                                    SettingsCategory::Scanner => 4,
-                                                    SettingsCategory::Performance => 7,
-                                                    SettingsCategory::Theme => 1,
-                                                };
+                                                let count =
+                                                    app.settings.active_category.field_count();
 
                                                 // Offset calculation for field clicks
                                                 let display_height =
@@ -3166,12 +3073,8 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     }
                                                 } else {
                                                     // Normal Fields Scroll
-                                                    let count = match app.settings.active_category {
-                                                        SettingsCategory::S3 => 6,
-                                                        SettingsCategory::Scanner => 4,
-                                                        SettingsCategory::Performance => 6,
-                                                        SettingsCategory::Theme => 1,
-                                                    };
+                                                    let count =
+                                                        app.settings.active_category.field_count();
                                                     if is_down {
                                                         if app.settings.selected_field + 1 < count {
                                                             app.settings.selected_field += 1;
