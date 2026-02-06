@@ -27,8 +27,6 @@ pub struct ProgressInfo {
 pub struct Coordinator {
     conn: Arc<Mutex<Connection>>,
     config: Arc<AsyncMutex<Config>>,
-    scanner: Scanner,
-    uploader: Uploader,
     progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>,
     cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
     app_tx: mpsc::Sender<AppEvent>,
@@ -42,25 +40,9 @@ impl Coordinator {
         cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
         app_tx: mpsc::Sender<AppEvent>,
     ) -> Result<Self> {
-        // We need lock to init scanner/uploader but they are just helpers now or cheap to init
-        // Note: Initializing services might need config, but for now we assume they don't deep copy config state
-        // OR we need to async lock here. But new() is sync.
-        // Scanner/Uploader::new take &Config.
-        // Block on the lock since we are in initialization phase (likely sync main) or create detached?
-        // Actually Uploader::new takes &Config but just creates Self {}. It doesn't use it.
-        // Scanner::new takes &Config and stores clamav host/port.
-        // We need to peek at config.
-
-        let cfg = futures::executor::block_on(config.lock());
-        let scanner = Scanner::new(&cfg);
-        let uploader = Uploader::new(&cfg);
-        drop(cfg);
-
         Ok(Self {
             conn,
             config,
-            scanner,
-            uploader,
             progress,
             cancellation_tokens,
             app_tx,
@@ -199,8 +181,13 @@ impl Coordinator {
             }
         };
 
+        let scanner = {
+            let cfg = lock_async_mutex(&self.config).await.clone();
+            Scanner::new(&cfg)
+        };
+
         let start_time = std::time::Instant::now();
-        match self.scanner.scan_file(path).await {
+        match scanner.scan_file(path).await {
             Ok(ScanResult::Clean) => {
                 let duration = start_time.elapsed().as_millis() as i64;
                 let conn = lock_mutex(&self.conn)?;
@@ -288,6 +275,7 @@ impl Coordinator {
             let config_guard = lock_async_mutex(&self.config).await;
             config_guard.clone()
         };
+        let uploader = Uploader::new(&config);
 
         // Set status to "uploading" BEFORE starting upload
         {
@@ -303,8 +291,7 @@ impl Coordinator {
         }
 
         let start_time = std::time::Instant::now();
-        let res = self
-            .uploader
+        let res = uploader
             .upload_file(
                 &config,
                 &path,

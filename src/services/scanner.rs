@@ -18,6 +18,7 @@ pub struct Scanner {
     clamd_host: String,
     clamd_port: u16,
     scan_chunk_size_mb: u64,
+    max_scan_size_mb: Option<u64>,
     concurrency: usize,
 }
 
@@ -28,11 +29,27 @@ impl Scanner {
             clamd_host: config.clamd_host.clone(),
             clamd_port: config.clamd_port,
             scan_chunk_size_mb: config.scan_chunk_size_mb,
+            max_scan_size_mb: config.max_scan_size_mb,
             concurrency: config.concurrency_scan_parts.max(1),
         }
     }
 
     pub async fn scan_file(&self, path: &str) -> Result<ScanResult> {
+        if let Some(max_mb) = self.max_scan_size_mb {
+            let max_bytes = max_mb.saturating_mul(1024 * 1024);
+            let file_size = tokio::fs::metadata(path)
+                .await
+                .with_context(|| format!("Failed to read metadata for {}", path))?
+                .len();
+            if file_size > max_bytes {
+                warn!(
+                    "Skipping scan for {} ({} bytes exceeds max_scan_size_mb={}MB)",
+                    path, file_size, max_mb
+                );
+                return Ok(ScanResult::Clean);
+            }
+        }
+
         match self.mode {
             ScanMode::Skip => {
                 info!("Scanning skipped for: {}", path);

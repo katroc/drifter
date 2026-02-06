@@ -85,7 +85,7 @@ fn default_local_width_percent() -> u16 {
     50
 }
 fn default_history_width() -> u16 {
-    45
+    60
 }
 
 impl Default for Config {
@@ -119,8 +119,8 @@ impl Default for Config {
             theme: Theme::default_name().to_string(),
             scanner_enabled: true,
             host_metrics_enabled: true,
-            local_width_percent: 50,
-            history_width: 60,
+            local_width_percent: default_local_width_percent(),
+            history_width: default_history_width(),
             log_level: "info".to_string(),
         }
     }
@@ -234,8 +234,8 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         host_metrics_enabled: get("host_metrics_enabled")
             .map(|s| s == "true")
             .unwrap_or(true),
-        local_width_percent: get_u16("local_width_percent", get_u16("local_width_percent", 50)), // Fallback to old name for migration
-        history_width: get_u16("history_width", 60),
+        local_width_percent: get_u16("local_width_percent", default_local_width_percent()),
+        history_width: get_u16("history_width", default_history_width()),
         log_level: get_or("log_level", "info"),
     })
 }
