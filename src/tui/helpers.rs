@@ -3,6 +3,7 @@ use crate::core::config::Config;
 use crate::services::uploader::{S3Object, Uploader};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
+use tracing::warn;
 
 const REMOTE_CACHE_TTL_SECS: u64 = 30;
 
@@ -29,16 +30,20 @@ pub(crate) async fn adjust_layout_dimension(
 
 pub(crate) async fn reset_layout_dimension(config: &Arc<AsyncMutex<Config>>, target: LayoutTarget) {
     let mut cfg = config.lock().await;
+    let defaults = Config::default();
     match target {
-        LayoutTarget::Local | LayoutTarget::Queue => cfg.local_width_percent = 50,
-        LayoutTarget::History => cfg.history_width = 60,
+        LayoutTarget::Local | LayoutTarget::Queue => {
+            cfg.local_width_percent = defaults.local_width_percent
+        }
+        LayoutTarget::History => cfg.history_width = defaults.history_width,
     }
 }
 
 pub(crate) async fn reset_all_layout_dimensions(config: &Arc<AsyncMutex<Config>>) {
     let mut cfg = config.lock().await;
-    cfg.local_width_percent = 50;
-    cfg.history_width = 60;
+    let defaults = Config::default();
+    cfg.local_width_percent = defaults.local_width_percent;
+    cfg.history_width = defaults.history_width;
 }
 
 pub(crate) async fn update_layout_message(app: &mut App, target: LayoutTarget) {
@@ -101,10 +106,15 @@ pub(crate) async fn request_remote_list(app: &mut App, force_refresh: bool) -> b
         };
         match Uploader::list_bucket_contents(&config_clone, path_arg).await {
             Ok(files) => {
-                let _ = tx.send(AppEvent::RemoteFileList(path_for_request, files));
+                if let Err(e) = tx.send(AppEvent::RemoteFileList(path_for_request, files)) {
+                    warn!("Failed to send remote file list event: {}", e);
+                }
             }
             Err(e) => {
-                let _ = tx.send(AppEvent::Notification(format!("List Failed: {}", e)));
+                if let Err(send_err) = tx.send(AppEvent::Notification(format!("List Failed: {}", e)))
+                {
+                    warn!("Failed to send remote list failure notification: {}", send_err);
+                }
             }
         }
     });

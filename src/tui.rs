@@ -44,6 +44,7 @@ use self::helpers::{
 };
 
 use tokio::sync::Mutex as AsyncMutex;
+use tracing::warn;
 
 pub struct TuiArgs {
     pub conn_mutex: Arc<Mutex<Connection>>,
@@ -369,8 +370,14 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                                                 match res {
                                                     Ok(msg) => {
-                                                        let _ =
-                                                            tx.send(AppEvent::Notification(msg));
+                                                        if let Err(send_err) =
+                                                            tx.send(AppEvent::Notification(msg))
+                                                        {
+                                                            warn!(
+                                                                "Failed to send delete notification: {}",
+                                                                send_err
+                                                            );
+                                                        }
 
                                                         // 2. Refresh the list using the SAME runtime
                                                         let path_arg = if path_context.is_empty() {
@@ -380,18 +387,47 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         };
                                                         let res_list = crate::services::uploader::Uploader::list_bucket_contents(&config_clone, path_arg).await;
 
-                                                        if let Ok(files) = res_list {
-                                                            let _ =
-                                                                tx.send(AppEvent::RemoteFileList(
-                                                                    path_context.clone(),
-                                                                    files,
-                                                                ));
+                                                        match res_list {
+                                                            Ok(files) => {
+                                                                if let Err(send_err) = tx.send(
+                                                                    AppEvent::RemoteFileList(
+                                                                        path_context.clone(),
+                                                                        files,
+                                                                    ),
+                                                                ) {
+                                                                    warn!(
+                                                                        "Failed to send remote refresh after delete: {}",
+                                                                        send_err
+                                                                    );
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                if let Err(send_err) = tx.send(
+                                                                    AppEvent::Notification(format!(
+                                                                        "Refresh Failed: {}",
+                                                                        e
+                                                                    )),
+                                                                ) {
+                                                                    warn!(
+                                                                        "Failed to send remote refresh error notification: {}",
+                                                                        send_err
+                                                                    );
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                     Err(e) => {
-                                                        let _ = tx.send(AppEvent::Notification(
-                                                            format!("Delete Failed: {}", e),
-                                                        ));
+                                                        if let Err(send_err) = tx.send(
+                                                            AppEvent::Notification(format!(
+                                                                "Delete Failed: {}",
+                                                                e
+                                                            )),
+                                                        ) {
+                                                            warn!(
+                                                                "Failed to send delete failure notification: {}",
+                                                                send_err
+                                                            );
+                                                        }
                                                     }
                                                 }
                                             });
@@ -482,13 +518,26 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                                         {
                                             let conn = lock_mutex(&conn_mutex)?;
-                                            let _ =
-                                                crate::core::config::save_config_to_db(&conn, &cfg);
+                                            if let Err(e) =
+                                                crate::core::config::save_config_to_db(&conn, &cfg)
+                                            {
+                                                app.status_message =
+                                                    format!("Failed to save setup config: {}", e);
+                                            }
                                         }
 
                                         // Create directories if they don't exist
-                                        let _ = std::fs::create_dir_all(&cfg.quarantine_dir);
-                                        let _ = std::fs::create_dir_all(&cfg.state_dir);
+                                        if let Err(e) = std::fs::create_dir_all(&cfg.quarantine_dir)
+                                        {
+                                            app.status_message = format!(
+                                                "Failed to create quarantine directory: {}",
+                                                e
+                                            );
+                                        }
+                                        if let Err(e) = std::fs::create_dir_all(&cfg.state_dir) {
+                                            app.status_message =
+                                                format!("Failed to create state directory: {}", e);
+                                        }
 
                                         // Update shared config
                                         let mut shared_cfg = app.config.lock().await;
@@ -710,11 +759,17 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             match crate::services::uploader::Uploader::create_folder(&config, &folder_key).await {
                                                 Ok(_) => {
                                                     // Refresh list
-                                                    let _ = tx.send(AppEvent::RefreshRemote);
-                                                    let _ = tx.send(AppEvent::Notification(format!("Created folder '{}'", folder_name_clone)));
+                                                    if let Err(send_err) = tx.send(AppEvent::RefreshRemote) {
+                                                        warn!("Failed to send RefreshRemote after folder create: {}", send_err);
+                                                    }
+                                                    if let Err(send_err) = tx.send(AppEvent::Notification(format!("Created folder '{}'", folder_name_clone))) {
+                                                        warn!("Failed to send folder created notification: {}", send_err);
+                                                    }
                                                 }
                                                 Err(e) => {
-                                                    let _ = tx.send(AppEvent::Notification(format!("Failed to create folder: {}", e)));
+                                                    if let Err(send_err) = tx.send(AppEvent::Notification(format!("Failed to create folder: {}", e))) {
+                                                        warn!("Failed to send folder creation failure notification: {}", send_err);
+                                                    }
                                                 }
                                             }
                                         });
@@ -842,6 +897,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     {
                                                         // Only queue files on Enter or 'l', not Right arrow
                                                         let conn_clone = conn_mutex.clone();
+                                                        let tx = app.async_tx.clone();
                                                         let path = entry
                                                             .path
                                                             .to_string_lossy()
@@ -850,13 +906,25 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         tokio::spawn(async move {
                                                             let session_id =
                                                                 Uuid::new_v4().to_string();
-                                                            let _ = ingest_path(
+                                                            if let Err(e) = ingest_path(
                                                                 conn_clone,
                                                                 &path,
                                                                 &session_id,
                                                                 None,
                                                             )
-                                                            .await;
+                                                            .await
+                                                                && let Err(send_err) = tx.send(
+                                                                    AppEvent::Notification(format!(
+                                                                        "Failed to queue file: {}",
+                                                                        e
+                                                                    )),
+                                                                )
+                                                            {
+                                                                warn!(
+                                                                    "Failed to send queue failure notification: {}",
+                                                                    send_err
+                                                                );
+                                                            }
                                                         });
 
                                                         app.status_message =
@@ -1373,21 +1441,34 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                         let q_path = job.staged_path.clone();
 
                                         let conn = lock_mutex(&conn_mutex)?;
-                                        let _ = crate::db::update_scan_status(
+                                        let mut quarantine_removed = true;
+                                        if let Err(e) = crate::db::update_scan_status(
                                             &conn,
                                             id,
                                             "removed",
                                             "quarantined_removed",
-                                        );
-
-                                        if let Some(p) = q_path {
-                                            let _ = std::fs::remove_file(p);
+                                        ) {
+                                            quarantine_removed = false;
+                                            app.status_message =
+                                                format!("Failed to update quarantine status: {}", e);
                                         }
 
-                                        app.status_message = format!(
-                                            "Threat neutralized: File '{}' deleted",
-                                            job.source_path
-                                        );
+                                        if let Some(p) = q_path
+                                            && let Err(e) = std::fs::remove_file(&p)
+                                        {
+                                            quarantine_removed = false;
+                                            app.status_message = format!(
+                                                "Failed to remove quarantined file {}: {}",
+                                                p, e
+                                            );
+                                        }
+
+                                        if quarantine_removed {
+                                            app.status_message = format!(
+                                                "Threat neutralized: File '{}' deleted",
+                                                job.source_path
+                                            );
+                                        }
 
                                         if app.selected_quarantine >= app.quarantine.len()
                                             && app.selected_quarantine > 0
@@ -1456,24 +1537,28 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         let res = crate::services::uploader::Uploader::download_file(&config_clone, &key, &dest_clone).await;
                                                         match res {
                                                             Ok(_) => {
-                                                                let _ = tx.send(
+                                                                if let Err(send_err) = tx.send(
                                                                     AppEvent::Notification(
                                                                         format!(
                                                                             "Downloaded to {:?}",
                                                                             dest_clone
                                                                         ),
                                                                     ),
-                                                                );
+                                                                ) {
+                                                                    warn!("Failed to send download success notification: {}", send_err);
+                                                                }
                                                             }
                                                             Err(e) => {
-                                                                let _ = tx.send(
+                                                                if let Err(send_err) = tx.send(
                                                                     AppEvent::Notification(
                                                                         format!(
                                                                             "Download Failed: {}",
                                                                             e
                                                                         ),
                                                                     ),
-                                                                );
+                                                                ) {
+                                                                    warn!("Failed to send download failure notification: {}", send_err);
+                                                                }
                                                             }
                                                         }
                                                     });
@@ -1647,24 +1732,28 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                             let res = crate::services::uploader::Uploader::download_file(&config_clone, &key, &dest_clone).await;
                                                             match res {
                                                                 Ok(_) => {
-                                                                    let _ = tx.send(
+                                                                    if let Err(send_err) = tx.send(
                                                                     AppEvent::Notification(
                                                                         format!(
                                                                             "Downloaded to {:?}",
                                                                             dest_clone
                                                                         ),
                                                                     ),
-                                                                );
+                                                                ) {
+                                                                    warn!("Failed to send download success notification: {}", send_err);
+                                                                }
                                                                 }
                                                                 Err(e) => {
-                                                                    let _ = tx.send(
+                                                                    if let Err(send_err) = tx.send(
                                                                     AppEvent::Notification(
                                                                         format!(
                                                                             "Download Failed: {}",
                                                                             e
                                                                         ),
                                                                     ),
-                                                                );
+                                                                ) {
+                                                                    warn!("Failed to send download failure notification: {}", send_err);
+                                                                }
                                                                 }
                                                             }
                                                         });
@@ -2202,7 +2291,14 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     Ok(s) => s,
                                                     Err(e) => format!("Connection Failed: {}", e),
                                                 };
-                                                let _ = tx.send(AppEvent::Notification(msg));
+                                                if let Err(send_err) =
+                                                    tx.send(AppEvent::Notification(msg))
+                                                {
+                                                    warn!(
+                                                        "Failed to send scanner connection notification: {}",
+                                                        send_err
+                                                    );
+                                                }
                                             });
                                         }
                                     }
@@ -2538,6 +2634,8 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                     } else {
                                                                         let conn_clone =
                                                                             conn_mutex.clone();
+                                                                        let tx =
+                                                                            app.async_tx.clone();
                                                                         let path = entry
                                                                             .path
                                                                             .to_string_lossy()
@@ -2546,13 +2644,25 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                             let session_id =
                                                                                 Uuid::new_v4()
                                                                                     .to_string();
-                                                                            let _ = ingest_path(
+                                                                            if let Err(e) = ingest_path(
                                                                                 conn_clone,
                                                                                 &path,
                                                                                 &session_id,
                                                                                 None,
                                                                             )
-                                                                            .await;
+                                                                            .await
+                                                                                && let Err(send_err) = tx.send(
+                                                                                    AppEvent::Notification(format!(
+                                                                                        "Failed to queue file: {}",
+                                                                                        e
+                                                                                    )),
+                                                                                )
+                                                                            {
+                                                                                warn!(
+                                                                                    "Failed to send queue failure notification: {}",
+                                                                                    send_err
+                                                                                );
+                                                                            }
                                                                         });
                                                                     }
                                                                 }
@@ -2896,10 +3006,16 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         let mut cfg = app.config.lock().await;
                                                         app.settings.apply_to_config(&mut cfg);
                                                         let conn = lock_mutex(&conn_mutex)?;
-                                                        let _ =
+                                                        if let Err(e) =
                                                             crate::core::config::save_config_to_db(
                                                                 &conn, &cfg,
+                                                            )
+                                                        {
+                                                            app.status_message = format!(
+                                                                "Failed to save settings: {}",
+                                                                e
                                                             );
+                                                        }
                                                     } else {
                                                         // Double click for other fields
                                                         let now = Instant::now();

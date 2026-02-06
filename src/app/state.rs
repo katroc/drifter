@@ -954,7 +954,9 @@ impl App {
                 self.status_message = format!("Failed to set priority: {}", e);
             } else {
                 self.status_message = format!("Priority set to {}", new_priority);
-                let _ = self.refresh_jobs(&conn);
+                if let Err(e) = self.refresh_jobs(&conn) {
+                    self.status_message = format!("Failed to refresh jobs: {}", e);
+                }
 
                 if let Some(pos) = self.jobs.iter().position(|j| j.id == job_id)
                     && self.view_mode == ViewMode::Flat

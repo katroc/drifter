@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
+use tracing::warn;
 
 pub struct LogWatcher {
     path: PathBuf,
@@ -45,8 +46,12 @@ impl LogWatcher {
                                 if n == 0 {
                                     break;
                                 }
-                                let _ =
-                                    self.tx.send(AppEvent::LogLine(line.trim_end().to_string()));
+                                if let Err(e) =
+                                    self.tx.send(AppEvent::LogLine(line.trim_end().to_string()))
+                                {
+                                    warn!("Log watcher channel closed: {}", e);
+                                    return;
+                                }
                                 line.clear();
                             }
                             last_size = current_size;
