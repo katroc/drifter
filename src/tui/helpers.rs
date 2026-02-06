@@ -112,9 +112,13 @@ pub(crate) async fn request_remote_list(app: &mut App, force_refresh: bool) -> b
                 }
             }
             Err(e) => {
-                if let Err(send_err) = tx.send(AppEvent::Notification(format!("List Failed: {}", e)))
+                if let Err(send_err) =
+                    tx.send(AppEvent::Notification(format!("List Failed: {}", e)))
                 {
-                    warn!("Failed to send remote list failure notification: {}", send_err);
+                    warn!(
+                        "Failed to send remote list failure notification: {}",
+                        send_err
+                    );
                 }
             }
         }
@@ -172,32 +176,21 @@ pub(crate) async fn start_remote_download(app: &mut App, key: String) {
                     "Downloaded to {:?}",
                     dest_clone
                 ))) {
-                    warn!(
-                        "Failed to send download success notification: {}",
-                        send_err
-                    );
+                    warn!("Failed to send download success notification: {}", send_err);
                 }
             }
             Err(e) => {
                 if let Err(send_err) =
                     tx.send(AppEvent::Notification(format!("Download Failed: {}", e)))
                 {
-                    warn!(
-                        "Failed to send download failure notification: {}",
-                        send_err
-                    );
+                    warn!("Failed to send download failure notification: {}", send_err);
                 }
             }
         }
     });
 }
 
-pub(crate) async fn prepare_remote_delete(
-    app: &mut App,
-    key: String,
-    name: String,
-    is_dir: bool,
-) {
+pub(crate) async fn prepare_remote_delete(app: &mut App, key: String, name: String, is_dir: bool) {
     if is_dir {
         let dir_key = if key.ends_with('/') {
             key

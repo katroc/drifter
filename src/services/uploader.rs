@@ -425,10 +425,7 @@ impl Uploader {
             .key(&key)
             .content_length(0);
         let put_req = Self::apply_sse_put_object(put_req, config);
-        put_req
-            .send()
-            .await
-            .context("Failed to create folder")?;
+        put_req.send().await.context("Failed to create folder")?;
 
         info!("Created S3 folder: {}", key);
         Ok(())
@@ -564,29 +561,26 @@ impl Uploader {
                 .key(&key)
                 .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::Sha256);
             let create_req = Self::apply_sse_create_multipart(create_req, config);
-            let create_output = create_req
-                .send()
-                .await
-                .map_err(|e| {
-                    let service_err = match e.as_service_error() {
-                        Some(s) => format!(
-                            "{}: {}",
-                            s.code().unwrap_or("Unknown"),
-                            s.message().unwrap_or("No message")
-                        ),
-                        None => e.to_string(),
-                    };
-                    error!(
-                        "Failed to create multipart upload: {} (Bucket: {}, Key: {})",
-                        service_err, bucket, key
-                    );
-                    anyhow::anyhow!(
-                        "Failed to create multipart upload: {} (Bucket: {}, Key: {})",
-                        service_err,
-                        bucket,
-                        key
-                    )
-                })?;
+            let create_output = create_req.send().await.map_err(|e| {
+                let service_err = match e.as_service_error() {
+                    Some(s) => format!(
+                        "{}: {}",
+                        s.code().unwrap_or("Unknown"),
+                        s.message().unwrap_or("No message")
+                    ),
+                    None => e.to_string(),
+                };
+                error!(
+                    "Failed to create multipart upload: {} (Bucket: {}, Key: {})",
+                    service_err, bucket, key
+                );
+                anyhow::anyhow!(
+                    "Failed to create multipart upload: {} (Bucket: {}, Key: {})",
+                    service_err,
+                    bucket,
+                    key
+                )
+            })?;
 
             let new_uid = create_output
                 .upload_id()

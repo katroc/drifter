@@ -148,8 +148,12 @@ impl Scanner {
     }
 
     pub async fn check_connection(&self) -> Result<String> {
-        let mut stream =
-            connect_clamd(self.clamd_socket.as_deref(), &self.clamd_host, self.clamd_port).await?;
+        let mut stream = connect_clamd(
+            self.clamd_socket.as_deref(),
+            &self.clamd_host,
+            self.clamd_port,
+        )
+        .await?;
         stream
             .write_all(b"PING")
             .await

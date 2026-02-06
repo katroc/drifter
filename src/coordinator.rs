@@ -247,8 +247,12 @@ impl Coordinator {
                     )?;
 
                     if !quarantine_path_str.is_empty()
-                        && let Err(e) =
-                            db::update_job_staged(&conn, job.id, &quarantine_path_str, "quarantined")
+                        && let Err(e) = db::update_job_staged(
+                            &conn,
+                            job.id,
+                            &quarantine_path_str,
+                            "quarantined",
+                        )
                     {
                         warn!(
                             "Failed to update quarantined staged path for job {}: {}",

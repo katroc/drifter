@@ -20,14 +20,10 @@ fn text(action: &'static str) -> KeyHint {
 
 pub fn footer_hints(app: &App) -> Vec<KeyHint> {
     match app.input_mode {
-        InputMode::LogSearch => vec![
-            key_action("Enter", "Search"),
-            key_action("Esc", "Cancel"),
-        ],
-        InputMode::QueueSearch | InputMode::HistorySearch => vec![
-            text("Type to filter"),
-            key_action("Enter/Esc", "Done"),
-        ],
+        InputMode::LogSearch => vec![key_action("Enter", "Search"), key_action("Esc", "Cancel")],
+        InputMode::QueueSearch | InputMode::HistorySearch => {
+            vec![text("Type to filter"), key_action("Enter/Esc", "Done")]
+        }
         InputMode::Filter => vec![
             text("Type to filter"),
             key_action("↑/↓", "Select"),
@@ -52,10 +48,9 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
             key_action("n", "New Folder"),
             key_action("Esc/q", "Exit"),
         ],
-        InputMode::RemoteFolderCreate => vec![
-            key_action("Enter", "Create"),
-            key_action("Esc", "Cancel"),
-        ],
+        InputMode::RemoteFolderCreate => {
+            vec![key_action("Enter", "Create"), key_action("Esc", "Cancel")]
+        }
         InputMode::Confirmation => vec![
             key_action("Enter/y", "Confirm"),
             key_action("Esc/n", "Cancel"),
@@ -74,10 +69,7 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
                     key_action("Tab/→", "Content"),
                     key_action("↑/↓", "Switch Tab"),
                 ],
-                AppFocus::Browser => vec![
-                    key_action("↑/↓", "Select"),
-                    key_action("a", "Browse"),
-                ],
+                AppFocus::Browser => vec![key_action("↑/↓", "Select"), key_action("a", "Browse")],
                 AppFocus::Queue => vec![
                     key_action("↑/↓", "Select"),
                     key_action("p", "Pause/Resume"),

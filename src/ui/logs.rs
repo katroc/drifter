@@ -69,7 +69,9 @@ pub fn render_logs(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             if is_current {
                 style = theme.selection_style();
             } else if is_match {
-                style = style.bg(theme.table_row_alt_bg).add_modifier(Modifier::BOLD);
+                style = style
+                    .bg(theme.table_row_alt_bg)
+                    .add_modifier(Modifier::BOLD);
             }
 
             // Apply horizontal scroll safely

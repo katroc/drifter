@@ -30,6 +30,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use self::helpers::{
+    adjust_layout_dimension, prepare_remote_delete, request_remote_list,
+    reset_all_layout_dimensions, reset_layout_dimension, s3_ready, selected_remote_object,
+    start_remote_download, update_layout_message,
+};
 use crate::app::settings::{SettingsCategory, SettingsState};
 use crate::app::state::{
     App, AppEvent, AppFocus, AppTab, HistoryFilter, InputMode, LayoutTarget, ModalAction, ViewMode,
@@ -38,11 +43,6 @@ use crate::components::file_picker::PickerView;
 use crate::components::wizard::{WizardState, WizardStep};
 use crate::ui::util::{calculate_list_offset, fuzzy_match};
 use crate::utils::lock_mutex;
-use self::helpers::{
-    adjust_layout_dimension, prepare_remote_delete, request_remote_list,
-    reset_all_layout_dimensions, reset_layout_dimension, s3_ready, selected_remote_object,
-    start_remote_download, update_layout_message,
-};
 
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::warn;
@@ -328,7 +328,8 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 app.status_message =
                                                     format!("Failed to cancel job {}: {}", id, e);
                                             } else {
-                                                app.status_message = format!("Cancelled job {}", id);
+                                                app.status_message =
+                                                    format!("Cancelled job {}", id);
                                                 // Refresh to update list
                                                 if let Err(e) = app.refresh_jobs(&conn) {
                                                     app.status_message =
@@ -403,12 +404,14 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                 }
                                                             }
                                                             Err(e) => {
-                                                                if let Err(send_err) = tx.send(
-                                                                    AppEvent::Notification(format!(
-                                                                        "Refresh Failed: {}",
-                                                                        e
-                                                                    )),
-                                                                ) {
+                                                                if let Err(send_err) =
+                                                                    tx.send(AppEvent::Notification(
+                                                                        format!(
+                                                                            "Refresh Failed: {}",
+                                                                            e
+                                                                        ),
+                                                                    ))
+                                                                {
                                                                     warn!(
                                                                         "Failed to send remote refresh error notification: {}",
                                                                         send_err
@@ -418,12 +421,11 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         }
                                                     }
                                                     Err(e) => {
-                                                        if let Err(send_err) = tx.send(
-                                                            AppEvent::Notification(format!(
-                                                                "Delete Failed: {}",
-                                                                e
-                                                            )),
-                                                        ) {
+                                                        if let Err(send_err) =
+                                                            tx.send(AppEvent::Notification(
+                                                                format!("Delete Failed: {}", e),
+                                                            ))
+                                                        {
                                                             warn!(
                                                                 "Failed to send delete failure notification: {}",
                                                                 send_err
@@ -1377,9 +1379,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     {
                                                         app.status_message =
                                                             format!("Delete failed: {}", e);
-                                                    } else if let Err(e) =
-                                                        app.refresh_jobs(&conn)
-                                                    {
+                                                    } else if let Err(e) = app.refresh_jobs(&conn) {
                                                         app.status_message =
                                                             format!("Refresh failed: {}", e);
                                                     }
@@ -1450,8 +1450,10 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             "quarantined_removed",
                                         ) {
                                             quarantine_removed = false;
-                                            app.status_message =
-                                                format!("Failed to update quarantine status: {}", e);
+                                            app.status_message = format!(
+                                                "Failed to update quarantine status: {}",
+                                                e
+                                            );
                                         }
 
                                         if let Some(p) = q_path

@@ -1635,7 +1635,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         "Ready"
     };
 
-    let status_style = app.theme.status_style(status_kind_for_message(&app.status_message));
+    let status_style = app
+        .theme
+        .status_style(status_kind_for_message(&app.status_message));
 
     let mut right_spans = vec![];
 

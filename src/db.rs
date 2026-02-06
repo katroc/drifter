@@ -141,7 +141,10 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
     )?;
     apply_optional_migration(&conn, "ALTER TABLE jobs ADD COLUMN s3_upload_id TEXT")?;
     // Migration for priority
-    apply_optional_migration(&conn, "ALTER TABLE jobs ADD COLUMN priority INTEGER DEFAULT 0")?;
+    apply_optional_migration(
+        &conn,
+        "ALTER TABLE jobs ADD COLUMN priority INTEGER DEFAULT 0",
+    )?;
     // Migration for checksums
     apply_optional_migration(&conn, "ALTER TABLE jobs ADD COLUMN checksum TEXT")?;
     apply_optional_migration(&conn, "ALTER TABLE jobs ADD COLUMN remote_checksum TEXT")?;
@@ -153,8 +156,14 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
     )?;
     apply_optional_migration(&conn, "ALTER TABLE jobs ADD COLUMN next_retry_at TEXT")?;
     // Migration for timing
-    apply_optional_migration(&conn, "ALTER TABLE jobs ADD COLUMN scan_duration_ms INTEGER")?;
-    apply_optional_migration(&conn, "ALTER TABLE jobs ADD COLUMN upload_duration_ms INTEGER")?;
+    apply_optional_migration(
+        &conn,
+        "ALTER TABLE jobs ADD COLUMN scan_duration_ms INTEGER",
+    )?;
+    apply_optional_migration(
+        &conn,
+        "ALTER TABLE jobs ADD COLUMN upload_duration_ms INTEGER",
+    )?;
 
     info!("Database initialized successfully at {:?}", db_path);
     Ok(conn)
