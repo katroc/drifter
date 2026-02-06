@@ -13,7 +13,7 @@ impl SettingsCategory {
         match self {
             SettingsCategory::S3 => 6,
             SettingsCategory::Scanner => 4,
-            SettingsCategory::Performance => 6,
+            SettingsCategory::Performance => 7,
             SettingsCategory::Theme => 1,
         }
     }
@@ -31,6 +31,7 @@ pub struct SettingsState {
     pub scan_chunk_size: String,
     pub part_size: String,
     pub concurrency_global: String,
+    pub concurrency_scan_global: String,
     pub concurrency_upload_parts: String,
     pub concurrency_scan_parts: String,
     pub active_category: SettingsCategory,
@@ -57,6 +58,7 @@ impl SettingsState {
             scan_chunk_size: cfg.scan_chunk_size_mb.to_string(),
             part_size: cfg.part_size_mb.to_string(),
             concurrency_global: cfg.concurrency_upload_global.to_string(),
+            concurrency_scan_global: cfg.concurrency_scan_global.to_string(),
             concurrency_upload_parts: cfg.concurrency_upload_parts.to_string(),
             concurrency_scan_parts: cfg.concurrency_scan_parts.to_string(),
             active_category: SettingsCategory::S3,
@@ -113,6 +115,9 @@ impl SettingsState {
         }
         if let Ok(v) = self.concurrency_global.trim().parse() {
             cfg.concurrency_upload_global = v;
+        }
+        if let Ok(v) = self.concurrency_scan_global.trim().parse() {
+            cfg.concurrency_scan_global = v;
         }
         if let Ok(v) = self.concurrency_upload_parts.trim().parse() {
             cfg.concurrency_upload_parts = v;

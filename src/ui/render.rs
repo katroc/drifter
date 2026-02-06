@@ -1238,6 +1238,10 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
                 app.settings.concurrency_global.as_str(),
             ),
             (
+                "Global Scan Concurrency (Files)",
+                app.settings.concurrency_scan_global.as_str(),
+            ),
+            (
                 "Upload Part Concurrency (Streams/File)",
                 app.settings.concurrency_upload_parts.as_str(),
             ),

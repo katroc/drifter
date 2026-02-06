@@ -171,6 +171,8 @@ pub(crate) async fn start_remote_download(app: &mut App, key: String) {
 }
 
 pub(crate) async fn prepare_remote_delete(app: &mut App, key: String, name: String, is_dir: bool) {
+    app.confirmation_return_mode = Some(app.input_mode);
+
     if is_dir {
         let dir_key = if key.ends_with('/') {
             key
@@ -184,6 +186,7 @@ pub(crate) async fn prepare_remote_delete(app: &mut App, key: String, name: Stri
                 app.pending_action = crate::app::state::ModalAction::DeleteRemoteObject(
                     dir_key,
                     app.remote_current_path.clone(),
+                    true,
                 );
                 app.confirmation_msg = format!("Delete empty folder '{}'?", name);
             }
@@ -192,6 +195,7 @@ pub(crate) async fn prepare_remote_delete(app: &mut App, key: String, name: Stri
                 app.pending_action = crate::app::state::ModalAction::DeleteRemoteObject(
                     dir_key,
                     app.remote_current_path.clone(),
+                    true,
                 );
                 app.confirmation_msg = format!("Delete folder '{}' and all contents?", name);
             }
@@ -204,6 +208,7 @@ pub(crate) async fn prepare_remote_delete(app: &mut App, key: String, name: Stri
         app.pending_action = crate::app::state::ModalAction::DeleteRemoteObject(
             key,
             app.remote_current_path.clone(),
+            false,
         );
         app.confirmation_msg = format!("Delete '{}'?", name);
     }

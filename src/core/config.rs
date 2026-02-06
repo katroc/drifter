@@ -55,6 +55,7 @@ pub struct Config {
     pub kms_key_id: Option<String>,
     pub part_size_mb: u64,
     pub concurrency_upload_global: usize,
+    pub concurrency_scan_global: usize,
     pub concurrency_upload_parts: usize,
     pub concurrency_scan_parts: usize,
     #[serde(default = "default_theme")]
@@ -114,6 +115,7 @@ impl Default for Config {
             kms_key_id: None,
             part_size_mb: 128,
             concurrency_upload_global: 1,
+            concurrency_scan_global: 2,
             concurrency_upload_parts: 4,
             concurrency_scan_parts: 4,
             theme: Theme::default_name().to_string(),
@@ -225,6 +227,7 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         kms_key_id: get("kms_key_id"),
         part_size_mb: get_u64("part_size_mb", 128),
         concurrency_upload_global: get_usize("concurrency_upload_global", 1),
+        concurrency_scan_global: get_usize("concurrency_scan_global", 2),
         concurrency_upload_parts: get_usize("concurrency_upload_parts", legacy_parts),
         concurrency_scan_parts: get_usize("concurrency_scan_parts", legacy_parts),
         theme: Theme::resolve_name(&get_or("theme", Theme::default_name()))
@@ -322,6 +325,11 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
     )?;
     db::set_setting(
         conn,
+        "concurrency_scan_global",
+        &cfg.concurrency_scan_global.to_string(),
+    )?;
+    db::set_setting(
+        conn,
         "concurrency_upload_parts",
         &cfg.concurrency_upload_parts.to_string(),
     )?;
@@ -398,6 +406,9 @@ impl Config {
         if self.concurrency_upload_global == 0 {
             anyhow::bail!("concurrency_upload_global must be > 0");
         }
+        if self.concurrency_scan_global == 0 {
+            anyhow::bail!("concurrency_scan_global must be > 0");
+        }
         if self.concurrency_upload_parts == 0 {
             anyhow::bail!("concurrency_upload_parts must be > 0");
         }
@@ -455,6 +466,7 @@ mod tests {
         assert_eq!(config.clamd_port, 3310);
         assert_eq!(config.part_size_mb, 128);
         assert_eq!(config.concurrency_upload_global, 1);
+        assert_eq!(config.concurrency_scan_global, 2);
         assert_eq!(config.concurrency_upload_parts, 4);
         assert_eq!(config.concurrency_scan_parts, 4);
         assert!(config.scanner_enabled);
@@ -535,6 +547,17 @@ mod tests {
     fn test_validate_concurrency_scan_parts_zero() {
         let config = Config {
             concurrency_scan_parts: 0,
+            ..Config::default()
+        };
+
+        let result = config.validate();
+        assert!(result.is_err(), "Should fail with zero concurrency");
+    }
+
+    #[test]
+    fn test_validate_concurrency_scan_global_zero() {
+        let config = Config {
+            concurrency_scan_global: 0,
             ..Config::default()
         };
 
@@ -652,6 +675,7 @@ mod tests {
 
         assert_eq!(loaded.part_size_mb, 256);
         assert_eq!(loaded.concurrency_upload_global, 2);
+        assert_eq!(loaded.concurrency_scan_global, 2);
         assert!(!loaded.scanner_enabled);
         assert_eq!(loaded.s3_bucket, Some("test-bucket".to_string()));
         assert_eq!(loaded.s3_secret_key, Some("test-secret".to_string()));
@@ -692,6 +716,7 @@ mod tests {
         // Should use default for missing values
         assert_eq!(loaded.part_size_mb, 256); // saved value
         assert_eq!(loaded.concurrency_upload_global, 1); // default
+        assert_eq!(loaded.concurrency_scan_global, 2); // default
 
         Ok(())
     }
@@ -787,6 +812,7 @@ mod tests {
             kms_key_id: Some("key-12345".to_string()),
             part_size_mb: 512,
             concurrency_upload_global: 3,
+            concurrency_scan_global: 4,
             concurrency_upload_parts: 8,
             concurrency_scan_parts: 6,
             theme: "monokai".to_string(),
@@ -826,6 +852,10 @@ mod tests {
         assert_eq!(
             loaded.concurrency_upload_global,
             config.concurrency_upload_global
+        );
+        assert_eq!(
+            loaded.concurrency_scan_global,
+            config.concurrency_scan_global
         );
         assert_eq!(
             loaded.concurrency_upload_parts,

@@ -368,6 +368,7 @@ impl TestAppBuilder {
             theme_names: Theme::list_names(),
             pending_action: self.pending_action,
             confirmation_msg: self.confirmation_msg,
+            confirmation_return_mode: None,
             creating_folder_name: String::new(),
 
             metrics: MetricsCollector::new(),
@@ -693,7 +694,11 @@ fn test_remote_delete_folder_confirmation() {
     let app = TestAppBuilder::new()
         .with_tab(AppTab::Transfers)
         .with_confirmation(
-            ModalAction::DeleteRemoteObject("uploads/archive/".to_string(), "uploads/".to_string()),
+            ModalAction::DeleteRemoteObject(
+                "uploads/archive/".to_string(),
+                "uploads/".to_string(),
+                true,
+            ),
             "Delete folder 'archive' and all contents?",
         )
         .build();

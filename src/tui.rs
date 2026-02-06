@@ -337,14 +337,16 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 }
                                             }
                                         }
-                                        ModalAction::DeleteRemoteObject(key, path_context) => {
+                                        ModalAction::DeleteRemoteObject(
+                                            key,
+                                            path_context,
+                                            is_dir,
+                                        ) => {
                                             app.status_message = format!("Deleting {}...", key);
                                             let tx = app.async_tx.clone();
                                             let config_clone = app.config.lock().await.clone();
 
                                             tokio::spawn(async move {
-                                                let is_dir = key.ends_with('/');
-
                                                 let res = if is_dir {
                                                     crate::services::uploader::Uploader::delete_folder_recursive(
                                                         &config_clone,
@@ -441,13 +443,19 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     }
 
                                     // Reset
-                                    app.input_mode = InputMode::Normal;
+                                    app.input_mode = app
+                                        .confirmation_return_mode
+                                        .take()
+                                        .unwrap_or(InputMode::Normal);
                                     app.pending_action = ModalAction::None;
                                     app.confirmation_msg.clear();
                                 }
                                 KeyCode::Char('n') | KeyCode::Esc => {
                                     // Cancel
-                                    app.input_mode = InputMode::Normal;
+                                    app.input_mode = app
+                                        .confirmation_return_mode
+                                        .take()
+                                        .unwrap_or(InputMode::Normal);
                                     app.pending_action = ModalAction::None;
                                     app.confirmation_msg.clear();
                                     app.status_message = "Action cancelled".to_string();
@@ -461,6 +469,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                         if app.show_wizard {
                             match key.code {
                                 KeyCode::Char('q') if !app.wizard.editing => {
+                                    app.confirmation_return_mode = None;
                                     app.input_mode = InputMode::Confirmation;
                                     app.pending_action = ModalAction::QuitApp;
                                     app.confirmation_msg = "Quit Drifter?".to_string();
@@ -615,6 +624,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     continue;
                                 }
                                 KeyCode::Char('q') if app.focus != AppFocus::Logs => {
+                                    app.confirmation_return_mode = None;
                                     app.input_mode = InputMode::Confirmation;
                                     app.pending_action = ModalAction::QuitApp;
                                     app.confirmation_msg = "Quit Drifter?".to_string();
@@ -1207,6 +1217,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                                                     if is_active {
                                                         // Require confirmation
+                                                        app.confirmation_return_mode = None;
                                                         app.pending_action =
                                                             ModalAction::CancelJob(id);
                                                         app.confirmation_msg = format!(
@@ -1353,6 +1364,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             }
                                             KeyCode::Char('c') => {
                                                 // Trigger confirmation logic for History
+                                                app.confirmation_return_mode = None;
                                                 app.input_mode = InputMode::Confirmation;
                                                 app.pending_action = ModalAction::ClearHistory;
                                                 app.confirmation_msg = format!(
@@ -1692,7 +1704,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             && app.settings.selected_field == 3)
                                             || (app.settings.active_category
                                                 == SettingsCategory::Performance
-                                                && app.settings.selected_field >= 4);
+                                                && app.settings.selected_field >= 5);
 
                                         if is_toggle {
                                             // Handle toggle based on category and field
@@ -1712,7 +1724,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         }
                                                     );
                                                 }
-                                                (SettingsCategory::Performance, 4) => {
+                                                (SettingsCategory::Performance, 5) => {
                                                     app.settings.delete_source_after_upload =
                                                         !app.settings.delete_source_after_upload;
                                                     app.status_message = format!(
@@ -1724,7 +1736,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         }
                                                     );
                                                 }
-                                                (SettingsCategory::Performance, 5) => {
+                                                (SettingsCategory::Performance, 6) => {
                                                     app.settings.host_metrics_enabled =
                                                         !app.settings.host_metrics_enabled;
                                                     app.status_message = format!(
@@ -1938,9 +1950,12 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 app.settings.concurrency_global.push(c)
                                             }
                                             (SettingsCategory::Performance, 2) => {
-                                                app.settings.concurrency_upload_parts.push(c)
+                                                app.settings.concurrency_scan_global.push(c)
                                             }
                                             (SettingsCategory::Performance, 3) => {
+                                                app.settings.concurrency_upload_parts.push(c)
+                                            }
+                                            (SettingsCategory::Performance, 4) => {
                                                 app.settings.concurrency_scan_parts.push(c)
                                             }
                                             _ => {}
@@ -1985,9 +2000,12 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 app.settings.concurrency_global.pop();
                                             }
                                             (SettingsCategory::Performance, 2) => {
-                                                app.settings.concurrency_upload_parts.pop();
+                                                app.settings.concurrency_scan_global.pop();
                                             }
                                             (SettingsCategory::Performance, 3) => {
+                                                app.settings.concurrency_upload_parts.pop();
+                                            }
+                                            (SettingsCategory::Performance, 4) => {
                                                 app.settings.concurrency_scan_parts.pop();
                                             }
                                             _ => {}
@@ -2764,7 +2782,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         && target_idx == 3)
                                                         || (app.settings.active_category
                                                             == SettingsCategory::Performance
-                                                            && target_idx >= 4);
+                                                            && target_idx >= 5);
 
                                                     if is_toggle {
                                                         match (
@@ -2775,13 +2793,13 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                 app.settings.scanner_enabled =
                                                                     !app.settings.scanner_enabled;
                                                             }
-                                                            (SettingsCategory::Performance, 4) => {
+                                                            (SettingsCategory::Performance, 5) => {
                                                                 app.settings
                                                                     .delete_source_after_upload =
                                                                     !app.settings
                                                                         .delete_source_after_upload;
                                                             }
-                                                            (SettingsCategory::Performance, 5) => {
+                                                            (SettingsCategory::Performance, 6) => {
                                                                 app.settings.host_metrics_enabled =
                                                                     !app.settings
                                                                         .host_metrics_enabled;

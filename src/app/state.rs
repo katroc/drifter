@@ -45,7 +45,7 @@ pub enum ModalAction {
     None,
     ClearHistory,
     CancelJob(i64),
-    DeleteRemoteObject(String, String), // key, current_path
+    DeleteRemoteObject(String, String, bool), // key, current_path, is_dir
     QuitApp,
 }
 
@@ -196,6 +196,7 @@ pub struct App {
     // Modal State
     pub pending_action: ModalAction,
     pub confirmation_msg: String,
+    pub confirmation_return_mode: Option<InputMode>,
 
     // Metrics
     pub metrics: MetricsCollector,
@@ -277,6 +278,7 @@ impl App {
             theme_names: Theme::list_names(),
             pending_action: ModalAction::None,
             confirmation_msg: String::new(),
+            confirmation_return_mode: None,
 
             metrics: MetricsCollector::new(),
             last_metrics: HostMetricsSnapshot::default(),

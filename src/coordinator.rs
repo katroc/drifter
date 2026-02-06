@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 use crate::utils::{lock_async_mutex, lock_mutex};
 use std::collections::HashMap;
@@ -30,6 +30,7 @@ pub struct Coordinator {
     progress: Arc<AsyncMutex<HashMap<i64, ProgressInfo>>>,
     cancellation_tokens: Arc<AsyncMutex<HashMap<i64, Arc<AtomicBool>>>>,
     app_tx: mpsc::Sender<AppEvent>,
+    work_notify: Arc<Notify>,
 }
 
 impl Coordinator {
@@ -46,16 +47,64 @@ impl Coordinator {
             progress,
             cancellation_tokens,
             app_tx,
+            work_notify: Arc::new(Notify::new()),
         })
     }
 
     pub async fn run(&self) {
         loop {
-            if let Err(e) = self.process_cycle().await {
-                error!("Coordinator error: {}", e);
+            let mut iteration_guard = 0usize;
+            loop {
+                match self.process_cycle().await {
+                    Ok(true) => {
+                        iteration_guard += 1;
+                        if iteration_guard >= 64 {
+                            break;
+                        }
+                    }
+                    Ok(false) => break,
+                    Err(e) => {
+                        error!("Coordinator error: {}", e);
+                        break;
+                    }
+                }
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            let wait_for = self
+                .next_wake_delay()
+                .await
+                .unwrap_or(Duration::from_secs(5));
+            tokio::select! {
+                _ = self.work_notify.notified() => {}
+                _ = tokio::time::sleep(wait_for) => {}
+            }
         }
+    }
+
+    pub fn notify_work(&self) {
+        self.work_notify.notify_one();
+    }
+
+    async fn next_wake_delay(&self) -> Result<Duration> {
+        let next_retry_at = {
+            let conn = lock_mutex(&self.conn)?;
+            db::next_retry_due_at(&conn)?
+        };
+
+        let max_idle = Duration::from_secs(2);
+        let min_delay = Duration::from_millis(200);
+
+        if let Some(next_retry_at) = next_retry_at {
+            let now = chrono::Utc::now();
+            if next_retry_at <= now {
+                return Ok(min_delay);
+            }
+
+            let delay = (next_retry_at - now).to_std().unwrap_or(min_delay);
+            return Ok(delay.clamp(min_delay, max_idle));
+        }
+
+        Ok(max_idle)
     }
 
     async fn check_and_report(&self, session_id: &str) -> Result<()> {
@@ -74,7 +123,9 @@ impl Coordinator {
         Ok(())
     }
 
-    pub async fn process_cycle(&self) -> Result<()> {
+    pub async fn process_cycle(&self) -> Result<bool> {
+        let mut did_work = false;
+
         // 1. Check for retryable jobs
         {
             let conn = lock_mutex(&self.conn)?;
@@ -103,41 +154,66 @@ impl Coordinator {
                         "retry",
                         &format!("Auto-retry attempt #{}", job.retry_count + 1),
                     )?;
+                    did_work = true;
                 }
             }
         }
 
-        // 2. Try starting scans (Limit: 2 concurrent file scans)
-        let scanner_enabled = lock_async_mutex(&self.config).await.scanner_enabled;
-        let active_scans = {
-            let conn = lock_mutex(&self.conn)?;
-            db::count_jobs_with_status(&conn, "scanning")?
+        // 2. Try starting scans
+        let (scanner_enabled, scan_limit) = {
+            let cfg = lock_async_mutex(&self.config).await;
+            (cfg.scanner_enabled, cfg.concurrency_scan_global.max(1))
         };
 
-        if active_scans < 2 {
-            let queued_job = {
+        if scanner_enabled {
+            let active_scans = {
                 let conn = lock_mutex(&self.conn)?;
-                if let Some(job) = db::get_next_job(&conn, "queued")? {
-                    if scanner_enabled {
+                db::count_jobs_with_status(&conn, "scanning")?
+            };
+
+            let available_scan_slots = scan_limit.saturating_sub(active_scans as usize);
+            for _ in 0..available_scan_slots {
+                let queued_job = {
+                    let conn = lock_mutex(&self.conn)?;
+                    if let Some(job) = db::get_next_job(&conn, "queued")? {
                         db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
                         Some(job)
                     } else {
-                        db::update_scan_status(&conn, job.id, "skipped", "scanned")?;
-                        db::insert_event(&conn, job.id, "scan", "scan skipped by policy")?;
                         None
                     }
-                } else {
-                    None
-                }
-            };
+                };
 
-            if let Some(job) = queued_job {
-                let coord = self.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = coord.process_scan(&job).await {
-                        error!("Scan orchestration failed for job {}: {}", job.id, e);
+                if let Some(job) = queued_job {
+                    did_work = true;
+                    let coord = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = coord.process_scan(&job).await {
+                            error!("Scan orchestration failed for job {}: {}", job.id, e);
+                        }
+                    });
+                } else {
+                    break;
+                }
+            }
+        } else {
+            // Scanner disabled: mark a bounded batch as scanned so uploads can proceed.
+            for _ in 0..32 {
+                let skipped_job = {
+                    let conn = lock_mutex(&self.conn)?;
+                    if let Some(job) = db::get_next_job(&conn, "queued")? {
+                        db::update_scan_status(&conn, job.id, "skipped", "scanned")?;
+                        db::insert_event(&conn, job.id, "scan", "scan skipped by policy")?;
+                        Some(job)
+                    } else {
+                        None
                     }
-                });
+                };
+
+                if skipped_job.is_some() {
+                    did_work = true;
+                } else {
+                    break;
+                }
             }
         }
 
@@ -151,7 +227,8 @@ impl Coordinator {
             )
         };
 
-        if active_uploads < max_uploads as i64 {
+        let available_upload_slots = max_uploads.saturating_sub(active_uploads as usize);
+        for _ in 0..available_upload_slots {
             let scanned_job = {
                 let conn = lock_mutex(&self.conn)?;
                 if let Some(job) = db::get_next_job(&conn, "scanned")? {
@@ -163,16 +240,19 @@ impl Coordinator {
             };
 
             if let Some(job) = scanned_job {
+                did_work = true;
                 let coord = self.clone();
                 tokio::spawn(async move {
                     if let Err(e) = coord.process_upload(&job).await {
                         error!("Upload orchestration failed for job {}: {}", job.id, e);
                     }
                 });
+            } else {
+                break;
             }
         }
 
-        Ok(())
+        Ok(did_work)
     }
 
     async fn process_scan(&self, job: &JobRow) -> Result<()> {
@@ -181,6 +261,7 @@ impl Coordinator {
             None => {
                 let conn = lock_mutex(&self.conn)?;
                 db::update_job_error(&conn, job.id, "failed", "no staged path")?;
+                self.notify_work();
                 return Ok(());
             }
         };
@@ -276,6 +357,7 @@ impl Coordinator {
                 self.check_and_report(&job.session_id).await?;
             }
         }
+        self.notify_work();
         Ok(())
     }
 
@@ -429,6 +511,7 @@ impl Coordinator {
         // We can't do it easily inside the match arm above without refactoring the if/else or using drop.
         // But wait, I need to check report only on failure terminal state.
 
+        self.notify_work();
         Ok(())
     }
 
@@ -654,7 +737,7 @@ mod tests {
         };
 
         // Run cycle
-        coord.process_cycle().await?;
+        let _ = coord.process_cycle().await?;
 
         // Verify state changed. It might reach 'uploading' in one cycle if uploader is also ready
         let c = lock_mutex(&conn)?;
@@ -683,7 +766,7 @@ mod tests {
         // Run cycle
         // This will spawn the upload task, but we only care about the synchronous state update
         // that happens BEFORE the spawn.
-        coord.process_cycle().await?;
+        let _ = coord.process_cycle().await?;
 
         // Verify state changed to 'uploading'
         let c = lock_mutex(&conn)?;
