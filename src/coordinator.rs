@@ -70,7 +70,7 @@ impl Coordinator {
     pub async fn run(&self) {
         loop {
             if let Err(e) = self.process_cycle().await {
-                eprintln!("Coordinator error: {}", e);
+                error!("Coordinator error: {}", e);
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -232,7 +232,7 @@ impl Coordinator {
                 if let Some(fname) = file_name {
                     let dest = quarantine_dir.join(fname);
                     if let Err(e) = std::fs::rename(path, &dest) {
-                        eprintln!("Failed to quarantine file: {}", e);
+                        error!("Failed to quarantine file: {}", e);
                     } else {
                         quarantine_path_str = dest.to_string_lossy().to_string();
                     }

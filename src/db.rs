@@ -1,10 +1,12 @@
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct JobRow {
@@ -477,19 +479,21 @@ pub fn clear_history(conn: &Connection, filter: Option<&str>) -> Result<()> {
     // Check if we should update delete_job first? Yes.
     // But let's fix it here for now to be self-contained.
 
+    let tx = conn.unchecked_transaction()?;
     for id in ids {
         // Delete parts
-        conn.execute(
+        tx.execute(
             "DELETE FROM parts WHERE upload_id IN (SELECT id FROM uploads WHERE job_id = ?)",
             params![id],
         )?;
         // Delete uploads
-        conn.execute("DELETE FROM uploads WHERE job_id = ?", params![id])?;
+        tx.execute("DELETE FROM uploads WHERE job_id = ?", params![id])?;
         // Delete events
-        conn.execute("DELETE FROM events WHERE job_id = ?", params![id])?;
+        tx.execute("DELETE FROM events WHERE job_id = ?", params![id])?;
         // Delete job
-        conn.execute("DELETE FROM jobs WHERE id = ?", params![id])?;
+        tx.execute("DELETE FROM jobs WHERE id = ?", params![id])?;
     }
+    tx.commit()?;
 
     Ok(())
 }
@@ -591,28 +595,90 @@ pub fn set_job_priority(conn: &Connection, job_id: i64, priority: i64) -> Result
     Ok(())
 }
 
-const SECRET_KEY_XOR: &[u8] = b"drifter-secret-pad-123";
+const XOR_KEY_LEGACY: &[u8] = b"drifter-secret-pad-123";
 
-fn obfuscate(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len());
-    for (i, &b) in bytes.iter().enumerate() {
-        result.push(b ^ SECRET_KEY_XOR[i % SECRET_KEY_XOR.len()]);
-    }
-    hex::encode(result)
-}
-
-fn deobfuscate(input: &str) -> Result<String> {
+fn deobfuscate_legacy(input: &str) -> Result<String> {
     let bytes = hex::decode(input).context("decode hex secret")?;
     let mut result = Vec::with_capacity(bytes.len());
     for (i, &b) in bytes.iter().enumerate() {
-        result.push(b ^ SECRET_KEY_XOR[i % SECRET_KEY_XOR.len()]);
+        result.push(b ^ XOR_KEY_LEGACY[i % XOR_KEY_LEGACY.len()]);
     }
     String::from_utf8(result).context("parse utf8 secret")
 }
 
+fn get_or_create_key() -> Result<[u8; 32]> {
+    use std::sync::OnceLock;
+    static CACHED_KEY: OnceLock<[u8; 32]> = OnceLock::new();
+
+    if let Some(key) = CACHED_KEY.get() {
+        return Ok(*key);
+    }
+
+    let keyfile = Path::new("./state/keyfile");
+    let key = if keyfile.exists() {
+        let data = fs::read(keyfile).context("read keyfile")?;
+        match <[u8; 32]>::try_from(data.as_slice()) {
+            Ok(key) => key,
+            Err(_) => {
+                warn!("Keyfile has unexpected length {}, regenerating", data.len());
+                generate_and_write_keyfile(keyfile)?
+            }
+        }
+    } else {
+        generate_and_write_keyfile(keyfile)?
+    };
+
+    let _ = CACHED_KEY.set(key);
+    Ok(key)
+}
+
+fn generate_and_write_keyfile(keyfile: &Path) -> Result<[u8; 32]> {
+    let key: [u8; 32] = rand::random();
+    if let Some(parent) = keyfile.parent() {
+        fs::create_dir_all(parent).context("create state dir for keyfile")?;
+    }
+    fs::write(keyfile, key).context("write keyfile")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(keyfile, fs::Permissions::from_mode(0o600))
+            .context("set keyfile permissions")?;
+    }
+    info!("Generated new encryption keyfile");
+    Ok(key)
+}
+
+fn encrypt_secret(plaintext: &str) -> Result<String> {
+    let key = get_or_create_key()?;
+    let cipher = Aes256Gcm::new_from_slice(&key).context("create AES cipher")?;
+    let nonce_bytes: [u8; 12] = rand::random();
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .map_err(|e| anyhow::anyhow!("encryption failed: {}", e))?;
+    let mut blob = Vec::with_capacity(12 + ciphertext.len());
+    blob.extend_from_slice(&nonce_bytes);
+    blob.extend_from_slice(&ciphertext);
+    Ok(hex::encode(blob))
+}
+
+fn decrypt_secret(hex_blob: &str) -> Result<String> {
+    let blob = hex::decode(hex_blob).context("decode hex secret")?;
+    if blob.len() < 13 {
+        anyhow::bail!("ciphertext too short");
+    }
+    let (nonce_bytes, ciphertext) = blob.split_at(12);
+    let key = get_or_create_key()?;
+    let cipher = Aes256Gcm::new_from_slice(&key).context("create AES cipher")?;
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| anyhow::anyhow!("decryption failed: {}", e))?;
+    String::from_utf8(plaintext).context("parse utf8 secret")
+}
+
 pub fn set_secret(conn: &Connection, key: &str, value: &str) -> Result<()> {
-    let val = obfuscate(value);
+    let val = encrypt_secret(value)?;
     conn.execute(
         "INSERT OR REPLACE INTO secrets (key, value) VALUES (?, ?)",
         params![key, val],
@@ -625,7 +691,21 @@ pub fn get_secret(conn: &Connection, key: &str) -> Result<Option<String>> {
     let mut rows = stmt.query(params![key])?;
     if let Some(row) = rows.next()? {
         let val: String = row.get(0)?;
-        Ok(Some(deobfuscate(&val)?))
+        // Try AES decryption first; fall back to legacy XOR for migration
+        match decrypt_secret(&val) {
+            Ok(plaintext) => Ok(Some(plaintext)),
+            Err(_) => {
+                let plaintext = deobfuscate_legacy(&val)?;
+                // Re-encrypt with AES and update the row
+                let new_val = encrypt_secret(&plaintext)?;
+                conn.execute(
+                    "UPDATE secrets SET value = ? WHERE key = ?",
+                    params![new_val, key],
+                )?;
+                info!("Migrated secret '{}' from XOR to AES-GCM", key);
+                Ok(Some(plaintext))
+            }
+        }
     } else {
         Ok(None)
     }

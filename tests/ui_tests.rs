@@ -3,6 +3,7 @@
 // These tests render the TUI to an in-memory buffer using Ratatui's TestBackend
 // and compare against saved snapshots using insta.
 
+use chrono::Utc;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -383,12 +384,15 @@ impl TestAppBuilder {
     }
 }
 
-/// Helper to create sample job rows for testing
+/// Helper to create sample job rows for testing.
+/// Uses a timestamp 2 hours in the past so relative time displays as "2h ago"
+/// and doesn't drift across days like a hardcoded date would.
 fn create_sample_job(id: i64, name: &str, status: &str, size: i64) -> JobRow {
+    let two_hours_ago = Utc::now() - chrono::Duration::hours(2);
     JobRow {
         id,
         session_id: "test-session".to_string(),
-        created_at: "2025-01-15T10:30:00Z".to_string(),
+        created_at: two_hours_ago.to_rfc3339(),
         status: status.to_string(),
         source_path: format!("/uploads/{}", name),
         size_bytes: size,

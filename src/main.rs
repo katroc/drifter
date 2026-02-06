@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
         use tracing_subscriber::EnvFilter;
         let new_filter = EnvFilter::new(log_level);
         if let Err(e) = log_handle.reload(new_filter) {
-            eprintln!("Failed to apply persisted log level '{}': {}", log_level, e);
+            tracing::error!("Failed to apply persisted log level '{}': {}", log_level, e);
         } else {
             tracing::info!("Applied persisted log level: {}", log_level);
         }
@@ -83,7 +83,7 @@ async fn main() -> Result<()> {
         ) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("Failed to create coordinator: {}", e);
+                tracing::error!("Failed to create coordinator: {}", e);
                 return;
             }
         };
