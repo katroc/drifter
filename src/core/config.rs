@@ -369,11 +369,8 @@ impl Config {
             .as_ref()
             .map(|k| !k.trim().is_empty())
             .unwrap_or(false);
-        let secret_ok = self
-            .s3_secret_key
-            .as_ref()
-            .map(|k| !k.trim().is_empty())
-            .unwrap_or(false);
+        // Presence check only: avoid touching secret contents in UI readiness logic.
+        let secret_ok = self.s3_secret_key.is_some();
 
         !(access_ok ^ secret_ok)
     }
