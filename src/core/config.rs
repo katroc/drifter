@@ -363,6 +363,31 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
 }
 
 impl Config {
+    pub fn has_matching_s3_credentials(&self) -> bool {
+        let access_ok = self
+            .s3_access_key
+            .as_ref()
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
+        let secret_ok = self
+            .s3_secret_key
+            .as_ref()
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
+
+        !(access_ok ^ secret_ok)
+    }
+
+    pub fn is_s3_ready(&self) -> bool {
+        let bucket_ok = self
+            .s3_bucket
+            .as_ref()
+            .map(|b| !b.trim().is_empty())
+            .unwrap_or(false);
+
+        bucket_ok && self.has_matching_s3_credentials()
+    }
+
     /// Validate configuration values
     /// Returns errors for invalid configurations
     #[allow(dead_code)]

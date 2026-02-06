@@ -128,27 +128,7 @@ pub(crate) async fn request_remote_list(app: &mut App, force_refresh: bool) -> b
 }
 
 pub(crate) fn s3_ready(config: &Config) -> bool {
-    let bucket_ok = config
-        .s3_bucket
-        .as_ref()
-        .map(|b| !b.trim().is_empty())
-        .unwrap_or(false);
-    if !bucket_ok {
-        return false;
-    }
-
-    let access_ok = config
-        .s3_access_key
-        .as_ref()
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false);
-    let secret_ok = config
-        .s3_secret_key
-        .as_ref()
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false);
-
-    !(access_ok ^ secret_ok)
+    config.is_s3_ready()
 }
 
 pub(crate) fn selected_remote_object(app: &App) -> Option<S3Object> {
