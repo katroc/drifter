@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::Modifier,
     text::{Line, Span},
     widgets::{
         Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap,
@@ -12,13 +12,14 @@ use crate::app::settings::SettingsCategory;
 use crate::app::state::{App, AppFocus, AppTab, InputMode, LayoutTarget};
 use crate::components::file_picker::FileEntry;
 use crate::components::wizard::WizardStep;
+use crate::ui::key_hints::footer_hints;
 use crate::ui::theme::{StatusKind, Theme};
 use crate::utils::lock_mutex;
 
 use crate::ui::util::{
     calculate_list_offset, centered_fixed_rect, centered_rect, extract_threat_name, format_bytes,
     format_bytes_rate, format_duration_ms, format_modified, format_relative_time, format_size,
-    fuzzy_match, status_kind,
+    fuzzy_match, status_kind, status_kind_for_message, truncate_with_ellipsis,
 };
 
 fn draw_shadow(f: &mut Frame, area: Rect, app: &App) {
@@ -583,11 +584,7 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
             }
 
             let indent = " ".repeat(item.depth * 2);
-            let text = if item.text.len() > 35 {
-                format!("{}…", &item.text[..34])
-            } else {
-                item.text.clone()
-            };
+            let text = truncate_with_ellipsis(&item.text, 35);
 
             let display_name = if item.is_folder {
                 format!("{}📁 {}", indent, text)
@@ -772,11 +769,7 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
             }
 
             let indent = " ".repeat(item.depth * 2);
-            let text = if item.text.len() > 30 {
-                format!("{}…", &item.text[..29])
-            } else {
-                item.text.clone()
-            };
+            let text = truncate_with_ellipsis(&item.text, 30);
 
             let display_name = if item.is_folder {
                 format!("{}📁 {}", indent, text)
@@ -792,11 +785,7 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
                         if let Some(err) = &job.error {
                             if let Some(name) = err.strip_prefix("Infected: ") {
                                 // Extract virus name, maybe truncate if too long
-                                if name.len() > 15 {
-                                    format!("{}...", &name[..14])
-                                } else {
-                                    name.to_string()
-                                }
+                                truncate_with_ellipsis(name, 15)
                             } else {
                                 "Threat Detected".to_string()
                             }
@@ -1094,11 +1083,7 @@ fn draw_quarantine(f: &mut Frame, app: &App, area: Rect) {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| job.source_path.clone());
-            let display_name = if filename.len() > 25 {
-                format!("{}…", &filename[..24])
-            } else {
-                filename
-            };
+            let display_name = truncate_with_ellipsis(&filename, 25);
 
             let threat = extract_threat_name(job.scan_status.as_deref().unwrap_or(""));
             let status = if job.status == "quarantined_removed" {
@@ -1119,7 +1104,7 @@ fn draw_quarantine(f: &mut Frame, app: &App, area: Rect) {
             Row::new(vec![
                 Cell::from(display_name),
                 Cell::from(threat).style(if is_selected {
-                    Style::default()
+                    app.theme.selection_style()
                 } else {
                     app.theme.status_style(StatusKind::Error)
                 }),
@@ -1624,247 +1609,22 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             app.theme.accent_style().add_modifier(Modifier::BOLD),
         )
     };
-    let act = |a: &str| Span::styled(format!(" {}", a), app.theme.muted_style());
+    let act = |a: &str| Span::styled(a.to_string(), app.theme.muted_style());
 
-    // Macro to add persistent global keys to any keybinding list
-    macro_rules! add_global_keys {
-        ($spans:expr) => {{
-            let mut result = $spans;
-            if !result.is_empty() {
-                result.push(sep());
-            }
-            result.push(key("Tab"));
-            result.push(act("Navigate"));
-            // Only show quit in modes where 'q' means quit (not in Logs where it means Back)
-            if app.focus != AppFocus::Logs || app.input_mode != InputMode::Normal {
-                result.push(sep());
-                result.push(key("q"));
-                result.push(act("Quit"));
-            }
-            result
-        }};
+    let hints = footer_hints(app);
+    let mut footer_spans = Vec::new();
+    for (idx, hint) in hints.iter().enumerate() {
+        if idx > 0 {
+            footer_spans.push(sep());
+        }
+
+        if let Some(binding) = hint.key {
+            footer_spans.push(key(binding));
+            footer_spans.push(act(&format!(" {}", hint.action)));
+        } else {
+            footer_spans.push(act(hint.action));
+        }
     }
-
-    let footer_spans = match app.input_mode {
-        InputMode::LogSearch => add_global_keys!(vec![
-            key("Enter"),
-            act("Search"),
-            sep(),
-            key("Esc"),
-            act("Cancel"),
-        ]),
-        InputMode::QueueSearch | InputMode::HistorySearch => add_global_keys!(vec![
-            key("Type"),
-            act("to filter"),
-            sep(),
-            key("Enter/Esc"),
-            act("Done"),
-        ]),
-        InputMode::Filter => add_global_keys!(vec![
-            key("Type"),
-            act("to filter"),
-            sep(),
-            key("↑/↓"),
-            act("Select"),
-            sep(),
-            key("Enter"),
-            act("Confirm"),
-            sep(),
-            key("Esc"),
-            act("Back"),
-        ]),
-        InputMode::Browsing => add_global_keys!(vec![
-            key("←/→"),
-            act("Navigate"),
-            sep(),
-            key("↑/↓"),
-            act("Select"),
-            sep(),
-            key("/"),
-            act("Filter"),
-            sep(),
-            key("t"),
-            act("Tree"),
-            sep(),
-            key("Space"),
-            act("Select"),
-            sep(),
-            key("s"),
-            act("Stage"),
-            sep(),
-            key("Esc"),
-            act("Exit"),
-        ]),
-        InputMode::RemoteBrowsing => add_global_keys!(vec![
-            key("←/→"),
-            act("Navigate"),
-            sep(),
-            key("↑/↓"),
-            act("Select"),
-            sep(),
-            key("r"),
-            act("Refresh"),
-            sep(),
-            key("d"),
-            act("Download"),
-            sep(),
-            key("x"),
-            act("Delete"),
-            sep(),
-            key("n"),
-            act("New Folder"),
-            sep(),
-            key("Esc"),
-            act("Exit"),
-        ]),
-        InputMode::RemoteFolderCreate => add_global_keys!(vec![
-            key("Enter"),
-            act("Create"),
-            sep(),
-            key("Esc"),
-            act("Cancel"),
-        ]),
-        InputMode::Confirmation => add_global_keys!(vec![Span::styled(
-            "Confirmation Required",
-            app.theme.muted_style(),
-        )]),
-        InputMode::LayoutAdjust => add_global_keys!(vec![
-            key("1-3"),
-            act("Select Panel"),
-            sep(),
-            key("+/-"),
-            act("Adjust"),
-            sep(),
-            key("r/R"),
-            act("Reset"),
-            sep(),
-            key("s"),
-            act("Save"),
-            sep(),
-            key("q"),
-            act("Cancel"),
-        ]),
-
-        InputMode::Normal => match app.focus {
-            AppFocus::Logs => add_global_keys!(vec![key("q"), act("Back")]),
-            AppFocus::Rail => add_global_keys!(vec![
-                key("Tab/→"),
-                act("Content"),
-                sep(),
-                key("↑/↓"),
-                act("Switch Tab"),
-            ]),
-            AppFocus::Browser => add_global_keys!(vec![
-                key("↑/↓"),
-                act("Select"),
-                sep(),
-                key("a"),
-                act("Browse"),
-            ]),
-            AppFocus::Queue => add_global_keys!(vec![
-                key("↑/↓"),
-                act("Select"),
-                sep(),
-                key("p"),
-                act("Pause/Resume"),
-                sep(),
-                key("+/-"),
-                act("Priority"),
-                sep(),
-                key("Enter"),
-                act("Details"),
-                sep(),
-                key("c"),
-                act("Clear Done"),
-                sep(),
-                key("r"),
-                act("Retry"),
-                sep(),
-                key("←/→"),
-                act("Navigate"),
-                sep(),
-                key("d"),
-                act("Cancel"),
-            ]),
-            AppFocus::History => add_global_keys!(vec![key("←"), act("Queue")]),
-            AppFocus::Remote => add_global_keys!(vec![
-                key("r"),
-                act("Refresh"),
-                sep(),
-                key("d"),
-                act("Download"),
-                sep(),
-                key("x"),
-                act("Delete"),
-            ]),
-            AppFocus::Quarantine => add_global_keys!(vec![
-                key("←"),
-                act("Rail"),
-                sep(),
-                key("d"),
-                act("Clear"),
-                sep(),
-                key("R"),
-                act("Refresh"),
-            ]),
-            AppFocus::SettingsCategory => match app.settings.active_category {
-                SettingsCategory::S3 | SettingsCategory::Scanner => add_global_keys!(vec![
-                    key("Tab/→"),
-                    act("Fields"),
-                    sep(),
-                    key("←"),
-                    act("Rail"),
-                    sep(),
-                    key("↑/↓"),
-                    act("Category"),
-                    sep(),
-                    key("s"),
-                    act("Save"),
-                    sep(),
-                    key("t"),
-                    act("Test"),
-                ]),
-                _ => add_global_keys!(vec![
-                    key("Tab/→"),
-                    act("Fields"),
-                    sep(),
-                    key("←"),
-                    act("Rail"),
-                    sep(),
-                    key("↑/↓"),
-                    act("Category"),
-                    sep(),
-                    key("s"),
-                    act("Save"),
-                ]),
-            },
-            AppFocus::SettingsFields => match app.settings.active_category {
-                SettingsCategory::S3 | SettingsCategory::Scanner => add_global_keys!(vec![
-                    key("←"),
-                    act("Category"),
-                    sep(),
-                    key("Enter"),
-                    act("Edit"),
-                    sep(),
-                    key("s"),
-                    act("Save"),
-                    sep(),
-                    key("t"),
-                    act("Test"),
-                ]),
-                _ => add_global_keys!(vec![
-                    key("←"),
-                    act("Category"),
-                    sep(),
-                    key("Enter"),
-                    act("Edit"),
-                    sep(),
-                    key("s"),
-                    act("Save"),
-                ]),
-            },
-        },
-    };
 
     let av_status = lock_mutex(&app.clamav_status)
         .map(|s| s.clone())
@@ -1875,13 +1635,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         "Ready"
     };
 
-    let is_error = app.status_message.to_lowercase().contains("fail")
-        || app.status_message.to_lowercase().contains("error");
-    let status_style = if is_error {
-        app.theme.status_style(StatusKind::Error)
-    } else {
-        app.theme.status_style(StatusKind::Info)
-    };
+    let status_style = app.theme.status_style(status_kind_for_message(&app.status_message));
 
     let mut right_spans = vec![];
 

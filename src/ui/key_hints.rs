@@ -1,0 +1,140 @@
+use crate::app::settings::SettingsCategory;
+use crate::app::state::{App, AppFocus, InputMode};
+
+#[derive(Clone, Copy)]
+pub struct KeyHint {
+    pub key: Option<&'static str>,
+    pub action: &'static str,
+}
+
+fn key_action(key: &'static str, action: &'static str) -> KeyHint {
+    KeyHint {
+        key: Some(key),
+        action,
+    }
+}
+
+fn text(action: &'static str) -> KeyHint {
+    KeyHint { key: None, action }
+}
+
+pub fn footer_hints(app: &App) -> Vec<KeyHint> {
+    match app.input_mode {
+        InputMode::LogSearch => vec![
+            key_action("Enter", "Search"),
+            key_action("Esc", "Cancel"),
+        ],
+        InputMode::QueueSearch | InputMode::HistorySearch => vec![
+            text("Type to filter"),
+            key_action("Enter/Esc", "Done"),
+        ],
+        InputMode::Filter => vec![
+            text("Type to filter"),
+            key_action("↑/↓", "Select"),
+            key_action("Enter", "Open"),
+            key_action("Esc", "Back"),
+        ],
+        InputMode::Browsing => vec![
+            key_action("←/→", "Navigate"),
+            key_action("↑/↓", "Select"),
+            key_action("/", "Filter"),
+            key_action("t", "Tree"),
+            key_action("Space", "Select"),
+            key_action("s", "Stage"),
+            key_action("Esc/q", "Exit"),
+        ],
+        InputMode::RemoteBrowsing => vec![
+            key_action("←/→", "Navigate"),
+            key_action("↑/↓", "Select"),
+            key_action("r", "Refresh"),
+            key_action("d", "Download"),
+            key_action("x", "Delete"),
+            key_action("n", "New Folder"),
+            key_action("Esc/q", "Exit"),
+        ],
+        InputMode::RemoteFolderCreate => vec![
+            key_action("Enter", "Create"),
+            key_action("Esc", "Cancel"),
+        ],
+        InputMode::Confirmation => vec![
+            key_action("Enter/y", "Confirm"),
+            key_action("Esc/n", "Cancel"),
+        ],
+        InputMode::LayoutAdjust => vec![
+            key_action("1-3", "Select Panel"),
+            key_action("+/-", "Adjust"),
+            key_action("r/R", "Reset"),
+            key_action("s", "Save"),
+            key_action("Esc/q", "Cancel"),
+        ],
+        InputMode::Normal => {
+            let mut hints = match app.focus {
+                AppFocus::Logs => vec![key_action("q", "Back")],
+                AppFocus::Rail => vec![
+                    key_action("Tab/→", "Content"),
+                    key_action("↑/↓", "Switch Tab"),
+                ],
+                AppFocus::Browser => vec![
+                    key_action("↑/↓", "Select"),
+                    key_action("a", "Browse"),
+                ],
+                AppFocus::Queue => vec![
+                    key_action("↑/↓", "Select"),
+                    key_action("p", "Pause/Resume"),
+                    key_action("+/-", "Priority"),
+                    key_action("Enter", "Details"),
+                    key_action("c", "Clear Done"),
+                    key_action("r", "Retry"),
+                    key_action("←/→", "Navigate"),
+                    key_action("d", "Cancel"),
+                ],
+                AppFocus::History => vec![key_action("←", "Queue")],
+                AppFocus::Remote => vec![
+                    key_action("a", "Browse"),
+                    key_action("r", "Refresh"),
+                    key_action("d", "Download"),
+                    key_action("x", "Delete"),
+                ],
+                AppFocus::Quarantine => vec![
+                    key_action("←", "Rail"),
+                    key_action("d", "Clear"),
+                    key_action("R", "Refresh"),
+                ],
+                AppFocus::SettingsCategory => match app.settings.active_category {
+                    SettingsCategory::S3 | SettingsCategory::Scanner => vec![
+                        key_action("Tab/→", "Fields"),
+                        key_action("←", "Rail"),
+                        key_action("↑/↓", "Category"),
+                        key_action("s", "Save"),
+                        key_action("t", "Test"),
+                    ],
+                    _ => vec![
+                        key_action("Tab/→", "Fields"),
+                        key_action("←", "Rail"),
+                        key_action("↑/↓", "Category"),
+                        key_action("s", "Save"),
+                    ],
+                },
+                AppFocus::SettingsFields => match app.settings.active_category {
+                    SettingsCategory::S3 | SettingsCategory::Scanner => vec![
+                        key_action("←", "Category"),
+                        key_action("Enter", "Edit"),
+                        key_action("s", "Save"),
+                        key_action("t", "Test"),
+                    ],
+                    _ => vec![
+                        key_action("←", "Category"),
+                        key_action("Enter", "Edit"),
+                        key_action("s", "Save"),
+                    ],
+                },
+            };
+
+            hints.push(key_action("Tab", "Navigate"));
+            if app.focus != AppFocus::Logs {
+                hints.push(key_action("q", "Quit"));
+            }
+            hints
+        }
+    }
+}

@@ -1,6 +1,7 @@
 use crate::app::state::{App, AppEvent, LayoutTarget};
 use crate::core::config::Config;
 use crate::services::uploader::{S3Object, Uploader};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::warn;
@@ -144,4 +145,93 @@ pub(crate) fn s3_ready(config: &Config) -> bool {
         .unwrap_or(false);
 
     !(access_ok ^ secret_ok)
+}
+
+pub(crate) fn selected_remote_object(app: &App) -> Option<S3Object> {
+    app.s3_objects.get(app.selected_remote).cloned()
+}
+
+pub(crate) async fn start_remote_download(app: &mut App, key: String) {
+    app.set_status(format!("Downloading {}...", key));
+    let tx = app.async_tx.clone();
+    let config_clone = app.config.lock().await.clone();
+
+    let download_dir = dirs::download_dir().unwrap_or_else(|| PathBuf::from("."));
+    let dest = download_dir.join(
+        std::path::Path::new(&key)
+            .file_name()
+            .unwrap_or(std::ffi::OsStr::new("downloaded_file")),
+    );
+    let dest_clone = dest.clone();
+
+    tokio::spawn(async move {
+        let res = Uploader::download_file(&config_clone, &key, &dest_clone).await;
+        match res {
+            Ok(_) => {
+                if let Err(send_err) = tx.send(AppEvent::Notification(format!(
+                    "Downloaded to {:?}",
+                    dest_clone
+                ))) {
+                    warn!(
+                        "Failed to send download success notification: {}",
+                        send_err
+                    );
+                }
+            }
+            Err(e) => {
+                if let Err(send_err) =
+                    tx.send(AppEvent::Notification(format!("Download Failed: {}", e)))
+                {
+                    warn!(
+                        "Failed to send download failure notification: {}",
+                        send_err
+                    );
+                }
+            }
+        }
+    });
+}
+
+pub(crate) async fn prepare_remote_delete(
+    app: &mut App,
+    key: String,
+    name: String,
+    is_dir: bool,
+) {
+    if is_dir {
+        let dir_key = if key.ends_with('/') {
+            key
+        } else {
+            format!("{}/", key)
+        };
+        let config_clone = app.config.lock().await.clone();
+        match Uploader::is_folder_empty(&config_clone, &dir_key).await {
+            Ok(true) => {
+                app.input_mode = crate::app::state::InputMode::Confirmation;
+                app.pending_action = crate::app::state::ModalAction::DeleteRemoteObject(
+                    dir_key,
+                    app.remote_current_path.clone(),
+                );
+                app.confirmation_msg = format!("Delete empty folder '{}'?", name);
+            }
+            Ok(false) => {
+                app.input_mode = crate::app::state::InputMode::Confirmation;
+                app.pending_action = crate::app::state::ModalAction::DeleteRemoteObject(
+                    dir_key,
+                    app.remote_current_path.clone(),
+                );
+                app.confirmation_msg = format!("Delete folder '{}' and all contents?", name);
+            }
+            Err(e) => {
+                app.set_status(format!("Folder check failed: {}", e));
+            }
+        }
+    } else {
+        app.input_mode = crate::app::state::InputMode::Confirmation;
+        app.pending_action = crate::app::state::ModalAction::DeleteRemoteObject(
+            key,
+            app.remote_current_path.clone(),
+        );
+        app.confirmation_msg = format!("Delete '{}'?", name);
+    }
 }

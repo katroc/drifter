@@ -39,8 +39,9 @@ use crate::components::wizard::{WizardState, WizardStep};
 use crate::ui::util::{calculate_list_offset, fuzzy_match};
 use crate::utils::lock_mutex;
 use self::helpers::{
-    adjust_layout_dimension, request_remote_list, reset_all_layout_dimensions,
-    reset_layout_dimension, s3_ready, update_layout_message,
+    adjust_layout_dimension, prepare_remote_delete, request_remote_list,
+    reset_all_layout_dimensions, reset_layout_dimension, s3_ready, selected_remote_object,
+    start_remote_download, update_layout_message,
 };
 
 use tokio::sync::Mutex as AsyncMutex;
@@ -1503,130 +1504,23 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             app.status_message = "Browsing Remote...".to_string();
                                         }
                                         KeyCode::Char('d') => {
-                                            if !app.s3_objects.is_empty()
-                                                && app.selected_remote < app.s3_objects.len()
-                                            {
-                                                let key =
-                                                    app.s3_objects[app.selected_remote].key.clone();
-                                                let is_dir =
-                                                    app.s3_objects[app.selected_remote].is_dir;
-
-                                                if is_dir {
-                                                    app.status_message =
+                                            if let Some(obj) = selected_remote_object(&app) {
+                                                if obj.is_dir {
+                                                    app.set_status(
                                                         "Cannot download directories yet."
-                                                            .to_string();
-                                                } else {
-                                                    app.status_message =
-                                                        format!("Downloading {}...", key);
-                                                    let tx = app.async_tx.clone();
-                                                    let config_clone =
-                                                        app.config.lock().await.clone();
-
-                                                    let download_dir = dirs::download_dir()
-                                                        .unwrap_or(PathBuf::from("."));
-                                                    let dest = download_dir.join(
-                                                        std::path::Path::new(&key)
-                                                            .file_name()
-                                                            .unwrap_or(std::ffi::OsStr::new(
-                                                                "downloaded_file",
-                                                            )),
+                                                            .to_string(),
                                                     );
-                                                    let dest_clone = dest.clone();
-
-                                                    tokio::spawn(async move {
-                                                        let res = crate::services::uploader::Uploader::download_file(&config_clone, &key, &dest_clone).await;
-                                                        match res {
-                                                            Ok(_) => {
-                                                                if let Err(send_err) = tx.send(
-                                                                    AppEvent::Notification(
-                                                                        format!(
-                                                                            "Downloaded to {:?}",
-                                                                            dest_clone
-                                                                        ),
-                                                                    ),
-                                                                ) {
-                                                                    warn!("Failed to send download success notification: {}", send_err);
-                                                                }
-                                                            }
-                                                            Err(e) => {
-                                                                if let Err(send_err) = tx.send(
-                                                                    AppEvent::Notification(
-                                                                        format!(
-                                                                            "Download Failed: {}",
-                                                                            e
-                                                                        ),
-                                                                    ),
-                                                                ) {
-                                                                    warn!("Failed to send download failure notification: {}", send_err);
-                                                                }
-                                                            }
-                                                        }
-                                                    });
+                                                } else {
+                                                    start_remote_download(&mut app, obj.key).await;
                                                 }
                                             }
                                         }
                                         KeyCode::Char('x') => {
-                                            if !app.s3_objects.is_empty()
-                                                && app.selected_remote < app.s3_objects.len()
-                                            {
-                                                let obj = &app.s3_objects[app.selected_remote];
-                                                let key = obj.key.clone();
-
-                                                if obj.is_dir {
-                                                    let dir_key = if key.ends_with('/') {
-                                                        key.clone()
-                                                    } else {
-                                                        format!("{}/", key)
-                                                    };
-                                                    let config_clone =
-                                                        app.config.lock().await.clone();
-                                                    match crate::services::uploader::Uploader::is_folder_empty(
-                                                        &config_clone,
-                                                        &dir_key,
-                                                    )
-                                                    .await
-                                                    {
-                                                        Ok(true) => {
-                                                            app.input_mode = InputMode::Confirmation;
-                                                            app.pending_action =
-                                                                ModalAction::DeleteRemoteObject(
-                                                                    dir_key.clone(),
-                                                                    app.remote_current_path.clone(),
-                                                                );
-                                                            app.confirmation_msg = format!(
-                                                                "Delete empty folder '{}'?",
-                                                                obj.name
-                                                            );
-                                                        }
-                                                        Ok(false) => {
-                                                            app.input_mode = InputMode::Confirmation;
-                                                            app.pending_action =
-                                                                ModalAction::DeleteRemoteObject(
-                                                                    dir_key.clone(),
-                                                                    app.remote_current_path.clone(),
-                                                                );
-                                                            app.confirmation_msg = format!(
-                                                                "Delete folder '{}' and all contents?",
-                                                                obj.name
-                                                            );
-                                                        }
-                                                        Err(e) => {
-                                                            app.status_message = format!(
-                                                                "Folder check failed: {}",
-                                                                e
-                                                            );
-                                                        }
-                                                    }
-                                                } else {
-                                                    app.input_mode = InputMode::Confirmation;
-                                                    app.pending_action =
-                                                        ModalAction::DeleteRemoteObject(
-                                                            key.clone(),
-                                                            app.remote_current_path.clone(),
-                                                        );
-                                                    app.confirmation_msg =
-                                                        format!("Delete '{}'?", obj.name);
-                                                }
+                                            if let Some(obj) = selected_remote_object(&app) {
+                                                prepare_remote_delete(
+                                                    &mut app, obj.key, obj.name, obj.is_dir,
+                                                )
+                                                .await;
                                             }
                                         }
                                         KeyCode::Char('r') => {
@@ -1697,135 +1591,24 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             }
                                             // Allow downloading/deleting in browsing mode too
                                             KeyCode::Char('d') => {
-                                                if !app.s3_objects.is_empty()
-                                                    && app.selected_remote < app.s3_objects.len()
-                                                {
-                                                    let key = app.s3_objects[app.selected_remote]
-                                                        .key
-                                                        .clone();
-                                                    let is_dir =
-                                                        app.s3_objects[app.selected_remote].is_dir;
-
-                                                    if is_dir {
-                                                        app.status_message =
+                                                if let Some(obj) = selected_remote_object(&app) {
+                                                    if obj.is_dir {
+                                                        app.set_status(
                                                             "Cannot download directories yet."
-                                                                .to_string();
-                                                    } else {
-                                                        app.status_message =
-                                                            format!("Downloading {}...", key);
-                                                        let tx = app.async_tx.clone();
-                                                        let config_clone =
-                                                            app.config.lock().await.clone();
-
-                                                        let download_dir = dirs::download_dir()
-                                                            .unwrap_or(PathBuf::from("."));
-                                                        let dest = download_dir.join(
-                                                            std::path::Path::new(&key)
-                                                                .file_name()
-                                                                .unwrap_or(std::ffi::OsStr::new(
-                                                                    "downloaded_file",
-                                                                )),
+                                                                .to_string(),
                                                         );
-                                                        let dest_clone = dest.clone();
-
-                                                        tokio::spawn(async move {
-                                                            let res = crate::services::uploader::Uploader::download_file(&config_clone, &key, &dest_clone).await;
-                                                            match res {
-                                                                Ok(_) => {
-                                                                    if let Err(send_err) = tx.send(
-                                                                    AppEvent::Notification(
-                                                                        format!(
-                                                                            "Downloaded to {:?}",
-                                                                            dest_clone
-                                                                        ),
-                                                                    ),
-                                                                ) {
-                                                                    warn!("Failed to send download success notification: {}", send_err);
-                                                                }
-                                                                }
-                                                                Err(e) => {
-                                                                    if let Err(send_err) = tx.send(
-                                                                    AppEvent::Notification(
-                                                                        format!(
-                                                                            "Download Failed: {}",
-                                                                            e
-                                                                        ),
-                                                                    ),
-                                                                ) {
-                                                                    warn!("Failed to send download failure notification: {}", send_err);
-                                                                }
-                                                                }
-                                                            }
-                                                        });
+                                                    } else {
+                                                        start_remote_download(&mut app, obj.key)
+                                                            .await;
                                                     }
                                                 }
                                             }
                                             KeyCode::Char('x') => {
-                                                if !app.s3_objects.is_empty()
-                                                    && app.selected_remote < app.s3_objects.len()
-                                                {
-                                                    let obj = &app.s3_objects[app.selected_remote];
-                                                    let key = obj.key.clone();
-
-                                                    if obj.is_dir {
-                                                        let dir_key = if key.ends_with('/') {
-                                                            key.clone()
-                                                        } else {
-                                                            format!("{}/", key)
-                                                        };
-                                                        let config_clone =
-                                                            app.config.lock().await.clone();
-                                                        match crate::services::uploader::Uploader::is_folder_empty(
-                                                            &config_clone,
-                                                            &dir_key,
-                                                        )
-                                                        .await
-                                                        {
-                                                            Ok(true) => {
-                                                                app.input_mode =
-                                                                    InputMode::Confirmation;
-                                                                app.pending_action =
-                                                                    ModalAction::DeleteRemoteObject(
-                                                                        dir_key.clone(),
-                                                                        app.remote_current_path
-                                                                            .clone(),
-                                                                    );
-                                                                app.confirmation_msg = format!(
-                                                                    "Delete empty folder '{}'?",
-                                                                    obj.name
-                                                                );
-                                                            }
-                                                            Ok(false) => {
-                                                                app.input_mode =
-                                                                    InputMode::Confirmation;
-                                                                app.pending_action =
-                                                                    ModalAction::DeleteRemoteObject(
-                                                                        dir_key.clone(),
-                                                                        app.remote_current_path
-                                                                            .clone(),
-                                                                    );
-                                                                app.confirmation_msg = format!(
-                                                                    "Delete folder '{}' and all contents?",
-                                                                    obj.name
-                                                                );
-                                                            }
-                                                            Err(e) => {
-                                                                app.status_message = format!(
-                                                                    "Folder check failed: {}",
-                                                                    e
-                                                                );
-                                                            }
-                                                        }
-                                                    } else {
-                                                        app.input_mode = InputMode::Confirmation;
-                                                        app.pending_action =
-                                                            ModalAction::DeleteRemoteObject(
-                                                                key.clone(),
-                                                                app.remote_current_path.clone(),
-                                                            );
-                                                        app.confirmation_msg =
-                                                            format!("Delete '{}'?", obj.name);
-                                                    }
+                                                if let Some(obj) = selected_remote_object(&app) {
+                                                    prepare_remote_delete(
+                                                        &mut app, obj.key, obj.name, obj.is_dir,
+                                                    )
+                                                    .await;
                                                 }
                                             }
                                             KeyCode::Char('r') => {
