@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use base64::{Engine as _, engine::general_purpose};
 use sha2::{Digest, Sha256};
@@ -82,6 +82,15 @@ impl Uploader {
         }
         let client = Client::from_conf(client_builder.build());
         Ok((client, bucket.to_string()))
+    }
+
+    fn parent_folder_marker_key(key: &str) -> Option<String> {
+        let trimmed = key.trim_end_matches('/');
+        let (parent, _) = trimmed.rsplit_once('/')?;
+        if parent.is_empty() {
+            return None;
+        }
+        Some(format!("{}/", parent.trim_end_matches('/')))
     }
 
     fn apply_sse_create_multipart(
@@ -180,6 +189,7 @@ impl Uploader {
         };
 
         let mut objects = Vec::new();
+        let mut discovered_dirs = HashSet::new();
         let mut continuation_token = None;
 
         loop {
@@ -201,6 +211,8 @@ impl Uploader {
             if let Some(common_prefixes) = resp.common_prefixes {
                 for cp in common_prefixes {
                     if let Some(key) = cp.prefix {
+                        discovered_dirs.insert(key.clone());
+
                         // Calculate relative name
                         let name = if key.starts_with(&prefix) {
                             key[prefix.len()..].to_string()
@@ -228,6 +240,30 @@ impl Uploader {
                     // S3 sometimes returns the prefix itself as an object if it was created explicitly (0 byte file)
                     // If key == prefix, and we are browsing that prefix, it's the current dir, skip it.
                     if key == prefix {
+                        continue;
+                    }
+
+                    // Treat trailing-slash markers as directories and deduplicate against CommonPrefixes.
+                    if key.ends_with('/') {
+                        if discovered_dirs.contains(&key) {
+                            continue;
+                        }
+
+                        discovered_dirs.insert(key.clone());
+                        let name = if key.starts_with(&prefix) {
+                            key[prefix.len()..].to_string()
+                        } else {
+                            key.clone()
+                        };
+
+                        objects.push(S3Object {
+                            key,
+                            name,
+                            size: 0,
+                            last_modified: String::new(),
+                            is_dir: true,
+                            is_parent: false,
+                        });
                         continue;
                     }
 
@@ -307,6 +343,23 @@ impl Uploader {
             .send()
             .await
             .context("Failed to delete object")?;
+
+        // S3 folders are virtual prefixes; preserve the parent folder marker so
+        // deleting the last file in a folder doesn't make the folder disappear in the explorer.
+        if let Some(marker_key) = Self::parent_folder_marker_key(key) {
+            let put_req = client
+                .put_object()
+                .bucket(&bucket)
+                .key(&marker_key)
+                .content_length(0);
+            let put_req = Self::apply_sse_put_object(put_req, config);
+            if let Err(e) = put_req.send().await {
+                warn!(
+                    "Deleted {}, but failed to preserve folder marker {}: {}",
+                    key, marker_key, e
+                );
+            }
+        }
         Ok(())
     }
 
@@ -966,6 +1019,24 @@ impl Uploader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parent_folder_marker_key_nested_path() {
+        let marker = Uploader::parent_folder_marker_key("docker/docker-compose.yml");
+        assert_eq!(marker.as_deref(), Some("docker/"));
+    }
+
+    #[test]
+    fn test_parent_folder_marker_key_deep_path() {
+        let marker = Uploader::parent_folder_marker_key("a/b/c.txt");
+        assert_eq!(marker.as_deref(), Some("a/b/"));
+    }
+
+    #[test]
+    fn test_parent_folder_marker_key_root_file() {
+        let marker = Uploader::parent_folder_marker_key("file.txt");
+        assert_eq!(marker, None);
+    }
 
     // --- Part Size Calculation Tests ---
 

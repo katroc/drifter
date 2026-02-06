@@ -86,8 +86,11 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
             checksum TEXT,
             remote_checksum TEXT,
             error TEXT,
+            priority INTEGER DEFAULT 0,
             retry_count INTEGER DEFAULT 0,
-            next_retry_at TEXT
+            next_retry_at TEXT,
+            scan_duration_ms INTEGER,
+            upload_duration_ms INTEGER
         );
         CREATE TABLE IF NOT EXISTS uploads (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -164,6 +167,26 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
         &conn,
         "ALTER TABLE jobs ADD COLUMN upload_duration_ms INTEGER",
     )?;
+
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_jobs_status_priority_id
+            ON jobs(status, priority DESC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_jobs_status_next_retry
+            ON jobs(status, next_retry_at);
+        CREATE INDEX IF NOT EXISTS idx_jobs_status_id_desc
+            ON jobs(status, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_jobs_session_id_id
+            ON jobs(session_id, id);
+        CREATE INDEX IF NOT EXISTS idx_uploads_job_id
+            ON uploads(job_id);
+        CREATE INDEX IF NOT EXISTS idx_parts_upload_id
+            ON parts(upload_id);
+        CREATE INDEX IF NOT EXISTS idx_events_job_id
+            ON events(job_id);
+        ",
+    )
+    .context("create sqlite indexes")?;
 
     info!("Database initialized successfully at {:?}", db_path);
     Ok(conn)
@@ -301,6 +324,26 @@ pub fn list_retryable_jobs(conn: &Connection) -> Result<Vec<JobRow>> {
         .query_map(params![now], map_job_row)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+pub fn next_retry_due_at(conn: &Connection) -> Result<Option<chrono::DateTime<Utc>>> {
+    let mut stmt = conn.prepare(
+        "SELECT next_retry_at
+         FROM jobs
+         WHERE status = 'retry_pending' AND next_retry_at IS NOT NULL
+         ORDER BY next_retry_at ASC
+         LIMIT 1",
+    )?;
+
+    let mut rows = stmt.query([])?;
+    if let Some(row) = rows.next()? {
+        let next_retry_at: String = row.get(0)?;
+        let parsed = chrono::DateTime::parse_from_rfc3339(&next_retry_at)
+            .with_context(|| format!("parse next_retry_at '{}'", next_retry_at))?;
+        Ok(Some(parsed.with_timezone(&Utc)))
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn update_job_upload_id(conn: &Connection, job_id: i64, upload_id: &str) -> Result<()> {
