@@ -1,9 +1,10 @@
 use crate::app::state::AppEvent;
 use crate::core::config::Config;
+use crate::core::transfer::EndpointKind;
 use crate::db::{self, JobRow};
 use crate::services::scanner::{ScanResult, Scanner};
-use crate::services::uploader::Uploader;
-use anyhow::Result;
+use crate::services::uploader::{S3EndpointConfig, Uploader};
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -173,26 +174,49 @@ impl Coordinator {
 
             let available_scan_slots = scan_limit.saturating_sub(active_scans as usize);
             for _ in 0..available_scan_slots {
-                let queued_job = {
+                enum ScanDispatch {
+                    Spawn(JobRow),
+                    Skipped,
+                    Empty,
+                }
+
+                let dispatch = {
                     let conn = lock_mutex(&self.conn)?;
                     if let Some(job) = db::get_next_job(&conn, "queued")? {
-                        db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
-                        Some(job)
+                        let scan_policy = db::get_job_transfer_metadata(&conn, job.id)?
+                            .and_then(|m| m.scan_policy);
+                        if scan_policy.as_deref() == Some("never") {
+                            db::update_scan_status(&conn, job.id, "skipped", "scanned")?;
+                            db::insert_event(
+                                &conn,
+                                job.id,
+                                "scan",
+                                "scan skipped by transfer policy",
+                            )?;
+                            ScanDispatch::Skipped
+                        } else {
+                            db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
+                            ScanDispatch::Spawn(job)
+                        }
                     } else {
-                        None
+                        ScanDispatch::Empty
                     }
                 };
 
-                if let Some(job) = queued_job {
-                    did_work = true;
-                    let coord = self.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = coord.process_scan(&job).await {
-                            error!("Scan orchestration failed for job {}: {}", job.id, e);
-                        }
-                    });
-                } else {
-                    break;
+                match dispatch {
+                    ScanDispatch::Spawn(job) => {
+                        did_work = true;
+                        let coord = self.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = coord.process_scan(&job).await {
+                                error!("Scan orchestration failed for job {}: {}", job.id, e);
+                            }
+                        });
+                    }
+                    ScanDispatch::Skipped => {
+                        did_work = true;
+                    }
+                    ScanDispatch::Empty => break,
                 }
             }
         } else {
@@ -243,8 +267,8 @@ impl Coordinator {
                 did_work = true;
                 let coord = self.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = coord.process_upload(&job).await {
-                        error!("Upload orchestration failed for job {}: {}", job.id, e);
+                    if let Err(e) = coord.process_transfer(&job).await {
+                        error!("Transfer orchestration failed for job {}: {}", job.id, e);
                     }
                 });
             } else {
@@ -357,6 +381,581 @@ impl Coordinator {
                 self.check_and_report(&job.session_id).await?;
             }
         }
+        self.notify_work();
+        Ok(())
+    }
+
+    async fn process_transfer(&self, job: &JobRow) -> Result<()> {
+        let transfer_metadata = {
+            let conn = lock_mutex(&self.conn)?;
+            db::get_job_transfer_metadata(&conn, job.id)?
+        };
+        let transfer_direction = transfer_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.transfer_direction.as_deref())
+            .unwrap_or("local_to_s3");
+
+        match transfer_direction {
+            "local_to_s3" => self.process_upload(job).await,
+            "s3_to_local" => {
+                self.process_s3_to_local(job, transfer_metadata.as_ref())
+                    .await
+            }
+            "s3_to_s3" => self.process_s3_to_s3(job, transfer_metadata.as_ref()).await,
+            other => {
+                {
+                    let conn = lock_mutex(&self.conn)?;
+                    db::update_job_error(
+                        &conn,
+                        job.id,
+                        "failed",
+                        &format!("unknown transfer direction '{}'", other),
+                    )?;
+                    db::insert_event(
+                        &conn,
+                        job.id,
+                        "transfer",
+                        &format!("unknown transfer direction '{}'", other),
+                    )?;
+                }
+                self.check_and_report(&job.session_id).await?;
+                self.notify_work();
+                Ok(())
+            }
+        }
+    }
+
+    fn endpoint_config_string(config: &serde_json::Value, key: &str) -> Option<String> {
+        config
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(std::string::ToString::to_string)
+    }
+
+    fn endpoint_profile_to_s3_config(
+        conn: &Connection,
+        profile: &db::EndpointProfileRow,
+    ) -> Result<S3EndpointConfig> {
+        if profile.kind != EndpointKind::S3 {
+            anyhow::bail!("endpoint '{}' is not an S3 endpoint", profile.name);
+        }
+
+        let secret_key = if let Some(secret_ref) = profile.credential_ref.as_deref() {
+            db::get_secret(conn, secret_ref)?
+        } else {
+            None
+        };
+
+        Ok(S3EndpointConfig {
+            bucket: Self::endpoint_config_string(&profile.config, "bucket").unwrap_or_default(),
+            prefix: Self::endpoint_config_string(&profile.config, "prefix"),
+            region: Self::endpoint_config_string(&profile.config, "region"),
+            endpoint: Self::endpoint_config_string(&profile.config, "endpoint"),
+            access_key: Self::endpoint_config_string(&profile.config, "access_key"),
+            secret_key,
+        })
+    }
+
+    fn resolve_s3_to_s3_endpoints(
+        conn: &Connection,
+        metadata: Option<&db::JobTransferMetadata>,
+    ) -> Result<(S3EndpointConfig, S3EndpointConfig)> {
+        let source_profile = if let Some(id) = metadata.and_then(|m| m.source_endpoint_id) {
+            db::get_endpoint_profile(conn, id)?
+                .with_context(|| format!("missing source endpoint profile id={id}"))?
+        } else {
+            db::get_default_source_endpoint_profile(conn)?
+                .context("missing default source endpoint profile for s3_to_s3 transfer")?
+        };
+
+        let destination_profile = if let Some(id) = metadata.and_then(|m| m.destination_endpoint_id)
+        {
+            db::get_endpoint_profile(conn, id)?
+                .with_context(|| format!("missing destination endpoint profile id={id}"))?
+        } else {
+            db::get_default_destination_endpoint_profile(conn)?
+                .context("missing default destination endpoint profile for s3_to_s3 transfer")?
+        };
+
+        let source = Self::endpoint_profile_to_s3_config(conn, &source_profile)?;
+        let destination = Self::endpoint_profile_to_s3_config(conn, &destination_profile)?;
+        Ok((source, destination))
+    }
+
+    async fn process_s3_to_s3(
+        &self,
+        job: &JobRow,
+        metadata: Option<&db::JobTransferMetadata>,
+    ) -> Result<()> {
+        let endpoint_resolution = {
+            let conn = lock_mutex(&self.conn)?;
+            Self::resolve_s3_to_s3_endpoints(&conn, metadata)
+        };
+        let (source_endpoint, destination_endpoint) = match endpoint_resolution {
+            Ok(v) => v,
+            Err(e) => {
+                {
+                    let conn = lock_mutex(&self.conn)?;
+                    db::update_job_error(
+                        &conn,
+                        job.id,
+                        "failed",
+                        &format!("unable to resolve s3 endpoints: {}", e),
+                    )?;
+                    db::insert_event(
+                        &conn,
+                        job.id,
+                        "transfer",
+                        &format!("unable to resolve s3 endpoints: {}", e),
+                    )?;
+                }
+                self.check_and_report(&job.session_id).await?;
+                self.notify_work();
+                return Ok(());
+            }
+        };
+
+        let source_region = source_endpoint
+            .region
+            .as_deref()
+            .unwrap_or("us-east-1")
+            .trim()
+            .to_ascii_lowercase();
+        let destination_region = destination_endpoint
+            .region
+            .as_deref()
+            .unwrap_or("us-east-1")
+            .trim()
+            .to_ascii_lowercase();
+        if source_region != destination_region {
+            {
+                let conn = lock_mutex(&self.conn)?;
+                db::update_job_error(
+                    &conn,
+                    job.id,
+                    "failed",
+                    &format!(
+                        "s3_to_s3 requires same region in v1 (source={}, destination={})",
+                        source_region, destination_region
+                    ),
+                )?;
+                db::insert_event(
+                    &conn,
+                    job.id,
+                    "transfer",
+                    &format!(
+                        "same-region validation failed (source={}, destination={})",
+                        source_region, destination_region
+                    ),
+                )?;
+            }
+            self.check_and_report(&job.session_id).await?;
+            self.notify_work();
+            return Ok(());
+        }
+
+        let source_key = job
+            .s3_key
+            .clone()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| job.source_path.clone());
+        let destination_key = job
+            .staged_path
+            .clone()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| source_key.clone());
+
+        let conflict_policy = metadata
+            .and_then(|m| m.conflict_policy.as_deref())
+            .unwrap_or("overwrite");
+
+        let destination_exists =
+            match Uploader::object_exists(&destination_endpoint, &destination_key).await {
+                Ok(v) => v,
+                Err(e) => {
+                    let max_retries = 5;
+                    let should_report = {
+                        let conn = lock_mutex(&self.conn)?;
+                        if job.retry_count < max_retries {
+                            let backoff_secs = Self::calculate_backoff_seconds(job.retry_count);
+                            let next_retry =
+                                chrono::Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                            let next_retry_str = next_retry.to_rfc3339();
+                            error!(
+                                "S3->S3 preflight failed for job {}: {}. Retrying in {}s...",
+                                job.id, e, backoff_secs
+                            );
+
+                            db::update_job_retry_state(
+                                &conn,
+                                job.id,
+                                job.retry_count,
+                                Some(&next_retry_str),
+                                "retry_pending",
+                                &format!("Transfer preflight failed: {}. Retry pending.", e),
+                            )?;
+                            db::insert_event(
+                                &conn,
+                                job.id,
+                                "retry_scheduled",
+                                &format!("Scheduled transfer retry in {}s", backoff_secs),
+                            )?;
+                            false
+                        } else {
+                            db::update_job_error(
+                                &conn,
+                                job.id,
+                                "failed",
+                                &format!("Max retries exceeded. Transfer preflight error: {}", e),
+                            )?;
+                            true
+                        }
+                    };
+                    if should_report {
+                        self.check_and_report(&job.session_id).await?;
+                    }
+                    self.notify_work();
+                    return Ok(());
+                }
+            };
+
+        if destination_exists {
+            match conflict_policy {
+                "skip" => {
+                    {
+                        let conn = lock_mutex(&self.conn)?;
+                        db::update_upload_status(&conn, job.id, "skipped", "complete")?;
+                        db::insert_event(
+                            &conn,
+                            job.id,
+                            "transfer",
+                            &format!(
+                                "s3 copy skipped by conflict policy (destination key exists: {})",
+                                destination_key
+                            ),
+                        )?;
+                    }
+                    self.check_and_report(&job.session_id).await?;
+                    self.notify_work();
+                    return Ok(());
+                }
+                "prompt" => {
+                    {
+                        let conn = lock_mutex(&self.conn)?;
+                        db::update_job_error(
+                            &conn,
+                            job.id,
+                            "failed",
+                            "conflict_policy=prompt is not supported for background transfers",
+                        )?;
+                        db::insert_event(
+                            &conn,
+                            job.id,
+                            "transfer",
+                            "conflict_policy=prompt is not supported for background transfers",
+                        )?;
+                    }
+                    self.check_and_report(&job.session_id).await?;
+                    self.notify_work();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
+        {
+            let conn = lock_mutex(&self.conn)?;
+            db::update_upload_status(&conn, job.id, "starting", "uploading")?;
+            db::insert_event(
+                &conn,
+                job.id,
+                "transfer",
+                &format!(
+                    "copying s3://{}/{} -> s3://{}/{}",
+                    source_endpoint.bucket,
+                    source_key,
+                    destination_endpoint.bucket,
+                    destination_key
+                ),
+            )?;
+        }
+
+        let part_size_mb = {
+            let cfg = lock_async_mutex(&self.config).await;
+            cfg.part_size_mb
+        };
+
+        let start_time = std::time::Instant::now();
+        let result = Uploader::copy_between_endpoints(
+            &source_endpoint,
+            &destination_endpoint,
+            &source_key,
+            &destination_key,
+            part_size_mb,
+        )
+        .await;
+
+        match result {
+            Ok(()) => {
+                let duration = start_time.elapsed().as_millis() as i64;
+                {
+                    let conn = lock_mutex(&self.conn)?;
+                    db::update_upload_status(&conn, job.id, "completed", "complete")?;
+                    db::update_upload_duration(&conn, job.id, duration)?;
+                    db::insert_event(
+                        &conn,
+                        job.id,
+                        "transfer",
+                        &format!("s3 copy completed in {}ms", duration),
+                    )?;
+                }
+
+                if let Err(e) = self.app_tx.send(AppEvent::RefreshRemote) {
+                    warn!("Failed to send RefreshRemote event: {}", e);
+                }
+
+                self.check_and_report(&job.session_id).await?;
+            }
+            Err(e) => {
+                let max_retries = 5;
+                let should_report = {
+                    let conn = lock_mutex(&self.conn)?;
+                    if job.retry_count < max_retries {
+                        let backoff_secs = Self::calculate_backoff_seconds(job.retry_count);
+                        let next_retry =
+                            chrono::Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                        let next_retry_str = next_retry.to_rfc3339();
+                        error!(
+                            "S3->S3 transfer failed for job {}: {}. Retrying in {}s...",
+                            job.id, e, backoff_secs
+                        );
+
+                        db::update_job_retry_state(
+                            &conn,
+                            job.id,
+                            job.retry_count,
+                            Some(&next_retry_str),
+                            "retry_pending",
+                            &format!("Transfer failed: {}. Retry pending.", e),
+                        )?;
+
+                        db::insert_event(
+                            &conn,
+                            job.id,
+                            "retry_scheduled",
+                            &format!("Scheduled transfer retry in {}s", backoff_secs),
+                        )?;
+                        false
+                    } else {
+                        db::update_job_error(
+                            &conn,
+                            job.id,
+                            "failed",
+                            &format!("Max retries exceeded. Transfer error: {}", e),
+                        )?;
+                        true
+                    }
+                };
+
+                if should_report {
+                    self.check_and_report(&job.session_id).await?;
+                }
+            }
+        }
+
+        self.notify_work();
+        Ok(())
+    }
+
+    async fn process_s3_to_local(
+        &self,
+        job: &JobRow,
+        metadata: Option<&db::JobTransferMetadata>,
+    ) -> Result<()> {
+        let key = job
+            .s3_key
+            .clone()
+            .unwrap_or_else(|| job.source_path.clone());
+        let destination = if let Some(staged) = &job.staged_path {
+            PathBuf::from(staged)
+        } else {
+            let fallback_name = std::path::Path::new(&key)
+                .file_name()
+                .unwrap_or(std::ffi::OsStr::new("downloaded_file"));
+            let download_dir = dirs::download_dir().unwrap_or_else(|| PathBuf::from("."));
+            download_dir.join(fallback_name)
+        };
+
+        let conflict_policy = metadata
+            .and_then(|m| m.conflict_policy.as_deref())
+            .unwrap_or("overwrite");
+
+        if destination.exists() {
+            match conflict_policy {
+                "skip" => {
+                    {
+                        let conn = lock_mutex(&self.conn)?;
+                        db::update_upload_status(&conn, job.id, "skipped", "complete")?;
+                        db::insert_event(
+                            &conn,
+                            job.id,
+                            "transfer",
+                            &format!(
+                                "download skipped by conflict policy (destination exists: {})",
+                                destination.to_string_lossy()
+                            ),
+                        )?;
+                    }
+                    self.check_and_report(&job.session_id).await?;
+                    self.notify_work();
+                    return Ok(());
+                }
+                "prompt" => {
+                    {
+                        let conn = lock_mutex(&self.conn)?;
+                        db::update_job_error(
+                            &conn,
+                            job.id,
+                            "failed",
+                            "conflict_policy=prompt is not supported for background transfers",
+                        )?;
+                        db::insert_event(
+                            &conn,
+                            job.id,
+                            "transfer",
+                            "conflict_policy=prompt is not supported for background transfers",
+                        )?;
+                    }
+                    self.check_and_report(&job.session_id).await?;
+                    self.notify_work();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
+        let config = {
+            let config_guard = lock_async_mutex(&self.config).await;
+            config_guard.clone()
+        };
+
+        if let Some(parent) = destination.parent()
+            && let Err(e) = tokio::fs::create_dir_all(parent).await
+        {
+            {
+                let conn = lock_mutex(&self.conn)?;
+                db::update_job_error(
+                    &conn,
+                    job.id,
+                    "failed",
+                    &format!(
+                        "failed to create local destination directory '{}': {}",
+                        parent.to_string_lossy(),
+                        e
+                    ),
+                )?;
+                db::insert_event(
+                    &conn,
+                    job.id,
+                    "transfer",
+                    &format!(
+                        "failed to create local destination directory '{}': {}",
+                        parent.to_string_lossy(),
+                        e
+                    ),
+                )?;
+            }
+            self.check_and_report(&job.session_id).await?;
+            self.notify_work();
+            return Ok(());
+        }
+
+        {
+            let conn = lock_mutex(&self.conn)?;
+            db::update_upload_status(&conn, job.id, "starting", "uploading")?;
+            db::insert_event(
+                &conn,
+                job.id,
+                "transfer",
+                &format!(
+                    "downloading s3://{key} -> {}",
+                    destination.to_string_lossy()
+                ),
+            )?;
+        }
+
+        let start_time = std::time::Instant::now();
+        let result = Uploader::download_file(&config, &key, &destination).await;
+        match result {
+            Ok(()) => {
+                let duration = start_time.elapsed().as_millis() as i64;
+                {
+                    let conn = lock_mutex(&self.conn)?;
+                    db::update_upload_status(&conn, job.id, "completed", "complete")?;
+                    db::update_upload_duration(&conn, job.id, duration)?;
+                    db::insert_event(
+                        &conn,
+                        job.id,
+                        "transfer",
+                        &format!(
+                            "download completed in {}ms -> {}",
+                            duration,
+                            destination.to_string_lossy()
+                        ),
+                    )?;
+                }
+                self.check_and_report(&job.session_id).await?;
+            }
+            Err(e) => {
+                let max_retries = 5;
+                let should_report = {
+                    let conn = lock_mutex(&self.conn)?;
+                    if job.retry_count < max_retries {
+                        let backoff_secs = Self::calculate_backoff_seconds(job.retry_count);
+                        let next_retry =
+                            chrono::Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                        let next_retry_str = next_retry.to_rfc3339();
+
+                        error!(
+                            "S3->local transfer failed for job {}: {}. Retrying in {}s...",
+                            job.id, e, backoff_secs
+                        );
+
+                        db::update_job_retry_state(
+                            &conn,
+                            job.id,
+                            job.retry_count,
+                            Some(&next_retry_str),
+                            "retry_pending",
+                            &format!("Transfer failed: {}. Retry pending.", e),
+                        )?;
+
+                        db::insert_event(
+                            &conn,
+                            job.id,
+                            "retry_scheduled",
+                            &format!("Scheduled transfer retry in {}s", backoff_secs),
+                        )?;
+                        false
+                    } else {
+                        db::update_job_error(
+                            &conn,
+                            job.id,
+                            "failed",
+                            &format!("Max retries exceeded. Transfer error: {}", e),
+                        )?;
+                        true
+                    }
+                };
+
+                if should_report {
+                    self.check_and_report(&job.session_id).await?;
+                }
+            }
+        }
+
         self.notify_work();
         Ok(())
     }

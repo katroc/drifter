@@ -1,3 +1,4 @@
+use crate::core::transfer::EndpointKind;
 use crate::ui::theme::Theme;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -201,7 +202,7 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
 
     let legacy_parts = get_usize("concurrency_parts_per_file", 4);
 
-    Ok(Config {
+    let mut cfg = Config {
         quarantine_dir: get_or("quarantine_dir", "./quarantine"),
         reports_dir: get_or("reports_dir", "./reports"),
         state_dir: get_or("state_dir", "./state"),
@@ -240,7 +241,57 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         local_width_percent: get_u16("local_width_percent", default_local_width_percent()),
         history_width: get_u16("history_width", default_history_width()),
         log_level: get_or("log_level", "info"),
-    })
+    };
+
+    apply_default_destination_endpoint_profile(conn, &mut cfg)?;
+
+    Ok(cfg)
+}
+
+fn apply_default_destination_endpoint_profile(conn: &Connection, cfg: &mut Config) -> Result<()> {
+    let default_destination = match db::get_default_destination_endpoint_profile(conn) {
+        Ok(v) => v,
+        Err(e) if e.to_string().contains("no such table: endpoint_profiles") => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let Some(profile) = default_destination else {
+        return Ok(());
+    };
+
+    if profile.kind != EndpointKind::S3 {
+        return Ok(());
+    }
+
+    let read_config_string = |key: &str| -> Option<String> {
+        profile
+            .config
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(std::string::ToString::to_string)
+    };
+
+    if let Some(bucket) = read_config_string("bucket") {
+        cfg.s3_bucket = Some(bucket);
+    }
+    if let Some(prefix) = read_config_string("prefix") {
+        cfg.s3_prefix = Some(prefix);
+    }
+    if let Some(region) = read_config_string("region") {
+        cfg.s3_region = Some(region);
+    }
+    if let Some(endpoint) = read_config_string("endpoint") {
+        cfg.s3_endpoint = Some(endpoint);
+    }
+    if let Some(access_key) = read_config_string("access_key") {
+        cfg.s3_access_key = Some(access_key);
+    }
+    if let Some(credential_ref) = profile.credential_ref.as_deref() {
+        cfg.s3_secret_key = db::get_secret(conn, credential_ref)?;
+    }
+
+    Ok(())
 }
 
 pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
@@ -367,6 +418,24 @@ pub fn save_config_to_db(conn: &Connection, cfg: &Config) -> Result<()> {
         db::set_secret(conn, "s3_secret", secret)?;
     }
 
+    db::sync_default_destination_s3_profile(
+        conn,
+        cfg.s3_bucket.as_deref(),
+        cfg.s3_prefix.as_deref(),
+        cfg.s3_region.as_deref(),
+        cfg.s3_endpoint.as_deref(),
+        cfg.s3_access_key.as_deref(),
+        if cfg
+            .s3_secret_key
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            Some("s3_secret")
+        } else {
+            None
+        },
+    )?;
+
     Ok(())
 }
 
@@ -445,6 +514,17 @@ mod tests {
             CREATE TABLE settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE endpoint_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                kind TEXT NOT NULL,
+                config_json TEXT NOT NULL DEFAULT '{}',
+                credential_ref TEXT,
+                is_default_source INTEGER NOT NULL DEFAULT 0,
+                is_default_destination INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             ",
         )?;
@@ -867,6 +947,89 @@ mod tests {
         assert_eq!(loaded.local_width_percent, config.local_width_percent);
         assert_eq!(loaded.history_width, config.history_width);
         assert_eq!(loaded.log_level, config.log_level);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_config_prefers_default_destination_s3_profile() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        db::set_setting(&conn, "s3_bucket", "legacy-bucket")?;
+        db::set_setting(&conn, "s3_region", "us-west-1")?;
+        db::set_setting(&conn, "s3_access_key", "LEGACY_ACCESS_KEY")?;
+        db::set_secret(&conn, "s3_secret", "legacy-secret")?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO endpoint_profiles (name, kind, config_json, credential_ref, is_default_source, is_default_destination, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                "Destination S3",
+                "s3",
+                serde_json::json!({
+                    "bucket": "profile-bucket",
+                    "region": "us-east-1",
+                    "prefix": "archive/",
+                    "endpoint": "https://s3.example.test",
+                    "access_key": "PROFILE_ACCESS_KEY"
+                })
+                .to_string(),
+                "profile_s3_secret",
+                0,
+                1,
+                &now,
+                &now
+            ],
+        )?;
+        db::set_secret(&conn, "profile_s3_secret", "profile-secret")?;
+
+        let loaded = load_config_from_db(&conn)?;
+
+        assert_eq!(loaded.s3_bucket, Some("profile-bucket".to_string()));
+        assert_eq!(loaded.s3_region, Some("us-east-1".to_string()));
+        assert_eq!(loaded.s3_prefix, Some("archive/".to_string()));
+        assert_eq!(
+            loaded.s3_endpoint,
+            Some("https://s3.example.test".to_string())
+        );
+        assert_eq!(loaded.s3_access_key, Some("PROFILE_ACCESS_KEY".to_string()));
+        assert_eq!(loaded.s3_secret_key, Some("profile-secret".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_config_syncs_default_destination_s3_profile() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let cfg = Config {
+            s3_bucket: Some("sync-bucket".to_string()),
+            s3_prefix: Some("sync-prefix/".to_string()),
+            s3_region: Some("us-east-1".to_string()),
+            s3_endpoint: Some("https://sync.example".to_string()),
+            s3_access_key: Some("SYNC_ACCESS_KEY".to_string()),
+            s3_secret_key: Some("sync-secret".to_string()),
+            ..Config::default()
+        };
+        save_config_to_db(&conn, &cfg)?;
+
+        let profile = db::get_default_destination_endpoint_profile(&conn)?
+            .expect("Default destination profile should be created");
+        assert_eq!(profile.kind, EndpointKind::S3);
+        assert_eq!(
+            profile.config.get("bucket"),
+            Some(&serde_json::Value::String("sync-bucket".to_string()))
+        );
+        assert_eq!(
+            profile.config.get("prefix"),
+            Some(&serde_json::Value::String("sync-prefix/".to_string()))
+        );
+        assert_eq!(
+            profile.config.get("access_key"),
+            Some(&serde_json::Value::String("SYNC_ACCESS_KEY".to_string()))
+        );
+        assert_eq!(profile.credential_ref, Some("s3_secret".to_string()));
 
         Ok(())
     }

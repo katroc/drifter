@@ -1,4 +1,4 @@
-use crate::app::state::{App, AppFocus, InputMode};
+use crate::app::state::{App, InputMode};
 use crate::ui::theme::StatusKind;
 use crate::ui::theme::Theme;
 use crate::ui::util::{format_bytes, truncate_with_ellipsis};
@@ -10,9 +10,21 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Row, Table, TableState},
 };
 
-pub fn render_remote(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
-    let is_focused = app.focus == AppFocus::Remote;
-    let border_style = if is_focused {
+pub fn render_remote(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    theme: &Theme,
+    role_label: &str,
+    is_left_panel: bool,
+    objects: &[crate::services::uploader::S3Object],
+    current_path: &str,
+    selected: usize,
+    loading: bool,
+    focused: bool,
+    selected_items: Option<&std::collections::HashMap<String, crate::services::uploader::S3Object>>,
+) {
+    let border_style = if focused {
         if app.input_mode == InputMode::RemoteBrowsing {
             theme.status_style(StatusKind::Success)
         } else {
@@ -22,13 +34,13 @@ pub fn render_remote(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         theme.border_style()
     };
 
-    let p = if app.remote_current_path.is_empty() {
+    let p = if current_path.is_empty() {
         "Root".to_string()
     } else {
-        app.remote_current_path.clone()
+        current_path.to_string()
     };
 
-    let mode_indicator = if app.remote_loading {
+    let mode_indicator = if loading {
         " [Loading...]"
     } else if app.input_mode == InputMode::RemoteBrowsing {
         " [BROWSING]"
@@ -37,19 +49,24 @@ pub fn render_remote(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     };
 
     let title = format!(
-        " Remote (S3): {} [Path: {}]{} ",
-        app.s3_objects.len(),
+        " {}: {} [Path: {}]{} ",
+        role_label,
+        objects.len(),
         p,
         mode_indicator
     );
 
-    let panel_style = if is_focused {
+    let panel_style = if focused {
         theme.panel_style()
     } else {
         theme.panel_style().patch(theme.dim_style())
     };
 
-    let borders = Borders::TOP | Borders::BOTTOM | Borders::RIGHT;
+    let borders = if is_left_panel {
+        Borders::ALL
+    } else {
+        Borders::TOP | Borders::BOTTOM | Borders::RIGHT
+    };
 
     // Keep left border off to avoid double center divider with Local panel.
     let block = Block::default()
@@ -78,8 +95,7 @@ pub fn render_remote(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         2 => usize::from(inner_area.width.saturating_sub(14)).max(8),
         _ => usize::from(inner_area.width.saturating_sub(27)).max(8),
     };
-    let rows: Vec<Row> = app
-        .s3_objects
+    let rows: Vec<Row> = objects
         .iter()
         .map(|obj| {
             let (icon, base_style) = if obj.is_dir {
@@ -87,7 +103,7 @@ pub fn render_remote(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             } else {
                 ("📄", theme.text_style())
             };
-            let style = if is_focused {
+            let style = if focused {
                 base_style
             } else {
                 base_style.patch(theme.dim_style())
@@ -109,9 +125,25 @@ pub fn render_remote(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                 obj.name.clone()
             };
             let clipped_name = truncate_with_ellipsis(&display_name, max_name_chars);
+            let selected_marker = if let Some(items) = selected_items {
+                if obj.is_parent {
+                    "   "
+                } else if items.contains_key(&obj.key) {
+                    "[x]"
+                } else {
+                    "[ ]"
+                }
+            } else {
+                ""
+            };
+            let leading = if selected_items.is_some() {
+                format!("{selected_marker} ")
+            } else {
+                String::new()
+            };
 
             let mut cells = vec![Cell::from(Line::from(vec![Span::styled(
-                format!("{} {}", icon, clipped_name),
+                format!("{leading}{icon} {clipped_name}"),
                 style,
             )]))];
 
@@ -145,8 +177,8 @@ pub fn render_remote(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     };
 
     let mut state = TableState::default();
-    if !app.s3_objects.is_empty() {
-        state.select(Some(app.selected_remote.min(app.s3_objects.len() - 1)));
+    if !objects.is_empty() {
+        state.select(Some(selected.min(objects.len() - 1)));
     }
 
     let table = match column_mode {

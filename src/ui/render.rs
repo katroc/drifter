@@ -241,17 +241,78 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(vertical_chunks[0]);
 
-    // Render Local browser (left)
-    draw_browser(f, app, horizontal_chunks[0]);
-
-    // Render Remote browser (right)
-    crate::ui::remote::render_remote(f, app, horizontal_chunks[1], &app.theme);
+    match app.transfer_direction {
+        crate::core::transfer::TransferDirection::S3ToLocal => {
+            crate::ui::remote::render_remote(
+                f,
+                app,
+                horizontal_chunks[0],
+                &app.theme,
+                "Remote Source (S3)",
+                true,
+                &app.s3_objects,
+                &app.remote_current_path,
+                app.selected_remote,
+                app.remote_loading,
+                app.focus == AppFocus::Remote,
+                Some(&app.selected_remote_items),
+            );
+            draw_browser(f, app, horizontal_chunks[1], "Local Destination", false);
+        }
+        crate::core::transfer::TransferDirection::S3ToS3 => {
+            crate::ui::remote::render_remote(
+                f,
+                app,
+                horizontal_chunks[0],
+                &app.theme,
+                "Remote Source (Primary S3)",
+                true,
+                &app.s3_objects,
+                &app.remote_current_path,
+                app.selected_remote,
+                app.remote_loading,
+                app.focus == AppFocus::Remote,
+                Some(&app.selected_remote_items),
+            );
+            crate::ui::remote::render_remote(
+                f,
+                app,
+                horizontal_chunks[1],
+                &app.theme,
+                "Remote Destination (Secondary S3)",
+                false,
+                &app.s3_objects_secondary,
+                &app.remote_secondary_current_path,
+                app.selected_remote_secondary,
+                app.remote_secondary_loading,
+                app.focus == AppFocus::Browser,
+                Some(&app.selected_remote_items_secondary),
+            );
+        }
+        crate::core::transfer::TransferDirection::LocalToS3 => {
+            draw_browser(f, app, horizontal_chunks[0], "Local Source", true);
+            crate::ui::remote::render_remote(
+                f,
+                app,
+                horizontal_chunks[1],
+                &app.theme,
+                "Remote Destination (S3)",
+                false,
+                &app.s3_objects,
+                &app.remote_current_path,
+                app.selected_remote,
+                app.remote_loading,
+                app.focus == AppFocus::Remote,
+                Some(&app.selected_remote_items),
+            );
+        }
+    }
 
     // Render Queue (bottom)
     draw_jobs(f, app, vertical_chunks[1]);
 }
 
-fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
+fn draw_browser(f: &mut Frame, app: &App, area: Rect, role_label: &str, is_left_panel: bool) {
     let is_focused = app.focus == AppFocus::Browser;
     let focus_style = if is_focused {
         if app.input_mode == InputMode::Browsing || app.input_mode == InputMode::Filter {
@@ -265,16 +326,16 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
 
     let path_str = app.picker.cwd.to_string_lossy();
     let title_prefix = match app.input_mode {
-        InputMode::Browsing => " Local (Browsing) ",
-        InputMode::Filter => " Local (Filter) ",
-        InputMode::Normal if is_focused => " Local (Press 'a' to browse) ",
-        InputMode::Normal => " Local ",
-        InputMode::Confirmation => " Local ",
-        InputMode::LayoutAdjust => " Layout ",
-        InputMode::LogSearch => " Search ",
-        InputMode::QueueSearch => " Queue (Search) ",
-        InputMode::HistorySearch => " History (Search) ",
-        _ => " Local ",
+        InputMode::Browsing => format!(" {} (Browsing) ", role_label),
+        InputMode::Filter => format!(" {} (Filter) ", role_label),
+        InputMode::Normal if is_focused => format!(" {} (Press 'a' to browse) ", role_label),
+        InputMode::Normal => format!(" {} ", role_label),
+        InputMode::Confirmation => format!(" {} ", role_label),
+        InputMode::LayoutAdjust => " Layout ".to_string(),
+        InputMode::LogSearch => " Search ".to_string(),
+        InputMode::QueueSearch => " Queue (Search) ".to_string(),
+        InputMode::HistorySearch => " History (Search) ".to_string(),
+        _ => format!(" {} ", role_label),
     };
     let title = format!("{}{}", title_prefix, path_str);
 
@@ -284,9 +345,14 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
         app.theme.panel_style().patch(app.theme.dim_style())
     };
 
-    // In Commander layout, keep right border to separate from Remote panel
+    let borders = if is_left_panel {
+        Borders::ALL
+    } else {
+        Borders::TOP | Borders::BOTTOM | Borders::RIGHT
+    };
+
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(borders)
         .border_type(app.theme.border_type)
         .title(title)
         .border_style(focus_style)
@@ -1201,18 +1267,17 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
 
     let fields = match app.settings.active_category {
         SettingsCategory::S3 => vec![
-            ("S3 Endpoint", app.settings.endpoint.as_str()),
-            ("S3 Bucket", app.settings.bucket.as_str()),
-            ("S3 Region", app.settings.region.as_str()),
-            ("S3 Prefix", app.settings.prefix.as_str()),
-            ("S3 Access Key", app.settings.access_key.as_str()),
+            ("Profile", app.settings.selected_s3_profile_label()),
+            ("S3 Endpoint", app.settings.selected_s3_endpoint()),
+            ("S3 Bucket", app.settings.selected_s3_bucket()),
+            ("S3 Region", app.settings.selected_s3_region()),
+            ("S3 Prefix", app.settings.selected_s3_prefix()),
+            ("S3 Access Key", app.settings.selected_s3_access_key()),
             (
                 "S3 Secret Key",
-                if app.settings.editing && app.settings.selected_field == 5 {
-                    app.settings.secret_key.as_str()
-                } else {
-                    "*******"
-                },
+                app.settings.selected_s3_secret_key_display(
+                    app.settings.editing && app.settings.selected_field == 6,
+                ),
             ),
         ],
         SettingsCategory::Scanner => vec![

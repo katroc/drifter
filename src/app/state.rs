@@ -11,6 +11,7 @@ use crate::components::file_picker::FilePicker;
 use crate::components::wizard::WizardState;
 use crate::core::config::Config;
 use crate::core::metrics::{HostMetricsSnapshot, MetricsCollector};
+use crate::core::transfer::TransferDirection;
 use crate::db::{JobRow, list_active_jobs, list_history_jobs, list_quarantined_jobs};
 use crate::services::uploader::S3Object;
 use crate::utils::lock_mutex;
@@ -45,8 +46,14 @@ pub enum ModalAction {
     None,
     ClearHistory,
     CancelJob(i64),
-    DeleteRemoteObject(String, String, bool), // key, current_path, is_dir
+    DeleteRemoteObject(String, String, bool, RemoteTarget), // key, current_path, is_dir, target
     QuitApp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteTarget {
+    Primary,
+    Secondary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +89,7 @@ pub enum InputMode {
 pub enum AppEvent {
     Notification(String),
     RemoteFileList(String, Vec<S3Object>), // (path, objects)
+    RemoteFileListSecondary(String, Vec<S3Object>), // (path, objects)
     LogLine(String),
     RefreshRemote,
 }
@@ -140,6 +148,15 @@ pub struct App {
     pub remote_cache: HashMap<String, (Vec<S3Object>, Instant)>, // path -> (objects, fetched_at)
     pub remote_request_pending: Option<String>,                  // path currently being fetched
     pub remote_loading: bool,
+    pub selected_remote_items: HashMap<String, S3Object>,
+    pub selected_remote_items_secondary: HashMap<String, S3Object>,
+    pub s3_objects_secondary: Vec<S3Object>,
+    pub selected_remote_secondary: usize,
+    pub remote_secondary_current_path: String,
+    pub remote_secondary_cache: HashMap<String, (Vec<S3Object>, Instant)>,
+    pub remote_secondary_request_pending: Option<String>,
+    pub remote_secondary_loading: bool,
+    pub transfer_direction: TransferDirection,
 
     pub last_refresh: Instant,
     pub status_message: String,
@@ -249,6 +266,15 @@ impl App {
             remote_cache: HashMap::new(),
             remote_request_pending: None,
             remote_loading: false,
+            selected_remote_items: HashMap::new(),
+            selected_remote_items_secondary: HashMap::new(),
+            s3_objects_secondary: Vec::new(),
+            selected_remote_secondary: 0,
+            remote_secondary_current_path: String::new(),
+            remote_secondary_cache: HashMap::new(),
+            remote_secondary_request_pending: None,
+            remote_secondary_loading: false,
+            transfer_direction: TransferDirection::LocalToS3,
 
             last_refresh: Instant::now() - Duration::from_secs(5),
             status_message: "Ready".to_string(),
@@ -312,6 +338,10 @@ impl App {
             creating_folder_name: String::new(),
         };
 
+        if let Ok(conn_guard) = lock_mutex(&conn) {
+            let _ = app.settings.load_secondary_profile_from_db(&conn_guard);
+        }
+
         if let Some(watch_dir) = app
             .cached_config
             .watch_dir
@@ -361,6 +391,14 @@ impl App {
     pub fn set_status<S: Into<String>>(&mut self, msg: S) {
         self.status_message = msg.into();
         self.status_message_at = Some(Instant::now());
+    }
+
+    pub fn toggle_transfer_direction(&mut self) {
+        self.transfer_direction = match self.transfer_direction {
+            TransferDirection::LocalToS3 => TransferDirection::S3ToLocal,
+            TransferDirection::S3ToLocal => TransferDirection::S3ToS3,
+            TransferDirection::S3ToS3 => TransferDirection::LocalToS3,
+        };
     }
 
     pub fn refresh_jobs(&mut self, conn: &Connection) -> Result<()> {

@@ -1,4 +1,4 @@
-use crate::db::{create_job, insert_event, update_job_staged};
+use crate::db::{assign_default_transfer_metadata, create_job, insert_event, update_job_staged};
 use crate::utils::lock_mutex;
 use anyhow::Result;
 use rusqlite::Connection;
@@ -84,6 +84,12 @@ pub async fn ingest_path(
         };
 
         let conn = lock_mutex(&conn_mutex)?;
+        if let Err(e) = assign_default_transfer_metadata(&conn, job_id) {
+            warn!(
+                "Failed to assign default transfer metadata for job {}: {}",
+                job_id, e
+            );
+        }
         insert_event(&conn, job_id, "ingest", "queued for scan")?;
         update_job_staged(&conn, job_id, &source_str, "queued")?;
         insert_event(&conn, job_id, "stage", "ready for scan")?;
