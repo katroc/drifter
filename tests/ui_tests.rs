@@ -3,7 +3,6 @@
 // These tests render the TUI to an in-memory buffer using Ratatui's TestBackend
 // and compare against saved snapshots using insta.
 
-use chrono::Utc;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -16,14 +15,15 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use drifter::app::settings::SettingsState;
 use drifter::app::state::{
-    App, AppFocus, AppTab, HistoryFilter, InputMode, LayoutTarget, ModalAction, ViewMode,
-    VisualItem,
+    App, AppFocus, AppTab, HistoryFilter, InputMode, LayoutTarget, ModalAction, RemoteTarget,
+    ViewMode, VisualItem,
 };
 use drifter::components::file_picker::{FileEntry, FilePicker, PickerView};
 use drifter::components::wizard::WizardState;
 use drifter::coordinator::ProgressInfo;
 use drifter::core::config::Config;
 use drifter::core::metrics::{HostMetricsSnapshot, MetricsCollector};
+use drifter::core::transfer::TransferDirection;
 use drifter::db::JobRow;
 use drifter::services::uploader::S3Object;
 use drifter::services::watch::Watcher;
@@ -307,6 +307,7 @@ impl TestAppBuilder {
         App {
             jobs: self.jobs,
             history: self.history,
+            job_transfer_metadata: HashMap::new(),
             quarantine: self.quarantine,
             selected: 0,
             selected_history: 0,
@@ -318,6 +319,18 @@ impl TestAppBuilder {
             remote_cache: HashMap::new(),
             remote_request_pending: None,
             remote_loading: false,
+            selected_remote_items: HashMap::new(),
+            selected_remote_items_secondary: HashMap::new(),
+            s3_objects_secondary: Vec::new(),
+            selected_remote_secondary: 0,
+            remote_secondary_current_path: String::new(),
+            remote_secondary_cache: HashMap::new(),
+            remote_secondary_request_pending: None,
+            remote_secondary_loading: false,
+            transfer_direction: TransferDirection::LocalToS3,
+            s3_profiles: Vec::new(),
+            transfer_source_endpoint_id: None,
+            transfer_destination_endpoint_id: None,
 
             last_refresh: Instant::now(),
             status_message: "Ready".to_string(),
@@ -386,14 +399,13 @@ impl TestAppBuilder {
 }
 
 /// Helper to create sample job rows for testing.
-/// Uses a timestamp 2 hours in the past so relative time displays as "2h ago"
-/// and doesn't drift across days like a hardcoded date would.
+/// Uses a fixed timestamp so snapshots remain stable across runs.
 fn create_sample_job(id: i64, name: &str, status: &str, size: i64) -> JobRow {
-    let two_hours_ago = Utc::now() - chrono::Duration::hours(2);
+    const FIXED_CREATED_AT: &str = "2026-01-15T10:30:00+00:00";
     JobRow {
         id,
         session_id: "test-session".to_string(),
-        created_at: two_hours_ago.to_rfc3339(),
+        created_at: FIXED_CREATED_AT.to_string(),
         status: status.to_string(),
         source_path: format!("/uploads/{}", name),
         size_bytes: size,
@@ -698,6 +710,7 @@ fn test_remote_delete_folder_confirmation() {
                 "uploads/archive/".to_string(),
                 "uploads/".to_string(),
                 true,
+                RemoteTarget::Primary,
             ),
             "Delete folder 'archive' and all contents?",
         )

@@ -1,4 +1,5 @@
 use crate::core::config::Config;
+use crate::core::transfer::{EndpointKind, TransferDirection};
 mod helpers;
 
 use crate::services::ingest::ingest_path;
@@ -31,13 +32,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use self::helpers::{
-    adjust_layout_dimension, prepare_remote_delete, request_remote_list,
-    reset_all_layout_dimensions, reset_layout_dimension, s3_ready, selected_remote_object,
+    adjust_layout_dimension, config_for_endpoint, prepare_remote_delete, queue_remote_download,
+    queue_remote_download_batch, queue_remote_s3_copy, queue_remote_s3_copy_batch,
+    request_remote_list, request_secondary_remote_list, reset_all_layout_dimensions,
+    reset_layout_dimension, selected_remote_object, selected_secondary_remote_object,
     start_remote_download, update_layout_message,
 };
 use crate::app::settings::{SettingsCategory, SettingsState};
 use crate::app::state::{
-    App, AppEvent, AppFocus, AppTab, HistoryFilter, InputMode, LayoutTarget, ModalAction, ViewMode,
+    App, AppEvent, AppFocus, AppTab, HistoryFilter, InputMode, LayoutTarget, ModalAction,
+    RemoteTarget, ViewMode,
 };
 use crate::components::file_picker::PickerView;
 use crate::components::wizard::{WizardState, WizardStep};
@@ -56,6 +60,142 @@ pub struct TuiArgs {
     pub log_handle: crate::logging::LogHandle,
     pub app_tx: std::sync::mpsc::Sender<AppEvent>,
     pub app_rx: std::sync::mpsc::Receiver<AppEvent>,
+}
+
+fn transfer_panel_indices(direction: TransferDirection) -> (usize, usize) {
+    match direction {
+        TransferDirection::S3ToLocal => (1, 0),
+        TransferDirection::LocalToS3 => (0, 1),
+        TransferDirection::S3ToS3 => (1, 0),
+    }
+}
+
+fn transfer_left_focus(direction: TransferDirection) -> AppFocus {
+    match direction {
+        TransferDirection::LocalToS3 => AppFocus::Browser,
+        TransferDirection::S3ToLocal | TransferDirection::S3ToS3 => AppFocus::Remote,
+    }
+}
+
+fn transfer_right_focus(direction: TransferDirection) -> AppFocus {
+    match direction {
+        TransferDirection::LocalToS3 => AppFocus::Remote,
+        TransferDirection::S3ToLocal | TransferDirection::S3ToS3 => AppFocus::Browser,
+    }
+}
+
+fn toggle_primary_remote_selection(app: &mut App, obj: S3Object) {
+    if obj.is_parent {
+        app.set_status("Cannot select parent entry.".to_string());
+        return;
+    }
+
+    if app.selected_remote_items.remove(&obj.key).is_some() {
+        app.set_status(format!(
+            "Unselected '{}'. {} selected",
+            obj.name,
+            app.selected_remote_items.len()
+        ));
+    } else {
+        app.selected_remote_items
+            .insert(obj.key.clone(), obj.clone());
+        app.set_status(format!(
+            "Selected '{}'. {} selected",
+            obj.name,
+            app.selected_remote_items.len()
+        ));
+    }
+}
+
+fn toggle_secondary_remote_selection(app: &mut App, obj: S3Object) {
+    if obj.is_parent {
+        app.set_status("Cannot select parent entry.".to_string());
+        return;
+    }
+
+    if app
+        .selected_remote_items_secondary
+        .remove(&obj.key)
+        .is_some()
+    {
+        app.set_status(format!(
+            "Unselected '{}'. {} selected",
+            obj.name,
+            app.selected_remote_items_secondary.len()
+        ));
+    } else {
+        app.selected_remote_items_secondary
+            .insert(obj.key.clone(), obj.clone());
+        app.set_status(format!(
+            "Selected '{}'. {} selected",
+            obj.name,
+            app.selected_remote_items_secondary.len()
+        ));
+    }
+}
+
+async fn cycle_primary_remote_endpoint(app: &mut App, forward: bool) {
+    if app.s3_profiles.is_empty() {
+        app.set_status("No S3 endpoint profiles configured.".to_string());
+        return;
+    }
+    let name = app
+        .cycle_primary_remote_endpoint(forward)
+        .unwrap_or_else(|| "Unconfigured".to_string());
+    app.remote_current_path.clear();
+    app.selected_remote = 0;
+    app.selected_remote_items.clear();
+    app.remote_cache.clear();
+    request_remote_list(app, true).await;
+    app.set_status(format!("Primary remote endpoint: {}", name));
+}
+
+async fn cycle_secondary_remote_endpoint(app: &mut App, forward: bool) {
+    if app.s3_profiles.is_empty() {
+        app.set_status("No S3 endpoint profiles configured.".to_string());
+        return;
+    }
+    let name = app
+        .cycle_secondary_remote_endpoint(forward)
+        .unwrap_or_else(|| "Unconfigured".to_string());
+    app.remote_secondary_current_path.clear();
+    app.selected_remote_secondary = 0;
+    app.selected_remote_items_secondary.clear();
+    app.remote_secondary_cache.clear();
+    request_secondary_remote_list(app, true).await;
+    app.set_status(format!("Secondary remote endpoint: {}", name));
+}
+
+fn resolve_local_source_endpoint_id(conn: &Connection) -> Option<i64> {
+    if let Ok(Some(profile)) = crate::db::get_default_source_endpoint_profile(conn)
+        && profile.kind == EndpointKind::Local
+    {
+        return Some(profile.id);
+    }
+    if let Ok(Some(profile)) = crate::db::get_default_destination_endpoint_profile(conn)
+        && profile.kind == EndpointKind::Local
+    {
+        return Some(profile.id);
+    }
+    crate::db::list_endpoint_profiles(conn)
+        .ok()?
+        .into_iter()
+        .find(|profile| profile.kind == EndpointKind::Local)
+        .map(|profile| profile.id)
+}
+
+fn local_to_s3_metadata(
+    conn: &Connection,
+    destination_endpoint_id: Option<i64>,
+) -> Option<crate::db::JobTransferMetadata> {
+    let destination_endpoint_id = destination_endpoint_id?;
+    Some(crate::db::JobTransferMetadata {
+        source_endpoint_id: resolve_local_source_endpoint_id(conn),
+        destination_endpoint_id: Some(destination_endpoint_id),
+        transfer_direction: Some("local_to_s3".to_string()),
+        conflict_policy: Some("overwrite".to_string()),
+        scan_policy: Some("upload_only".to_string()),
+    })
 }
 
 pub async fn run_tui(args: TuiArgs) -> Result<()> {
@@ -93,12 +233,11 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
         app.refresh_jobs(&conn)?;
     }
 
-    let should_prefetch_remote = {
-        let cfg = app.config.lock().await;
-        s3_ready(&cfg)
-    };
-    if should_prefetch_remote {
+    if app.primary_remote_endpoint_id().is_some() {
         request_remote_list(&mut app, false).await;
+    }
+    if app.secondary_remote_endpoint_id().is_some() {
+        request_secondary_remote_list(&mut app, false).await;
     }
 
     // Start Log Watcher
@@ -147,19 +286,25 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                 AppEvent::Notification(msg) => {
                     app.set_status(msg);
                 }
-                AppEvent::RemoteFileList(path, files) => {
+                AppEvent::RemoteFileList(endpoint_id, path, files) => {
+                    let request_key = match endpoint_id {
+                        Some(id) => format!("{id}::{path}"),
+                        None => format!("none::{path}"),
+                    };
                     // Clear loading state if this was the pending request
-                    if app.remote_request_pending.as_ref() == Some(&path) {
+                    if app.remote_request_pending.as_ref() == Some(&request_key) {
                         app.remote_loading = false;
                         app.remote_request_pending = None;
                     }
 
                     // Store in cache (without parent entry)
                     app.remote_cache
-                        .insert(path.clone(), (files.clone(), Instant::now()));
+                        .insert(request_key, (files.clone(), Instant::now()));
 
-                    // Only update display if still viewing this path
-                    if app.remote_current_path == path {
+                    // Only update display if still viewing this endpoint/path.
+                    if app.remote_current_path == path
+                        && app.primary_remote_endpoint_id() == endpoint_id
+                    {
                         let mut display_files = files;
                         // Prepend ".." entry if not at root
                         if !path.is_empty() {
@@ -181,6 +326,45 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                         app.set_status(msg);
                     }
                 }
+                AppEvent::RemoteFileListSecondary(endpoint_id, path, files) => {
+                    let request_key = match endpoint_id {
+                        Some(id) => format!("{id}::{path}"),
+                        None => format!("none::{path}"),
+                    };
+                    if app.remote_secondary_request_pending.as_ref() == Some(&request_key) {
+                        app.remote_secondary_loading = false;
+                        app.remote_secondary_request_pending = None;
+                    }
+
+                    app.remote_secondary_cache
+                        .insert(request_key, (files.clone(), Instant::now()));
+
+                    if app.remote_secondary_current_path == path
+                        && app.secondary_remote_endpoint_id() == endpoint_id
+                    {
+                        let mut display_files = files;
+                        if !path.is_empty() {
+                            display_files.insert(
+                                0,
+                                S3Object {
+                                    key: "..".to_string(),
+                                    name: "..".to_string(),
+                                    size: 0,
+                                    last_modified: String::new(),
+                                    is_dir: true,
+                                    is_parent: true,
+                                },
+                            );
+                        }
+                        app.s3_objects_secondary = display_files;
+                        app.selected_remote_secondary = 0;
+                        let msg = format!(
+                            "Loaded {} items from secondary remote",
+                            app.s3_objects_secondary.len()
+                        );
+                        app.set_status(msg);
+                    }
+                }
                 AppEvent::LogLine(line) => {
                     app.logs.push_back(line);
                     if app.logs.len() > 1000 {
@@ -189,12 +373,11 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                 }
                 AppEvent::RefreshRemote => {
                     // Refresh remote panel after upload completion (force refresh to show new files)
-                    let should_refresh = {
-                        let cfg = app.config.lock().await;
-                        s3_ready(&cfg)
-                    };
-                    if should_refresh {
+                    if app.primary_remote_endpoint_id().is_some() {
                         request_remote_list(&mut app, true).await;
+                    }
+                    if app.secondary_remote_endpoint_id().is_some() {
+                        request_secondary_remote_list(&mut app, true).await;
                     }
                 }
             }
@@ -287,7 +470,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                             match key.code {
                                 KeyCode::Char('y') | KeyCode::Enter => {
                                     // Execute Action
-                                    match app.pending_action {
+                                    match app.pending_action.clone() {
                                         ModalAction::None => {}
                                         ModalAction::ClearHistory => {
                                             let conn = lock_mutex(&conn_mutex)?;
@@ -341,10 +524,33 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             key,
                                             path_context,
                                             is_dir,
+                                            target,
                                         ) => {
                                             app.status_message = format!("Deleting {}...", key);
                                             let tx = app.async_tx.clone();
-                                            let config_clone = app.config.lock().await.clone();
+                                            let endpoint_id = match target {
+                                                RemoteTarget::Primary => {
+                                                    app.primary_remote_endpoint_id()
+                                                }
+                                                RemoteTarget::Secondary => {
+                                                    app.secondary_remote_endpoint_id()
+                                                }
+                                            };
+                                            let config_clone = match config_for_endpoint(
+                                                &app,
+                                                endpoint_id,
+                                            )
+                                            .await
+                                            {
+                                                Ok(cfg) => cfg,
+                                                Err(e) => {
+                                                    app.status_message = format!(
+                                                        "Delete failed: endpoint not configured ({})",
+                                                        e
+                                                    );
+                                                    continue;
+                                                }
+                                            };
 
                                             tokio::spawn(async move {
                                                 let res = if is_dir {
@@ -393,12 +599,25 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                                                         match res_list {
                                                             Ok(files) => {
-                                                                if let Err(send_err) = tx.send(
-                                                                    AppEvent::RemoteFileList(
-                                                                        path_context.clone(),
-                                                                        files,
-                                                                    ),
-                                                                ) {
+                                                                let event = match target {
+                                                                    RemoteTarget::Primary => {
+                                                                        AppEvent::RemoteFileList(
+                                                                            endpoint_id,
+                                                                            path_context.clone(),
+                                                                            files,
+                                                                        )
+                                                                    }
+                                                                    RemoteTarget::Secondary => {
+                                                                        AppEvent::RemoteFileListSecondary(
+                                                                            endpoint_id,
+                                                                            path_context.clone(),
+                                                                            files,
+                                                                        )
+                                                                    }
+                                                                };
+                                                                if let Err(send_err) =
+                                                                    tx.send(event)
+                                                                {
                                                                     warn!(
                                                                         "Failed to send remote refresh after delete: {}",
                                                                         send_err
@@ -603,8 +822,14 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                             || match app.focus {
                                 AppFocus::SettingsFields => app.settings.editing,
                                 AppFocus::Browser => {
-                                    app.input_mode == InputMode::Filter
-                                        || app.input_mode == InputMode::Browsing
+                                    if app.current_tab == AppTab::Transfers
+                                        && app.transfer_direction == TransferDirection::S3ToS3
+                                    {
+                                        app.input_mode == InputMode::RemoteBrowsing
+                                    } else {
+                                        app.input_mode == InputMode::Filter
+                                            || app.input_mode == InputMode::Browsing
+                                    }
                                 }
                                 AppFocus::Logs => app.input_mode == InputMode::LogSearch,
                                 AppFocus::Remote => app.input_mode == InputMode::RemoteBrowsing,
@@ -629,22 +854,69 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     app.pending_action = ModalAction::QuitApp;
                                     app.confirmation_msg = "Quit Drifter?".to_string();
                                 }
+                                KeyCode::Char('v') if app.current_tab == AppTab::Transfers => {
+                                    let was_left_panel_focus =
+                                        app.focus == transfer_left_focus(app.transfer_direction);
+                                    let was_right_panel_focus =
+                                        app.focus == transfer_right_focus(app.transfer_direction);
+                                    app.toggle_transfer_direction();
+                                    app.selected_remote_items.clear();
+                                    app.selected_remote_items_secondary.clear();
+                                    if was_left_panel_focus {
+                                        app.focus = transfer_left_focus(app.transfer_direction);
+                                    } else if was_right_panel_focus {
+                                        app.focus = transfer_right_focus(app.transfer_direction);
+                                    }
+                                    let mode_label = match app.transfer_direction {
+                                        TransferDirection::LocalToS3 => "Local -> S3 (upload mode)",
+                                        TransferDirection::S3ToLocal => {
+                                            "S3 -> Local (download mode)"
+                                        }
+                                        TransferDirection::S3ToS3 => {
+                                            "S3 -> S3 (Primary to Secondary)"
+                                        }
+                                    };
+                                    app.set_status(format!("Transfer mode: {}", mode_label));
+                                    if matches!(
+                                        app.transfer_direction,
+                                        TransferDirection::S3ToLocal | TransferDirection::S3ToS3
+                                    ) {
+                                        request_remote_list(&mut app, false).await;
+                                    }
+                                    if app.transfer_direction == TransferDirection::S3ToS3 {
+                                        request_secondary_remote_list(&mut app, false).await;
+                                    }
+                                    continue;
+                                }
                                 KeyCode::Tab => {
                                     app.focus = match app.focus {
                                         AppFocus::Rail => match app.current_tab {
-                                            AppTab::Transfers => AppFocus::Browser,
+                                            AppTab::Transfers => {
+                                                transfer_left_focus(app.transfer_direction)
+                                            }
                                             AppTab::Quarantine => AppFocus::Quarantine,
                                             AppTab::Logs => AppFocus::Logs,
                                             AppTab::Settings => AppFocus::SettingsCategory,
                                         },
-                                        AppFocus::Browser => {
-                                            // In Transfers tab, cycle to Remote; otherwise to Queue
-                                            if app.current_tab == AppTab::Transfers {
-                                                AppFocus::Remote
-                                            } else {
-                                                AppFocus::Queue
-                                            }
+                                        focus
+                                            if app.current_tab == AppTab::Transfers
+                                                && focus
+                                                    == transfer_left_focus(
+                                                        app.transfer_direction,
+                                                    ) =>
+                                        {
+                                            transfer_right_focus(app.transfer_direction)
                                         }
+                                        focus
+                                            if app.current_tab == AppTab::Transfers
+                                                && focus
+                                                    == transfer_right_focus(
+                                                        app.transfer_direction,
+                                                    ) =>
+                                        {
+                                            AppFocus::Queue
+                                        }
+                                        AppFocus::Browser => AppFocus::Queue,
                                         AppFocus::Remote => AppFocus::Queue,
                                         AppFocus::Queue => AppFocus::History,
                                         AppFocus::SettingsCategory => AppFocus::SettingsFields,
@@ -663,13 +935,27 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             AppTab::Settings => AppFocus::SettingsFields,
                                         },
                                         AppFocus::History => AppFocus::Queue,
-                                        AppFocus::Queue => {
-                                            // In Transfers tab, cycle to Remote; otherwise to Browser
-                                            if app.current_tab == AppTab::Transfers {
-                                                AppFocus::Remote
-                                            } else {
-                                                AppFocus::Browser
-                                            }
+                                        AppFocus::Queue if app.current_tab == AppTab::Transfers => {
+                                            transfer_right_focus(app.transfer_direction)
+                                        }
+                                        AppFocus::Queue => AppFocus::Browser,
+                                        focus
+                                            if app.current_tab == AppTab::Transfers
+                                                && focus
+                                                    == transfer_right_focus(
+                                                        app.transfer_direction,
+                                                    ) =>
+                                        {
+                                            transfer_left_focus(app.transfer_direction)
+                                        }
+                                        focus
+                                            if app.current_tab == AppTab::Transfers
+                                                && focus
+                                                    == transfer_left_focus(
+                                                        app.transfer_direction,
+                                                    ) =>
+                                        {
+                                            AppFocus::Rail
                                         }
                                         AppFocus::Remote => AppFocus::Browser,
                                         AppFocus::SettingsFields => AppFocus::SettingsCategory,
@@ -682,18 +968,32 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                 KeyCode::Right => {
                                     app.focus = match app.focus {
                                         AppFocus::Rail => match app.current_tab {
-                                            AppTab::Transfers => AppFocus::Browser,
+                                            AppTab::Transfers => {
+                                                transfer_left_focus(app.transfer_direction)
+                                            }
                                             AppTab::Quarantine => AppFocus::Quarantine,
                                             AppTab::Logs => AppFocus::Logs,
                                             AppTab::Settings => AppFocus::SettingsCategory,
                                         },
-                                        AppFocus::Browser => {
-                                            if app.current_tab == AppTab::Transfers {
-                                                AppFocus::Remote
-                                            } else {
-                                                AppFocus::Queue
-                                            }
+                                        focus
+                                            if app.current_tab == AppTab::Transfers
+                                                && focus
+                                                    == transfer_left_focus(
+                                                        app.transfer_direction,
+                                                    ) =>
+                                        {
+                                            transfer_right_focus(app.transfer_direction)
                                         }
+                                        focus
+                                            if app.current_tab == AppTab::Transfers
+                                                && focus
+                                                    == transfer_right_focus(
+                                                        app.transfer_direction,
+                                                    ) =>
+                                        {
+                                            AppFocus::Queue
+                                        }
+                                        AppFocus::Browser => AppFocus::Queue,
                                         AppFocus::Remote => AppFocus::Queue,
                                         AppFocus::Queue => AppFocus::History,
                                         AppFocus::SettingsCategory => AppFocus::SettingsFields,
@@ -703,12 +1003,27 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                 KeyCode::Left => {
                                     app.focus = match app.focus {
                                         AppFocus::History => AppFocus::Queue,
-                                        AppFocus::Queue => {
-                                            if app.current_tab == AppTab::Transfers {
-                                                AppFocus::Remote
-                                            } else {
-                                                AppFocus::Browser
-                                            }
+                                        AppFocus::Queue if app.current_tab == AppTab::Transfers => {
+                                            transfer_right_focus(app.transfer_direction)
+                                        }
+                                        AppFocus::Queue => AppFocus::Browser,
+                                        focus
+                                            if app.current_tab == AppTab::Transfers
+                                                && focus
+                                                    == transfer_right_focus(
+                                                        app.transfer_direction,
+                                                    ) =>
+                                        {
+                                            transfer_left_focus(app.transfer_direction)
+                                        }
+                                        focus
+                                            if app.current_tab == AppTab::Transfers
+                                                && focus
+                                                    == transfer_left_focus(
+                                                        app.transfer_direction,
+                                                    ) =>
+                                        {
+                                            AppFocus::Rail
                                         }
                                         AppFocus::Remote => AppFocus::Browser,
                                         AppFocus::Browser
@@ -721,7 +1036,9 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                 KeyCode::Enter => {
                                     if app.focus == AppFocus::Rail {
                                         app.focus = match app.current_tab {
-                                            AppTab::Transfers => AppFocus::Browser,
+                                            AppTab::Transfers => {
+                                                transfer_left_focus(app.transfer_direction)
+                                            }
                                             AppTab::Quarantine => AppFocus::Quarantine,
                                             AppTab::Logs => AppFocus::Logs,
                                             AppTab::Settings => AppFocus::SettingsCategory,
@@ -735,6 +1052,13 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                 && app.focus == AppFocus::Remote
                             {
                                 request_remote_list(&mut app, false).await;
+                            }
+                            if app.focus != old_focus
+                                && app.current_tab == AppTab::Transfers
+                                && app.focus == AppFocus::Browser
+                                && app.transfer_direction == TransferDirection::S3ToS3
+                            {
+                                request_secondary_remote_list(&mut app, false).await;
                             }
 
                             // If focus changed, don't also process this key in focus-specific handling
@@ -765,7 +1089,21 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                         };
 
                                         let tx = app.async_tx.clone();
-                                        let config = app.config.lock().await.clone();
+                                        let config = match config_for_endpoint(
+                                            &app,
+                                            app.primary_remote_endpoint_id(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(cfg) => cfg,
+                                            Err(e) => {
+                                                app.status_message = format!(
+                                                    "Create folder failed: endpoint not configured ({})",
+                                                    e
+                                                );
+                                                continue;
+                                            }
+                                        };
                                         let folder_name_clone = folder_name.clone();
 
                                         tokio::spawn(async move {
@@ -828,312 +1166,563 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                 _ => {}
                             },
                             AppFocus::Browser => {
-                                match app.input_mode {
-                                    InputMode::Normal => {
-                                        // Browser is focused but not actively navigating
-                                        match key.code {
+                                if app.current_tab == AppTab::Transfers
+                                    && app.transfer_direction == TransferDirection::S3ToS3
+                                {
+                                    match app.input_mode {
+                                        InputMode::Normal => match key.code {
+                                            KeyCode::Char(']') => {
+                                                cycle_secondary_remote_endpoint(&mut app, true)
+                                                    .await;
+                                            }
+                                            KeyCode::Char('[') => {
+                                                cycle_secondary_remote_endpoint(&mut app, false)
+                                                    .await;
+                                            }
                                             KeyCode::Char('a') | KeyCode::Enter => {
-                                                app.input_mode = InputMode::Browsing;
+                                                app.input_mode = InputMode::RemoteBrowsing;
                                                 app.status_message =
-                                                    "Browsing files...".to_string();
+                                                    "Browsing destination remote...".to_string();
+                                                request_secondary_remote_list(&mut app, false)
+                                                    .await;
                                             }
                                             KeyCode::Up | KeyCode::Char('k') => {
-                                                app.browser_move_up()
+                                                if app.selected_remote_secondary > 0 {
+                                                    app.selected_remote_secondary -= 1;
+                                                }
                                             }
                                             KeyCode::Down | KeyCode::Char('j') => {
-                                                app.browser_move_down()
+                                                if app.selected_remote_secondary + 1
+                                                    < app.s3_objects_secondary.len()
+                                                {
+                                                    app.selected_remote_secondary += 1;
+                                                }
+                                            }
+                                            KeyCode::Char('r') => {
+                                                request_secondary_remote_list(&mut app, true).await;
+                                            }
+                                            KeyCode::Char(' ') => {
+                                                if let Some(obj) =
+                                                    selected_secondary_remote_object(&app)
+                                                {
+                                                    toggle_secondary_remote_selection(
+                                                        &mut app, obj,
+                                                    );
+                                                }
+                                            }
+                                            KeyCode::Char('c') => {
+                                                if app.selected_remote_items_secondary.is_empty() {
+                                                    app.set_status(
+                                                        "No remote selections to clear."
+                                                            .to_string(),
+                                                    );
+                                                } else {
+                                                    app.selected_remote_items_secondary.clear();
+                                                    app.set_status(
+                                                        "Cleared remote selections.".to_string(),
+                                                    );
+                                                }
+                                            }
+                                            KeyCode::Char('x') => {
+                                                if let Some(obj) =
+                                                    selected_secondary_remote_object(&app)
+                                                {
+                                                    app.selected_remote_items_secondary
+                                                        .remove(&obj.key);
+                                                    prepare_remote_delete(
+                                                        &mut app,
+                                                        obj.key,
+                                                        obj.name,
+                                                        obj.is_dir,
+                                                        RemoteTarget::Secondary,
+                                                    )
+                                                    .await;
+                                                }
                                             }
                                             _ => {}
-                                        }
-                                    }
-                                    InputMode::Browsing => {
-                                        // Actively navigating directories
-                                        match key.code {
+                                        },
+                                        InputMode::RemoteBrowsing => match key.code {
+                                            KeyCode::Char(']') => {
+                                                cycle_secondary_remote_endpoint(&mut app, true)
+                                                    .await;
+                                            }
+                                            KeyCode::Char('[') => {
+                                                cycle_secondary_remote_endpoint(&mut app, false)
+                                                    .await;
+                                            }
                                             KeyCode::Esc | KeyCode::Char('q') => {
                                                 app.input_mode = InputMode::Normal;
                                                 app.status_message = "Ready".to_string();
                                             }
                                             KeyCode::Up | KeyCode::Char('k') => {
-                                                app.browser_move_up()
+                                                if app.selected_remote_secondary > 0 {
+                                                    app.selected_remote_secondary -= 1;
+                                                }
                                             }
                                             KeyCode::Down | KeyCode::Char('j') => {
-                                                app.browser_move_down()
-                                            }
-                                            KeyCode::PageUp => app.picker.page_up(),
-                                            KeyCode::PageDown => app.picker.page_down(),
-                                            KeyCode::Left
-                                            | KeyCode::Char('h')
-                                            | KeyCode::Backspace => app.picker.go_parent(),
-                                            KeyCode::Right
-                                            | KeyCode::Char('l')
-                                            | KeyCode::Enter => {
-                                                if let Some(entry) =
-                                                    app.picker.selected_entry().cloned()
+                                                if app.selected_remote_secondary + 1
+                                                    < app.s3_objects_secondary.len()
                                                 {
-                                                    if app.picker.is_searching
-                                                        && app.picker.search_recursive
-                                                    {
-                                                        // Jump to parent directory
-                                                        if let Some(parent) = entry.path.parent() {
-                                                            app.picker
-                                                                .try_set_cwd(parent.to_path_buf());
-                                                            app.input_buffer.clear();
-                                                            app.picker.is_searching = false;
-                                                            app.picker.refresh();
-
-                                                            // Find the index of the file we were just looking at
-                                                            if let Some(idx) =
-                                                                app.picker.entries.iter().position(
-                                                                    |e| e.path == entry.path,
-                                                                )
-                                                            {
-                                                                app.picker.selected = idx;
-                                                            }
-                                                            app.status_message = format!(
-                                                                "Jumped to {}",
-                                                                parent.display()
-                                                            );
-                                                        }
-                                                    } else if entry.is_dir {
-                                                        if app.picker.view == PickerView::Tree
-                                                            && key.code == KeyCode::Right
-                                                        {
-                                                            app.picker.toggle_expand();
-                                                        } else {
-                                                            app.picker
-                                                                .try_set_cwd(entry.path.clone());
-                                                            app.input_buffer.clear();
-                                                            app.picker.is_searching = false;
-                                                        }
-                                                    } else if key.code == KeyCode::Enter
-                                                        || key.code == KeyCode::Char('l')
-                                                    {
-                                                        // Only queue files on Enter or 'l', not Right arrow
-                                                        let conn_clone = conn_mutex.clone();
-                                                        let tx = app.async_tx.clone();
-                                                        let path = entry
-                                                            .path
-                                                            .to_string_lossy()
-                                                            .to_string();
-
-                                                        tokio::spawn(async move {
-                                                            let session_id =
-                                                                Uuid::new_v4().to_string();
-                                                            if let Err(e) = ingest_path(
-                                                                conn_clone,
-                                                                &path,
-                                                                &session_id,
-                                                                None,
-                                                            )
-                                                            .await
-                                                                && let Err(send_err) = tx.send(
-                                                                    AppEvent::Notification(format!(
-                                                                        "Failed to queue file: {}",
-                                                                        e
-                                                                    )),
-                                                                )
-                                                            {
-                                                                warn!(
-                                                                    "Failed to send queue failure notification: {}",
-                                                                    send_err
-                                                                );
-                                                            }
-                                                        });
-
-                                                        app.status_message =
-                                                            "File added to queue".to_string();
-                                                    }
-                                                    // Right arrow on a file does nothing
+                                                    app.selected_remote_secondary += 1;
                                                 }
                                             }
-                                            KeyCode::Char('/') => {
-                                                app.input_mode = InputMode::Filter;
-                                                app.picker.search_recursive = true;
-                                                app.picker.is_searching = true;
-                                                app.picker.refresh();
-                                                app.status_message =
-                                                    "Search (recursive)".to_string();
-                                            }
-                                            KeyCode::Char(' ') => app.picker.toggle_select(),
-                                            KeyCode::Char('t') => app.picker.toggle_view(),
-                                            KeyCode::Char('f') => {
-                                                app.picker.search_recursive =
-                                                    !app.picker.search_recursive;
-                                                app.picker.refresh();
-                                                app.status_message = if app.picker.search_recursive
+                                            KeyCode::Right | KeyCode::Enter => {
+                                                if let Some(obj) =
+                                                    selected_secondary_remote_object(&app)
+                                                    && obj.is_dir
                                                 {
-                                                    "Recursive search enabled"
-                                                } else {
-                                                    "Recursive search disabled"
-                                                }
-                                                .to_string();
-                                            }
-                                            KeyCode::Char('c') => app.picker.clear_selected(),
-                                            KeyCode::Char('s') => {
-                                                let paths: Vec<PathBuf> = app
-                                                    .picker
-                                                    .selected_paths
-                                                    .iter()
-                                                    .cloned()
-                                                    .collect();
-                                                if !paths.is_empty() {
-                                                    // Check if S3 is configured
-                                                    let s3_configured = {
-                                                        let cfg = app.config.lock().await;
-                                                        s3_ready(&cfg)
-                                                    };
-
-                                                    if s3_configured {
-                                                        // S3 configured, ingest with current remote path
-                                                        let destination = if app
-                                                            .remote_current_path
-                                                            .is_empty()
-                                                        {
-                                                            None
+                                                    if obj.is_parent {
+                                                        let current = app
+                                                            .remote_secondary_current_path
+                                                            .trim_end_matches('/');
+                                                        if let Some(idx) = current.rfind('/') {
+                                                            app.remote_secondary_current_path
+                                                                .truncate(idx + 1);
                                                         } else {
-                                                            Some(app.remote_current_path.clone())
-                                                        };
-
-                                                        let paths_count = paths.len();
-                                                        let conn_clone = conn_mutex.clone();
-                                                        let dest_clone = destination.clone();
-
-                                                        let pending_paths: Vec<String> = paths
-                                                            .iter()
-                                                            .map(|p| {
-                                                                p.to_string_lossy().to_string()
-                                                            })
-                                                            .collect();
-
-                                                        tokio::spawn(async move {
-                                                            let session_id =
-                                                                Uuid::new_v4().to_string();
-                                                            let mut total = 0;
-                                                            for path in pending_paths {
-                                                                if let Ok(count) = ingest_path(
-                                                                    conn_clone.clone(),
-                                                                    &path,
-                                                                    &session_id,
-                                                                    dest_clone.as_deref(),
-                                                                )
-                                                                .await
-                                                                {
-                                                                    total += count;
-                                                                }
-                                                            }
-                                                            tracing::info!(
-                                                                "Ingest complete: {} files to destination {:?}",
-                                                                total,
-                                                                dest_clone
-                                                            );
-                                                        });
-
-                                                        app.status_message = format!(
-                                                            "Ingesting {} items to '{}'",
-                                                            paths_count,
-                                                            if let Some(d) = &destination {
-                                                                d
-                                                            } else {
-                                                                "(bucket root)"
-                                                            }
-                                                        );
-                                                        app.picker.clear_selected();
+                                                            app.remote_secondary_current_path
+                                                                .clear();
+                                                        }
                                                     } else {
-                                                        // S3 not configured, ingest with default path
-                                                        let conn_clone = conn_mutex.clone();
-                                                        let paths_count = paths.len();
-                                                        tokio::spawn(async move {
-                                                            let session_id =
-                                                                Uuid::new_v4().to_string();
-                                                            let mut total = 0;
-                                                            for path in paths {
-                                                                if let Ok(count) = ingest_path(
-                                                                    conn_clone.clone(),
-                                                                    &path.to_string_lossy(),
-                                                                    &session_id,
-                                                                    None,
-                                                                )
-                                                                .await
-                                                                {
-                                                                    total += count;
-                                                                }
-                                                            }
-                                                            tracing::info!(
-                                                                "Bulk ingest complete: {} files",
-                                                                total
-                                                            );
-                                                        });
-
-                                                        app.status_message = format!(
-                                                            "Ingesting {} items in background",
-                                                            paths_count
-                                                        );
-                                                        app.picker.clear_selected();
+                                                        app.remote_secondary_current_path
+                                                            .push_str(&obj.name);
                                                     }
+                                                    request_secondary_remote_list(&mut app, false)
+                                                        .await;
+                                                }
+                                            }
+                                            KeyCode::Left | KeyCode::Backspace => {
+                                                if !app.remote_secondary_current_path.is_empty() {
+                                                    let current = app
+                                                        .remote_secondary_current_path
+                                                        .trim_end_matches('/');
+                                                    if let Some(idx) = current.rfind('/') {
+                                                        app.remote_secondary_current_path
+                                                            .truncate(idx + 1);
+                                                    } else {
+                                                        app.remote_secondary_current_path.clear();
+                                                    }
+                                                    request_secondary_remote_list(&mut app, false)
+                                                        .await;
+                                                }
+                                            }
+                                            KeyCode::Char('r') => {
+                                                request_secondary_remote_list(&mut app, true).await;
+                                            }
+                                            KeyCode::Char(' ') => {
+                                                if let Some(obj) =
+                                                    selected_secondary_remote_object(&app)
+                                                {
+                                                    toggle_secondary_remote_selection(
+                                                        &mut app, obj,
+                                                    );
+                                                }
+                                            }
+                                            KeyCode::Char('c') => {
+                                                if app.selected_remote_items_secondary.is_empty() {
+                                                    app.set_status(
+                                                        "No remote selections to clear."
+                                                            .to_string(),
+                                                    );
+                                                } else {
+                                                    app.selected_remote_items_secondary.clear();
+                                                    app.set_status(
+                                                        "Cleared remote selections.".to_string(),
+                                                    );
+                                                }
+                                            }
+                                            KeyCode::Char('x') => {
+                                                if let Some(obj) =
+                                                    selected_secondary_remote_object(&app)
+                                                {
+                                                    app.selected_remote_items_secondary
+                                                        .remove(&obj.key);
+                                                    prepare_remote_delete(
+                                                        &mut app,
+                                                        obj.key,
+                                                        obj.name,
+                                                        obj.is_dir,
+                                                        RemoteTarget::Secondary,
+                                                    )
+                                                    .await;
                                                 }
                                             }
                                             _ => {}
-                                        }
+                                        },
+                                        _ => {}
                                     }
-                                    InputMode::Filter => match key.code {
-                                        KeyCode::Esc => {
-                                            app.input_mode = InputMode::Browsing;
-                                            app.input_buffer.clear();
-                                            app.picker.is_searching = false;
-                                            app.picker.search_recursive = false;
-                                            app.picker.refresh();
+                                } else {
+                                    match app.input_mode {
+                                        InputMode::Normal => {
+                                            // Browser is focused but not actively navigating
+                                            match key.code {
+                                                KeyCode::Char('a') | KeyCode::Enter => {
+                                                    app.input_mode = InputMode::Browsing;
+                                                    app.status_message =
+                                                        "Browsing files...".to_string();
+                                                }
+                                                KeyCode::Up | KeyCode::Char('k') => {
+                                                    app.browser_move_up()
+                                                }
+                                                KeyCode::Down | KeyCode::Char('j') => {
+                                                    app.browser_move_down()
+                                                }
+                                                _ => {}
+                                            }
                                         }
-                                        KeyCode::Enter | KeyCode::Right => {
-                                            if app.picker.search_recursive
-                                                && let Some(entry) =
-                                                    app.picker.selected_entry().cloned()
-                                                && let Some(parent) = entry.path.parent()
-                                            {
-                                                app.picker.try_set_cwd(parent.to_path_buf());
+                                        InputMode::Browsing => {
+                                            // Actively navigating directories
+                                            match key.code {
+                                                KeyCode::Esc | KeyCode::Char('q') => {
+                                                    app.input_mode = InputMode::Normal;
+                                                    app.status_message = "Ready".to_string();
+                                                }
+                                                KeyCode::Up | KeyCode::Char('k') => {
+                                                    app.browser_move_up()
+                                                }
+                                                KeyCode::Down | KeyCode::Char('j') => {
+                                                    app.browser_move_down()
+                                                }
+                                                KeyCode::PageUp => app.picker.page_up(),
+                                                KeyCode::PageDown => app.picker.page_down(),
+                                                KeyCode::Left
+                                                | KeyCode::Char('h')
+                                                | KeyCode::Backspace => app.picker.go_parent(),
+                                                KeyCode::Right
+                                                | KeyCode::Char('l')
+                                                | KeyCode::Enter => {
+                                                    if let Some(entry) =
+                                                        app.picker.selected_entry().cloned()
+                                                    {
+                                                        if app.picker.is_searching
+                                                            && app.picker.search_recursive
+                                                        {
+                                                            // Jump to parent directory
+                                                            if let Some(parent) =
+                                                                entry.path.parent()
+                                                            {
+                                                                app.picker.try_set_cwd(
+                                                                    parent.to_path_buf(),
+                                                                );
+                                                                app.input_buffer.clear();
+                                                                app.picker.is_searching = false;
+                                                                app.picker.refresh();
+
+                                                                // Find the index of the file we were just looking at
+                                                                if let Some(idx) = app
+                                                                    .picker
+                                                                    .entries
+                                                                    .iter()
+                                                                    .position(|e| {
+                                                                        e.path == entry.path
+                                                                    })
+                                                                {
+                                                                    app.picker.selected = idx;
+                                                                }
+                                                                app.status_message = format!(
+                                                                    "Jumped to {}",
+                                                                    parent.display()
+                                                                );
+                                                            }
+                                                        } else if entry.is_dir {
+                                                            if app.picker.view == PickerView::Tree
+                                                                && key.code == KeyCode::Right
+                                                            {
+                                                                app.picker.toggle_expand();
+                                                            } else {
+                                                                app.picker.try_set_cwd(
+                                                                    entry.path.clone(),
+                                                                );
+                                                                app.input_buffer.clear();
+                                                                app.picker.is_searching = false;
+                                                            }
+                                                        } else if key.code == KeyCode::Enter
+                                                            || key.code == KeyCode::Char('l')
+                                                        {
+                                                            if app.transfer_direction
+                                                                != TransferDirection::LocalToS3
+                                                            {
+                                                                app.set_status(
+                                                                "Upload queueing is disabled in this transfer mode.",
+                                                            );
+                                                            } else {
+                                                                if app
+                                                                    .transfer_destination_endpoint_id
+                                                                    .is_none()
+                                                                {
+                                                                    app.set_status(
+                                                                        "No S3 destination endpoint selected."
+                                                                            .to_string(),
+                                                                    );
+                                                                    continue;
+                                                                }
+                                                                // Only queue files on Enter or 'l', not Right arrow
+                                                                let conn_clone = conn_mutex.clone();
+                                                                let tx = app.async_tx.clone();
+                                                                let path = entry
+                                                                    .path
+                                                                    .to_string_lossy()
+                                                                    .to_string();
+                                                                let transfer_metadata = {
+                                                                    if let Ok(conn) =
+                                                                        lock_mutex(&conn_mutex)
+                                                                    {
+                                                                        local_to_s3_metadata(
+                                                                            &conn,
+                                                                            app.transfer_destination_endpoint_id,
+                                                                        )
+                                                                    } else {
+                                                                        None
+                                                                    }
+                                                                };
+
+                                                                tokio::spawn(async move {
+                                                                    let session_id =
+                                                                        Uuid::new_v4().to_string();
+                                                                    if let Err(e) = ingest_path(
+                                                                    conn_clone,
+                                                                    &path,
+                                                                    &session_id,
+                                                                    None,
+                                                                    transfer_metadata,
+                                                                )
+                                                                .await
+                                                                    && let Err(send_err) = tx.send(
+                                                                        AppEvent::Notification(
+                                                                            format!(
+                                                                                "Failed to queue file: {}",
+                                                                                e
+                                                                            ),
+                                                                        ),
+                                                                    )
+                                                                {
+                                                                    warn!(
+                                                                        "Failed to send queue failure notification: {}",
+                                                                        send_err
+                                                                    );
+                                                                }
+                                                                });
+
+                                                                app.status_message =
+                                                                    "File added to queue"
+                                                                        .to_string();
+                                                            }
+                                                        }
+                                                        // Right arrow on a file does nothing
+                                                    }
+                                                }
+                                                KeyCode::Char('/') => {
+                                                    app.input_mode = InputMode::Filter;
+                                                    app.picker.search_recursive = true;
+                                                    app.picker.is_searching = true;
+                                                    app.picker.refresh();
+                                                    app.status_message =
+                                                        "Search (recursive)".to_string();
+                                                }
+                                                KeyCode::Char(' ') => app.picker.toggle_select(),
+                                                KeyCode::Char('t') => app.picker.toggle_view(),
+                                                KeyCode::Char('f') => {
+                                                    app.picker.search_recursive =
+                                                        !app.picker.search_recursive;
+                                                    app.picker.refresh();
+                                                    app.status_message =
+                                                        if app.picker.search_recursive {
+                                                            "Recursive search enabled"
+                                                        } else {
+                                                            "Recursive search disabled"
+                                                        }
+                                                        .to_string();
+                                                }
+                                                KeyCode::Char('c') => app.picker.clear_selected(),
+                                                KeyCode::Char('s') => {
+                                                    if app.transfer_direction
+                                                        != TransferDirection::LocalToS3
+                                                    {
+                                                        app.set_status(
+                                                        "Upload queueing is disabled in this transfer mode.",
+                                                    );
+                                                        continue;
+                                                    }
+                                                    let paths: Vec<PathBuf> = app
+                                                        .picker
+                                                        .selected_paths
+                                                        .iter()
+                                                        .cloned()
+                                                        .collect();
+                                                    if !paths.is_empty() {
+                                                        // Check if S3 is configured
+                                                        let s3_configured = app
+                                                            .transfer_destination_endpoint_id
+                                                            .is_some();
+
+                                                        if s3_configured {
+                                                            // S3 configured, ingest with current remote path
+                                                            let destination = if app
+                                                                .remote_current_path
+                                                                .is_empty()
+                                                            {
+                                                                None
+                                                            } else {
+                                                                Some(
+                                                                    app.remote_current_path.clone(),
+                                                                )
+                                                            };
+
+                                                            let paths_count = paths.len();
+                                                            let conn_clone = conn_mutex.clone();
+                                                            let dest_clone = destination.clone();
+                                                            let transfer_metadata = {
+                                                                if let Ok(conn) =
+                                                                    lock_mutex(&conn_mutex)
+                                                                {
+                                                                    local_to_s3_metadata(
+                                                                        &conn,
+                                                                        app.transfer_destination_endpoint_id,
+                                                                    )
+                                                                } else {
+                                                                    None
+                                                                }
+                                                            };
+
+                                                            let pending_paths: Vec<String> = paths
+                                                                .iter()
+                                                                .map(|p| {
+                                                                    p.to_string_lossy().to_string()
+                                                                })
+                                                                .collect();
+
+                                                            tokio::spawn(async move {
+                                                                let session_id =
+                                                                    Uuid::new_v4().to_string();
+                                                                let mut total = 0;
+                                                                for path in pending_paths {
+                                                                    if let Ok(count) = ingest_path(
+                                                                        conn_clone.clone(),
+                                                                        &path,
+                                                                        &session_id,
+                                                                        dest_clone.as_deref(),
+                                                                        transfer_metadata.clone(),
+                                                                    )
+                                                                    .await
+                                                                    {
+                                                                        total += count;
+                                                                    }
+                                                                }
+                                                                tracing::info!(
+                                                                    "Ingest complete: {} files to destination {:?}",
+                                                                    total,
+                                                                    dest_clone
+                                                                );
+                                                            });
+
+                                                            app.status_message = format!(
+                                                                "Ingesting {} items to '{}'",
+                                                                paths_count,
+                                                                if let Some(d) = &destination {
+                                                                    d
+                                                                } else {
+                                                                    "(bucket root)"
+                                                                }
+                                                            );
+                                                            app.picker.clear_selected();
+                                                        } else {
+                                                            // S3 not configured, ingest with default path
+                                                            let conn_clone = conn_mutex.clone();
+                                                            let paths_count = paths.len();
+                                                            tokio::spawn(async move {
+                                                                let session_id =
+                                                                    Uuid::new_v4().to_string();
+                                                                let mut total = 0;
+                                                                for path in paths {
+                                                                    if let Ok(count) = ingest_path(
+                                                                        conn_clone.clone(),
+                                                                        &path.to_string_lossy(),
+                                                                        &session_id,
+                                                                        None,
+                                                                        None,
+                                                                    )
+                                                                    .await
+                                                                    {
+                                                                        total += count;
+                                                                    }
+                                                                }
+                                                                tracing::info!(
+                                                                    "Bulk ingest complete: {} files",
+                                                                    total
+                                                                );
+                                                            });
+
+                                                            app.status_message = format!(
+                                                                "Ingesting {} items in background",
+                                                                paths_count
+                                                            );
+                                                            app.picker.clear_selected();
+                                                        }
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        InputMode::Filter => match key.code {
+                                            KeyCode::Esc => {
+                                                app.input_mode = InputMode::Browsing;
                                                 app.input_buffer.clear();
                                                 app.picker.is_searching = false;
+                                                app.picker.search_recursive = false;
                                                 app.picker.refresh();
-
-                                                if let Some(idx) = app
-                                                    .picker
-                                                    .entries
-                                                    .iter()
-                                                    .position(|e| e.path == entry.path)
+                                            }
+                                            KeyCode::Enter | KeyCode::Right => {
+                                                if app.picker.search_recursive
+                                                    && let Some(entry) =
+                                                        app.picker.selected_entry().cloned()
+                                                    && let Some(parent) = entry.path.parent()
                                                 {
-                                                    app.picker.selected = idx;
+                                                    app.picker.try_set_cwd(parent.to_path_buf());
+                                                    app.input_buffer.clear();
+                                                    app.picker.is_searching = false;
+                                                    app.picker.refresh();
+
+                                                    if let Some(idx) = app
+                                                        .picker
+                                                        .entries
+                                                        .iter()
+                                                        .position(|e| e.path == entry.path)
+                                                    {
+                                                        app.picker.selected = idx;
+                                                    }
+                                                    app.status_message =
+                                                        format!("Jumped to {}", parent.display());
                                                 }
-                                                app.status_message =
-                                                    format!("Jumped to {}", parent.display());
+                                                app.input_mode = InputMode::Browsing;
                                             }
-                                            app.input_mode = InputMode::Browsing;
-                                        }
-                                        KeyCode::Up => app.browser_move_up(),
-                                        KeyCode::Down => app.browser_move_down(),
-                                        KeyCode::Backspace => {
-                                            app.input_buffer.pop();
-                                            app.picker.is_searching = !app.input_buffer.is_empty();
-                                            if app.picker.search_recursive {
-                                                app.picker.refresh();
+                                            KeyCode::Up => app.browser_move_up(),
+                                            KeyCode::Down => app.browser_move_down(),
+                                            KeyCode::Backspace => {
+                                                app.input_buffer.pop();
+                                                app.picker.is_searching =
+                                                    !app.input_buffer.is_empty();
+                                                if app.picker.search_recursive {
+                                                    app.picker.refresh();
+                                                }
+                                                app.recalibrate_picker_selection();
                                             }
-                                            app.recalibrate_picker_selection();
-                                        }
-                                        KeyCode::Char(c) => {
-                                            app.input_buffer.push(c);
-                                            app.picker.is_searching = true;
-                                            if app.picker.search_recursive {
-                                                app.picker.refresh();
+                                            KeyCode::Char(c) => {
+                                                app.input_buffer.push(c);
+                                                app.picker.is_searching = true;
+                                                if app.picker.search_recursive {
+                                                    app.picker.refresh();
+                                                }
+                                                app.recalibrate_picker_selection();
                                             }
-                                            app.recalibrate_picker_selection();
-                                        }
-                                        _ => {}
-                                    },
-                                    InputMode::LayoutAdjust => {}
-                                    InputMode::LogSearch
-                                    | InputMode::Confirmation
-                                    | InputMode::QueueSearch
-                                    | InputMode::HistorySearch
-                                    | InputMode::RemoteBrowsing
-                                    | InputMode::RemoteFolderCreate => {}
+                                            _ => {}
+                                        },
+                                        InputMode::LayoutAdjust => {}
+                                        InputMode::LogSearch
+                                        | InputMode::Confirmation
+                                        | InputMode::QueueSearch
+                                        | InputMode::HistorySearch
+                                        | InputMode::RemoteBrowsing
+                                        | InputMode::RemoteFolderCreate => {}
+                                    }
                                 }
                             }
                             AppFocus::Queue => {
@@ -1211,6 +1800,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     let job = &app.jobs[idx];
                                                     let id = job.id;
                                                     let is_active = job.status == "uploading"
+                                                        || job.status == "transferring"
                                                         || job.status == "scanning"
                                                         || job.status == "pending"
                                                         || job.status == "queued";
@@ -1503,6 +2093,12 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                             AppFocus::Remote => {
                                 match app.input_mode {
                                     InputMode::Normal => match key.code {
+                                        KeyCode::Char(']') => {
+                                            cycle_primary_remote_endpoint(&mut app, true).await;
+                                        }
+                                        KeyCode::Char('[') => {
+                                            cycle_primary_remote_endpoint(&mut app, false).await;
+                                        }
                                         KeyCode::Up | KeyCode::Char('k') => {
                                             if app.selected_remote > 0 {
                                                 app.selected_remote -= 1;
@@ -1529,10 +2125,85 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 }
                                             }
                                         }
+                                        KeyCode::Char('s') => {
+                                            if let Some(obj) = selected_remote_object(&app) {
+                                                match app.transfer_direction {
+                                                    TransferDirection::S3ToLocal => {
+                                                        let destination_root =
+                                                            app.picker.cwd.clone();
+                                                        let selected: Vec<S3Object> = app
+                                                            .selected_remote_items
+                                                            .values()
+                                                            .cloned()
+                                                            .collect();
+                                                        if selected.is_empty() {
+                                                            queue_remote_download(
+                                                                &mut app,
+                                                                obj,
+                                                                destination_root,
+                                                            )
+                                                            .await;
+                                                        } else {
+                                                            queue_remote_download_batch(
+                                                                &mut app,
+                                                                selected,
+                                                                destination_root,
+                                                            )
+                                                            .await;
+                                                            app.selected_remote_items.clear();
+                                                        }
+                                                    }
+                                                    TransferDirection::S3ToS3 => {
+                                                        let selected: Vec<S3Object> = app
+                                                            .selected_remote_items
+                                                            .values()
+                                                            .cloned()
+                                                            .collect();
+                                                        if selected.is_empty() {
+                                                            queue_remote_s3_copy(&mut app, obj)
+                                                                .await;
+                                                        } else {
+                                                            queue_remote_s3_copy_batch(
+                                                                &mut app, selected,
+                                                            )
+                                                            .await;
+                                                            app.selected_remote_items.clear();
+                                                        }
+                                                    }
+                                                    TransferDirection::LocalToS3 => {
+                                                        app.set_status(
+                                                            "Switch to S3 -> Local or S3 -> S3 mode (press 'v') to queue from remote.",
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        KeyCode::Char(' ') => {
+                                            if let Some(obj) = selected_remote_object(&app) {
+                                                toggle_primary_remote_selection(&mut app, obj);
+                                            }
+                                        }
+                                        KeyCode::Char('c') => {
+                                            if app.selected_remote_items.is_empty() {
+                                                app.set_status(
+                                                    "No remote selections to clear.".to_string(),
+                                                );
+                                            } else {
+                                                app.selected_remote_items.clear();
+                                                app.set_status(
+                                                    "Cleared remote selections.".to_string(),
+                                                );
+                                            }
+                                        }
                                         KeyCode::Char('x') => {
                                             if let Some(obj) = selected_remote_object(&app) {
+                                                app.selected_remote_items.remove(&obj.key);
                                                 prepare_remote_delete(
-                                                    &mut app, obj.key, obj.name, obj.is_dir,
+                                                    &mut app,
+                                                    obj.key,
+                                                    obj.name,
+                                                    obj.is_dir,
+                                                    RemoteTarget::Primary,
                                                 )
                                                 .await;
                                             }
@@ -1545,6 +2216,13 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     },
                                     InputMode::RemoteBrowsing => {
                                         match key.code {
+                                            KeyCode::Char(']') => {
+                                                cycle_primary_remote_endpoint(&mut app, true).await;
+                                            }
+                                            KeyCode::Char('[') => {
+                                                cycle_primary_remote_endpoint(&mut app, false)
+                                                    .await;
+                                            }
                                             KeyCode::Esc | KeyCode::Char('q') => {
                                                 app.input_mode = InputMode::Normal;
                                                 app.status_message = "Ready".to_string();
@@ -1617,10 +2295,86 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     }
                                                 }
                                             }
+                                            KeyCode::Char('s') => {
+                                                if let Some(obj) = selected_remote_object(&app) {
+                                                    match app.transfer_direction {
+                                                        TransferDirection::S3ToLocal => {
+                                                            let destination_root =
+                                                                app.picker.cwd.clone();
+                                                            let selected: Vec<S3Object> = app
+                                                                .selected_remote_items
+                                                                .values()
+                                                                .cloned()
+                                                                .collect();
+                                                            if selected.is_empty() {
+                                                                queue_remote_download(
+                                                                    &mut app,
+                                                                    obj,
+                                                                    destination_root,
+                                                                )
+                                                                .await;
+                                                            } else {
+                                                                queue_remote_download_batch(
+                                                                    &mut app,
+                                                                    selected,
+                                                                    destination_root,
+                                                                )
+                                                                .await;
+                                                                app.selected_remote_items.clear();
+                                                            }
+                                                        }
+                                                        TransferDirection::S3ToS3 => {
+                                                            let selected: Vec<S3Object> = app
+                                                                .selected_remote_items
+                                                                .values()
+                                                                .cloned()
+                                                                .collect();
+                                                            if selected.is_empty() {
+                                                                queue_remote_s3_copy(&mut app, obj)
+                                                                    .await;
+                                                            } else {
+                                                                queue_remote_s3_copy_batch(
+                                                                    &mut app, selected,
+                                                                )
+                                                                .await;
+                                                                app.selected_remote_items.clear();
+                                                            }
+                                                        }
+                                                        TransferDirection::LocalToS3 => {
+                                                            app.set_status(
+                                                                "Switch to S3 -> Local or S3 -> S3 mode (press 'v') to queue from remote.",
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            KeyCode::Char(' ') => {
+                                                if let Some(obj) = selected_remote_object(&app) {
+                                                    toggle_primary_remote_selection(&mut app, obj);
+                                                }
+                                            }
+                                            KeyCode::Char('c') => {
+                                                if app.selected_remote_items.is_empty() {
+                                                    app.set_status(
+                                                        "No remote selections to clear."
+                                                            .to_string(),
+                                                    );
+                                                } else {
+                                                    app.selected_remote_items.clear();
+                                                    app.set_status(
+                                                        "Cleared remote selections.".to_string(),
+                                                    );
+                                                }
+                                            }
                                             KeyCode::Char('x') => {
                                                 if let Some(obj) = selected_remote_object(&app) {
+                                                    app.selected_remote_items.remove(&obj.key);
                                                     prepare_remote_delete(
-                                                        &mut app, obj.key, obj.name, obj.is_dir,
+                                                        &mut app,
+                                                        obj.key,
+                                                        obj.name,
+                                                        obj.is_dir,
+                                                        RemoteTarget::Primary,
                                                     )
                                                     .await;
                                                 }
@@ -1669,6 +2423,70 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     KeyCode::Right | KeyCode::Enter => {
                                         app.focus = AppFocus::SettingsFields;
                                     }
+                                    KeyCode::Char(']')
+                                        if app.settings.active_category == SettingsCategory::S3 =>
+                                    {
+                                        app.settings.cycle_s3_profile_selection();
+                                        app.set_status(format!(
+                                            "S3 profile: {}",
+                                            app.settings.selected_s3_profile_label()
+                                        ));
+                                    }
+                                    KeyCode::Char('[')
+                                        if app.settings.active_category == SettingsCategory::S3 =>
+                                    {
+                                        app.settings.cycle_s3_profile_selection_prev();
+                                        app.set_status(format!(
+                                            "S3 profile: {}",
+                                            app.settings.selected_s3_profile_label()
+                                        ));
+                                    }
+                                    KeyCode::Char('n')
+                                        if app.settings.active_category == SettingsCategory::S3 =>
+                                    {
+                                        let res = {
+                                            let conn = lock_mutex(&conn_mutex)?;
+                                            app.settings.create_s3_profile(&conn)?;
+                                            app.refresh_s3_profiles(&conn)
+                                        };
+                                        match res {
+                                            Ok(_) => {
+                                                app.set_status(format!(
+                                                    "Created profile '{}'",
+                                                    app.settings.selected_s3_profile_label()
+                                                ));
+                                            }
+                                            Err(e) => app.set_status(format!(
+                                                "Failed to create profile: {}",
+                                                e
+                                            )),
+                                        }
+                                    }
+                                    KeyCode::Char('x')
+                                        if app.settings.active_category == SettingsCategory::S3 =>
+                                    {
+                                        let res = {
+                                            let conn = lock_mutex(&conn_mutex)?;
+                                            let deleted =
+                                                app.settings.delete_current_s3_profile(&conn)?;
+                                            let _ = app.refresh_s3_profiles(&conn);
+                                            Ok::<bool, anyhow::Error>(deleted)
+                                        };
+                                        match res {
+                                            Ok(true) => {
+                                                app.set_status("Deleted S3 profile".to_string());
+                                            }
+                                            Ok(false) => {
+                                                app.set_status(
+                                                    "No S3 profile selected to delete.".to_string(),
+                                                );
+                                            }
+                                            Err(e) => app.set_status(format!(
+                                                "Failed to delete profile: {}",
+                                                e
+                                            )),
+                                        }
+                                    }
                                     KeyCode::Char('s') => {
                                         let res = {
                                             let mut cfg = app.config.lock().await;
@@ -1679,7 +2497,11 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                                             // Save entire config to database
                                             let conn = lock_mutex(&conn_mutex)?;
-                                            crate::core::config::save_config_to_db(&conn, &cfg)
+                                            crate::core::config::save_config_to_db(&conn, &cfg)?;
+                                            app.settings.save_secondary_profile_to_db(&conn)?;
+                                            app.settings.load_secondary_profile_from_db(&conn)?;
+                                            drop(cfg);
+                                            app.refresh_s3_profiles(&conn)
                                         };
 
                                         if let Err(e) = res {
@@ -1704,14 +2526,26 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             && app.settings.selected_field == 3)
                                             || (app.settings.active_category
                                                 == SettingsCategory::Performance
-                                                && app.settings.selected_field >= 5);
+                                                && app.settings.selected_field >= 5)
+                                            || (app.settings.active_category
+                                                == SettingsCategory::S3
+                                                && app.settings.selected_field == 0);
 
                                         if is_toggle {
                                             // Handle toggle based on category and field
+                                            let mut should_auto_save = true;
                                             match (
                                                 app.settings.active_category,
                                                 app.settings.selected_field,
                                             ) {
+                                                (SettingsCategory::S3, 0) => {
+                                                    app.settings.cycle_s3_profile_selection();
+                                                    app.status_message = format!(
+                                                        "S3 profile: {}",
+                                                        app.settings.selected_s3_profile_label()
+                                                    );
+                                                    should_auto_save = false;
+                                                }
                                                 (SettingsCategory::Scanner, 3) => {
                                                     app.settings.scanner_enabled =
                                                         !app.settings.scanner_enabled;
@@ -1752,15 +2586,25 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             }
 
                                             // Trigger Auto-Save logic immediately
-                                            let res = {
-                                                let mut cfg = app.config.lock().await;
-                                                app.settings.apply_to_config(&mut cfg);
-                                                let conn = lock_mutex(&conn_mutex)?;
-                                                crate::core::config::save_config_to_db(&conn, &cfg)
-                                            };
+                                            if should_auto_save {
+                                                let res = {
+                                                    let mut cfg = app.config.lock().await;
+                                                    app.settings.apply_to_config(&mut cfg);
+                                                    let conn = lock_mutex(&conn_mutex)?;
+                                                    crate::core::config::save_config_to_db(
+                                                        &conn, &cfg,
+                                                    )?;
+                                                    app.settings
+                                                        .save_secondary_profile_to_db(&conn)?;
+                                                    app.settings
+                                                        .load_secondary_profile_from_db(&conn)?;
+                                                    drop(cfg);
+                                                    app.refresh_s3_profiles(&conn)
+                                                };
 
-                                            if let Err(e) = res {
-                                                app.set_status(format!("Save error: {}", e));
+                                                if let Err(e) = res {
+                                                    app.set_status(format!("Save error: {}", e));
+                                                }
                                             }
                                         } else {
                                             app.settings.editing = !app.settings.editing;
@@ -1793,12 +2637,14 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 {
                                                     SettingsCategory::S3 => {
                                                         match app.settings.selected_field {
-                                                            0 => "S3 Endpoint",
-                                                            1 => "S3 Bucket",
-                                                            2 => "S3 Region",
-                                                            3 => "Prefix",
-                                                            4 => "Access Key",
-                                                            5 => "Secret Key",
+                                                            0 => "S3 Profile",
+                                                            1 => "S3 Profile Name",
+                                                            2 => "S3 Endpoint",
+                                                            3 => "S3 Bucket",
+                                                            4 => "S3 Region",
+                                                            5 => "Prefix",
+                                                            6 => "Access Key",
+                                                            7 => "Secret Key",
                                                             _ => "Settings",
                                                         }
                                                     }
@@ -1818,9 +2664,30 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 // Save entire config to database
                                                 let conn = lock_mutex(&conn_mutex)?;
                                                 (
-                                                    crate::core::config::save_config_to_db(
-                                                        &conn, &cfg,
-                                                    ),
+                                                    {
+                                                        let mut save_res =
+                                                            crate::core::config::save_config_to_db(
+                                                                &conn, &cfg,
+                                                            )
+                                                            .and_then(|_| {
+                                                                app.settings
+                                                                    .save_secondary_profile_to_db(
+                                                                        &conn,
+                                                                    )
+                                                            })
+                                                            .and_then(|_| {
+                                                                app.settings
+                                                                    .load_secondary_profile_from_db(
+                                                                        &conn,
+                                                                    )
+                                                            });
+                                                        drop(cfg);
+                                                        if save_res.is_ok() {
+                                                            save_res =
+                                                                app.refresh_s3_profiles(&conn);
+                                                        }
+                                                        save_res
+                                                    },
                                                     field_name,
                                                 )
                                             };
@@ -1916,23 +2783,26 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     }
                                                 }
                                             }
-                                            (SettingsCategory::S3, 0) => {
-                                                app.settings.endpoint.push(c)
-                                            }
                                             (SettingsCategory::S3, 1) => {
-                                                app.settings.bucket.push(c)
+                                                app.settings.selected_s3_profile_name_mut().push(c)
                                             }
                                             (SettingsCategory::S3, 2) => {
-                                                app.settings.region.push(c)
+                                                app.settings.selected_s3_endpoint_mut().push(c)
                                             }
                                             (SettingsCategory::S3, 3) => {
-                                                app.settings.prefix.push(c)
+                                                app.settings.selected_s3_bucket_mut().push(c)
                                             }
                                             (SettingsCategory::S3, 4) => {
-                                                app.settings.access_key.push(c)
+                                                app.settings.selected_s3_region_mut().push(c)
                                             }
                                             (SettingsCategory::S3, 5) => {
-                                                app.settings.secret_key.push(c)
+                                                app.settings.selected_s3_prefix_mut().push(c)
+                                            }
+                                            (SettingsCategory::S3, 6) => {
+                                                app.settings.selected_s3_access_key_mut().push(c)
+                                            }
+                                            (SettingsCategory::S3, 7) => {
+                                                app.settings.selected_s3_secret_key_mut().push(c)
                                             }
                                             (SettingsCategory::Scanner, 0) => {
                                                 app.settings.clamd_host.push(c)
@@ -1966,23 +2836,26 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             app.settings.active_category,
                                             app.settings.selected_field,
                                         ) {
-                                            (SettingsCategory::S3, 0) => {
-                                                app.settings.endpoint.pop();
-                                            }
                                             (SettingsCategory::S3, 1) => {
-                                                app.settings.bucket.pop();
+                                                app.settings.selected_s3_profile_name_mut().pop();
                                             }
                                             (SettingsCategory::S3, 2) => {
-                                                app.settings.region.pop();
+                                                app.settings.selected_s3_endpoint_mut().pop();
                                             }
                                             (SettingsCategory::S3, 3) => {
-                                                app.settings.prefix.pop();
+                                                app.settings.selected_s3_bucket_mut().pop();
                                             }
                                             (SettingsCategory::S3, 4) => {
-                                                app.settings.access_key.pop();
+                                                app.settings.selected_s3_region_mut().pop();
                                             }
                                             (SettingsCategory::S3, 5) => {
-                                                app.settings.secret_key.pop();
+                                                app.settings.selected_s3_prefix_mut().pop();
+                                            }
+                                            (SettingsCategory::S3, 6) => {
+                                                app.settings.selected_s3_access_key_mut().pop();
+                                            }
+                                            (SettingsCategory::S3, 7) => {
+                                                app.settings.selected_s3_secret_key_mut().pop();
                                             }
                                             (SettingsCategory::Scanner, 0) => {
                                                 app.settings.clamd_host.pop();
@@ -2048,7 +2921,27 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             // Save entire config to database
                                             let conn = lock_mutex(&conn_mutex)?;
                                             (
-                                                crate::core::config::save_config_to_db(&conn, &cfg),
+                                                {
+                                                    let mut save_res =
+                                                        crate::core::config::save_config_to_db(
+                                                            &conn, &cfg,
+                                                        )
+                                                        .and_then(|_| {
+                                                            app.settings
+                                                                .save_secondary_profile_to_db(&conn)
+                                                        })
+                                                        .and_then(|_| {
+                                                            app.settings
+                                                                .load_secondary_profile_from_db(
+                                                                    &conn,
+                                                                )
+                                                        });
+                                                    drop(cfg);
+                                                    if save_res.is_ok() {
+                                                        save_res = app.refresh_s3_profiles(&conn);
+                                                    }
+                                                    save_res
+                                                },
                                                 bucket_name,
                                             )
                                         };
@@ -2062,6 +2955,74 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             ));
                                         }
                                     }
+                                    KeyCode::Char('n')
+                                        if !app.settings.editing
+                                            && app.settings.active_category
+                                                == SettingsCategory::S3 =>
+                                    {
+                                        let res = {
+                                            let conn = lock_mutex(&conn_mutex)?;
+                                            app.settings.create_s3_profile(&conn)?;
+                                            app.refresh_s3_profiles(&conn)
+                                        };
+                                        match res {
+                                            Ok(_) => app.set_status(format!(
+                                                "Created profile '{}'",
+                                                app.settings.selected_s3_profile_label()
+                                            )),
+                                            Err(e) => app.set_status(format!(
+                                                "Failed to create profile: {}",
+                                                e
+                                            )),
+                                        }
+                                    }
+                                    KeyCode::Char('x')
+                                        if !app.settings.editing
+                                            && app.settings.active_category
+                                                == SettingsCategory::S3 =>
+                                    {
+                                        let res = {
+                                            let conn = lock_mutex(&conn_mutex)?;
+                                            let deleted =
+                                                app.settings.delete_current_s3_profile(&conn)?;
+                                            let _ = app.refresh_s3_profiles(&conn);
+                                            Ok::<bool, anyhow::Error>(deleted)
+                                        };
+                                        match res {
+                                            Ok(true) => {
+                                                app.set_status("Deleted S3 profile".to_string())
+                                            }
+                                            Ok(false) => app.set_status(
+                                                "No S3 profile selected to delete.".to_string(),
+                                            ),
+                                            Err(e) => app.set_status(format!(
+                                                "Failed to delete profile: {}",
+                                                e
+                                            )),
+                                        }
+                                    }
+                                    KeyCode::Char(']')
+                                        if !app.settings.editing
+                                            && app.settings.active_category
+                                                == SettingsCategory::S3 =>
+                                    {
+                                        app.settings.cycle_s3_profile_selection();
+                                        app.set_status(format!(
+                                            "S3 profile: {}",
+                                            app.settings.selected_s3_profile_label()
+                                        ));
+                                    }
+                                    KeyCode::Char('[')
+                                        if !app.settings.editing
+                                            && app.settings.active_category
+                                                == SettingsCategory::S3 =>
+                                    {
+                                        app.settings.cycle_s3_profile_selection_prev();
+                                        app.set_status(format!(
+                                            "S3 profile: {}",
+                                            app.settings.selected_s3_profile_label()
+                                        ));
+                                    }
                                     KeyCode::Char('w') if !app.settings.editing => {
                                         // Launch setup wizard
                                         app.wizard = WizardState::new();
@@ -2074,7 +3035,12 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                         {
                                             app.set_status("Testing connection...");
                                             let tx = app.async_tx.clone();
-                                            let config_clone = app.config.lock().await.clone();
+                                            let mut config_clone = app.config.lock().await.clone();
+                                            if cat == SettingsCategory::S3 {
+                                                app.settings.apply_selected_s3_profile_to_config(
+                                                    &mut config_clone,
+                                                );
+                                            }
 
                                             tokio::spawn(async move {
                                                 let res = if cat == SettingsCategory::S3 {
@@ -2346,127 +3312,271 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         Constraint::Percentage(100 - local_percent),
                                                     ])
                                                     .split(top_area);
+                                                let (browser_idx, remote_idx) =
+                                                    transfer_panel_indices(app.transfer_direction);
+                                                let browser_chunk = chunks[browser_idx];
+                                                let remote_chunk = chunks[remote_idx];
 
-                                                if x < chunks[0].x + chunks[0].width {
+                                                if x >= browser_chunk.x
+                                                    && x < browser_chunk.x + browser_chunk.width
+                                                {
                                                     app.focus = AppFocus::Browser;
-                                                    let now = Instant::now();
-                                                    let is_double_click = if let (
-                                                        Some(last_time),
-                                                        Some(last_pos),
-                                                    ) =
-                                                        (app.last_click_time, app.last_click_pos)
+                                                    if app.transfer_direction
+                                                        == TransferDirection::S3ToS3
                                                     {
-                                                        now.duration_since(last_time)
-                                                            < Duration::from_millis(500)
-                                                            && last_pos == (x, y)
-                                                    } else {
-                                                        false
-                                                    };
-
-                                                    if is_double_click {
-                                                        app.last_click_time = None;
-                                                        if app.input_mode == InputMode::Normal {
-                                                            app.input_mode = InputMode::Browsing;
-                                                        }
-                                                    } else {
-                                                        app.last_click_time = Some(now);
-                                                        app.last_click_pos = Some((x, y));
-                                                    }
-
-                                                    let inner_y = chunks[0].y + 1;
-                                                    let has_filter = !app.input_buffer.is_empty()
-                                                        || app.input_mode == InputMode::Filter;
-                                                    let table_y =
-                                                        inner_y + if has_filter { 1 } else { 0 };
-                                                    let content_y = table_y + 1; // +1 for header
-
-                                                    if y >= content_y {
-                                                        let relative_row = (y - content_y) as usize;
-                                                        let display_height =
-                                                            chunks[0].height.saturating_sub(
-                                                                if has_filter { 4 } else { 3 },
+                                                        if app.s3_objects_secondary.is_empty() {
+                                                            request_secondary_remote_list(
+                                                                &mut app, false,
                                                             )
-                                                                as usize; // Border + table_y + header
-                                                        let filter =
-                                                            app.input_buffer.trim().to_lowercase();
-                                                        let filtered_entries: Vec<usize> = app
-                                                            .picker
-                                                            .entries
-                                                            .iter()
-                                                            .enumerate()
-                                                            .filter(|(_, e)| {
-                                                                e.is_parent
-                                                                    || filter.is_empty()
-                                                                    || fuzzy_match(&filter, &e.name)
-                                                            })
-                                                            .map(|(i, _)| i)
-                                                            .collect();
+                                                            .await;
+                                                        }
 
-                                                        if relative_row < display_height {
-                                                            let total_rows = filtered_entries.len();
-                                                            let current_filtered_selected =
-                                                                filtered_entries
-                                                                    .iter()
-                                                                    .position(|&i| {
-                                                                        i == app.picker.selected
-                                                                    })
-                                                                    .unwrap_or(0);
+                                                        let inner_y = browser_chunk.y + 2;
+                                                        if y >= inner_y {
+                                                            let relative_row =
+                                                                (y - inner_y) as usize;
+                                                            let display_height = browser_chunk
+                                                                .height
+                                                                .saturating_sub(3)
+                                                                as usize;
+                                                            let total_rows =
+                                                                app.s3_objects_secondary.len();
                                                             let offset = calculate_list_offset(
-                                                                current_filtered_selected,
+                                                                app.selected_remote_secondary,
                                                                 total_rows,
                                                                 display_height,
                                                             );
-                                                            if offset + relative_row < total_rows {
-                                                                let target_real_idx =
-                                                                    filtered_entries
-                                                                        [offset + relative_row];
-                                                                app.picker.selected =
-                                                                    target_real_idx;
+                                                            if relative_row < display_height
+                                                                && offset + relative_row
+                                                                    < total_rows
+                                                            {
+                                                                let new_idx = offset + relative_row;
+                                                                app.selected_remote_secondary =
+                                                                    new_idx;
+
+                                                                let now = Instant::now();
+                                                                let is_double_click = if let (
+                                                                    Some(last_time),
+                                                                    Some(last_pos),
+                                                                ) = (
+                                                                    app.last_click_time,
+                                                                    app.last_click_pos,
+                                                                ) {
+                                                                    now.duration_since(last_time)
+                                                                        < Duration::from_millis(500)
+                                                                        && last_pos == (x, y)
+                                                                } else {
+                                                                    false
+                                                                };
+
                                                                 if is_double_click {
-                                                                    let entry = app.picker.entries
-                                                                        [target_real_idx]
-                                                                        .clone();
-                                                                    if entry.is_dir {
-                                                                        if entry.is_parent {
-                                                                            app.picker.go_parent();
-                                                                        } else {
-                                                                            app.picker.try_set_cwd(
-                                                                                entry.path,
-                                                                            );
-                                                                        }
-                                                                    } else {
-                                                                        let conn_clone =
-                                                                            conn_mutex.clone();
-                                                                        let tx =
-                                                                            app.async_tx.clone();
-                                                                        let path = entry
-                                                                            .path
-                                                                            .to_string_lossy()
-                                                                            .to_string();
-                                                                        tokio::spawn(async move {
-                                                                            let session_id =
-                                                                                Uuid::new_v4()
-                                                                                    .to_string();
-                                                                            if let Err(e) = ingest_path(
-                                                                                conn_clone,
-                                                                                &path,
-                                                                                &session_id,
-                                                                                None,
-                                                                            )
-                                                                            .await
-                                                                                && let Err(send_err) = tx.send(
-                                                                                    AppEvent::Notification(format!(
-                                                                                        "Failed to queue file: {}",
-                                                                                        e
-                                                                                    )),
-                                                                                )
+                                                                    app.last_click_time = None;
+                                                                    let obj = &app
+                                                                        .s3_objects_secondary
+                                                                        [new_idx];
+                                                                    if obj.is_dir {
+                                                                        if obj.is_parent {
+                                                                            let current = app
+                                                                                .remote_secondary_current_path
+                                                                                .trim_end_matches('/');
+                                                                            if let Some(idx) =
+                                                                                current.rfind('/')
                                                                             {
-                                                                                warn!(
-                                                                                    "Failed to send queue failure notification: {}",
-                                                                                    send_err
-                                                                                );
+                                                                                app.remote_secondary_current_path
+                                                                                    .truncate(idx + 1);
+                                                                            } else {
+                                                                                app.remote_secondary_current_path
+                                                                                    .clear();
                                                                             }
-                                                                        });
+                                                                        } else {
+                                                                            app.remote_secondary_current_path
+                                                                                .push_str(&obj.name);
+                                                                        }
+                                                                        app.input_mode =
+                                                                            InputMode::RemoteBrowsing;
+                                                                        request_secondary_remote_list(
+                                                                            &mut app, false,
+                                                                        )
+                                                                        .await;
+                                                                    }
+                                                                } else {
+                                                                    app.last_click_time = Some(now);
+                                                                    app.last_click_pos =
+                                                                        Some((x, y));
+                                                                }
+                                                            }
+                                                        }
+                                                    } else {
+                                                        let now = Instant::now();
+                                                        let is_double_click = if let (
+                                                            Some(last_time),
+                                                            Some(last_pos),
+                                                        ) = (
+                                                            app.last_click_time,
+                                                            app.last_click_pos,
+                                                        ) {
+                                                            now.duration_since(last_time)
+                                                                < Duration::from_millis(500)
+                                                                && last_pos == (x, y)
+                                                        } else {
+                                                            false
+                                                        };
+
+                                                        if is_double_click {
+                                                            app.last_click_time = None;
+                                                            if app.input_mode == InputMode::Normal {
+                                                                app.input_mode =
+                                                                    InputMode::Browsing;
+                                                            }
+                                                        } else {
+                                                            app.last_click_time = Some(now);
+                                                            app.last_click_pos = Some((x, y));
+                                                        }
+
+                                                        let inner_y = browser_chunk.y + 1;
+                                                        let has_filter = !app
+                                                            .input_buffer
+                                                            .is_empty()
+                                                            || app.input_mode == InputMode::Filter;
+                                                        let table_y = inner_y
+                                                            + if has_filter { 1 } else { 0 };
+                                                        let content_y = table_y + 1; // +1 for header
+
+                                                        if y >= content_y {
+                                                            let relative_row =
+                                                                (y - content_y) as usize;
+                                                            let display_height = browser_chunk
+                                                                .height
+                                                                .saturating_sub(if has_filter {
+                                                                    4
+                                                                } else {
+                                                                    3
+                                                                })
+                                                                as usize; // Border + table_y + header
+                                                            let filter = app
+                                                                .input_buffer
+                                                                .trim()
+                                                                .to_lowercase();
+                                                            let filtered_entries: Vec<usize> = app
+                                                                .picker
+                                                                .entries
+                                                                .iter()
+                                                                .enumerate()
+                                                                .filter(|(_, e)| {
+                                                                    e.is_parent
+                                                                        || filter.is_empty()
+                                                                        || fuzzy_match(
+                                                                            &filter, &e.name,
+                                                                        )
+                                                                })
+                                                                .map(|(i, _)| i)
+                                                                .collect();
+
+                                                            if relative_row < display_height {
+                                                                let total_rows =
+                                                                    filtered_entries.len();
+                                                                let current_filtered_selected =
+                                                                    filtered_entries
+                                                                        .iter()
+                                                                        .position(|&i| {
+                                                                            i == app.picker.selected
+                                                                        })
+                                                                        .unwrap_or(0);
+                                                                let offset = calculate_list_offset(
+                                                                    current_filtered_selected,
+                                                                    total_rows,
+                                                                    display_height,
+                                                                );
+                                                                if offset + relative_row
+                                                                    < total_rows
+                                                                {
+                                                                    let target_real_idx =
+                                                                        filtered_entries
+                                                                            [offset + relative_row];
+                                                                    app.picker.selected =
+                                                                        target_real_idx;
+                                                                    if is_double_click {
+                                                                        let entry =
+                                                                            app.picker.entries
+                                                                                [target_real_idx]
+                                                                                .clone();
+                                                                        if entry.is_dir {
+                                                                            if entry.is_parent {
+                                                                                app.picker
+                                                                                    .go_parent();
+                                                                            } else {
+                                                                                app.picker
+                                                                                    .try_set_cwd(
+                                                                                        entry.path,
+                                                                                    );
+                                                                            }
+                                                                        } else if app
+                                                                            .transfer_direction
+                                                                            != TransferDirection::LocalToS3
+                                                                        {
+                                                                            app.set_status(
+                                                                                "Upload queueing is disabled in this transfer mode.",
+                                                                            );
+                                                                        } else {
+                                                                            if app
+                                                                                .transfer_destination_endpoint_id
+                                                                                .is_none()
+                                                                            {
+                                                                                app.set_status(
+                                                                                    "No S3 destination endpoint selected."
+                                                                                        .to_string(),
+                                                                                );
+                                                                                continue;
+                                                                            }
+                                                                            let conn_clone =
+                                                                                conn_mutex.clone();
+                                                                            let tx = app
+                                                                                .async_tx
+                                                                                .clone();
+                                                                            let path = entry
+                                                                                .path
+                                                                                .to_string_lossy()
+                                                                                .to_string();
+                                                                            let transfer_metadata = {
+                                                                                if let Ok(conn) =
+                                                                                    lock_mutex(
+                                                                                        &conn_mutex,
+                                                                                    )
+                                                                                {
+                                                                                    local_to_s3_metadata(
+                                                                                        &conn,
+                                                                                        app.transfer_destination_endpoint_id,
+                                                                                    )
+                                                                                } else {
+                                                                                    None
+                                                                                }
+                                                                            };
+                                                                            tokio::spawn(async move {
+                                                                                let session_id =
+                                                                                    Uuid::new_v4()
+                                                                                        .to_string();
+                                                                                if let Err(e) = ingest_path(
+                                                                                    conn_clone,
+                                                                                    &path,
+                                                                                    &session_id,
+                                                                                    None,
+                                                                                    transfer_metadata,
+                                                                                )
+                                                                                .await
+                                                                                    && let Err(send_err) = tx.send(
+                                                                                        AppEvent::Notification(format!(
+                                                                                            "Failed to queue file: {}",
+                                                                                            e
+                                                                                        )),
+                                                                                    )
+                                                                                {
+                                                                                    warn!(
+                                                                                        "Failed to send queue failure notification: {}",
+                                                                                        send_err
+                                                                                    );
+                                                                                }
+                                                                            });
+                                                                        }
                                                                     }
                                                                 }
                                                             }
@@ -2478,11 +3588,11 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         request_remote_list(&mut app, false).await;
                                                     }
 
-                                                    let inner_y = chunks[1].y + 2;
+                                                    let inner_y = remote_chunk.y + 2;
                                                     if y >= inner_y {
                                                         let relative_row = (y - inner_y) as usize;
                                                         let display_height =
-                                                            chunks[1].height.saturating_sub(3)
+                                                            remote_chunk.height.saturating_sub(3)
                                                                 as usize;
                                                         let total_rows = app.s3_objects.len();
                                                         let offset = calculate_list_offset(
@@ -2714,12 +3824,31 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                         .apply_to_config(&mut cfg);
                                                                     let conn =
                                                                         lock_mutex(&conn_mutex)?;
-                                                                    if let Err(e) = crate::core::config::save_config_to_db(&conn, &cfg) {
-                                                                        app.status_message =
-                                                                            format!("Failed to save theme: {}", e);
+                                                                    let mut save_res = crate::core::config::save_config_to_db(&conn, &cfg)
+                                                                        .and_then(|_| {
+                                                                            app.settings
+                                                                                .save_secondary_profile_to_db(&conn)
+                                                                        })
+                                                                        .and_then(|_| {
+                                                                            app.settings
+                                                                                .load_secondary_profile_from_db(&conn)
+                                                                        });
+                                                                    drop(cfg);
+                                                                    if save_res.is_ok() {
+                                                                        save_res = app
+                                                                            .refresh_s3_profiles(
+                                                                                &conn,
+                                                                            );
+                                                                    }
+                                                                    if let Err(e) = save_res {
+                                                                        app.status_message = format!(
+                                                                            "Failed to save theme: {}",
+                                                                            e
+                                                                        );
                                                                     } else {
                                                                         app.status_message =
-                                                                            "Theme saved".to_string();
+                                                                            "Theme saved"
+                                                                                .to_string();
                                                                     }
                                                                     app.last_click_time = None;
                                                                 } else {
@@ -2778,17 +3907,26 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     app.settings.selected_field = target_idx;
                                                     // Handle boolean toggles on click
                                                     let is_toggle = (app.settings.active_category
-                                                        == SettingsCategory::Scanner
-                                                        && target_idx == 3)
+                                                        == SettingsCategory::S3
+                                                        && target_idx == 0)
+                                                        || (app.settings.active_category
+                                                            == SettingsCategory::Scanner
+                                                            && target_idx == 3)
                                                         || (app.settings.active_category
                                                             == SettingsCategory::Performance
                                                             && target_idx >= 5);
 
                                                     if is_toggle {
+                                                        let mut should_auto_save = true;
                                                         match (
                                                             app.settings.active_category,
                                                             target_idx,
                                                         ) {
+                                                            (SettingsCategory::S3, 0) => {
+                                                                app.settings
+                                                                    .cycle_s3_profile_selection();
+                                                                should_auto_save = false;
+                                                            }
                                                             (SettingsCategory::Scanner, 3) => {
                                                                 app.settings.scanner_enabled =
                                                                     !app.settings.scanner_enabled;
@@ -2806,18 +3944,36 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                             }
                                                             _ => {}
                                                         }
-                                                        let mut cfg = app.config.lock().await;
-                                                        app.settings.apply_to_config(&mut cfg);
-                                                        let conn = lock_mutex(&conn_mutex)?;
-                                                        if let Err(e) =
-                                                            crate::core::config::save_config_to_db(
+                                                        if should_auto_save {
+                                                            let mut cfg = app.config.lock().await;
+                                                            app.settings.apply_to_config(&mut cfg);
+                                                            let conn = lock_mutex(&conn_mutex)?;
+                                                            let mut save_res = crate::core::config::save_config_to_db(
                                                                 &conn, &cfg,
                                                             )
-                                                        {
-                                                            app.status_message = format!(
-                                                                "Failed to save settings: {}",
-                                                                e
-                                                            );
+                                                            .and_then(|_| {
+                                                                app.settings
+                                                                    .save_secondary_profile_to_db(
+                                                                        &conn,
+                                                                    )
+                                                            })
+                                                            .and_then(|_| {
+                                                                app.settings
+                                                                    .load_secondary_profile_from_db(
+                                                                        &conn,
+                                                                    )
+                                                            });
+                                                            drop(cfg);
+                                                            if save_res.is_ok() {
+                                                                save_res =
+                                                                    app.refresh_s3_profiles(&conn);
+                                                            }
+                                                            if let Err(e) = save_res {
+                                                                app.status_message = format!(
+                                                                    "Failed to save settings: {}",
+                                                                    e
+                                                                );
+                                                            }
                                                         }
                                                     } else {
                                                         // Double click for other fields
@@ -2945,21 +4101,44 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         Constraint::Percentage(100 - local_percent),
                                                     ])
                                                     .split(top_area);
+                                                let (browser_idx, remote_idx) =
+                                                    transfer_panel_indices(app.transfer_direction);
+                                                let browser_chunk = chunks[browser_idx];
 
-                                                if x < chunks[0].x + chunks[0].width {
-                                                    if is_down {
+                                                if x >= browser_chunk.x
+                                                    && x < browser_chunk.x + browser_chunk.width
+                                                {
+                                                    if app.transfer_direction
+                                                        == TransferDirection::S3ToS3
+                                                    {
+                                                        if is_down {
+                                                            if app.selected_remote_secondary + 1
+                                                                < app.s3_objects_secondary.len()
+                                                            {
+                                                                app.selected_remote_secondary += 1;
+                                                            }
+                                                        } else if app.selected_remote_secondary > 0
+                                                        {
+                                                            app.selected_remote_secondary -= 1;
+                                                        }
+                                                    } else if is_down {
                                                         app.picker.move_down();
                                                     } else {
                                                         app.picker.move_up();
                                                     }
-                                                } else if is_down {
-                                                    if app.selected_remote + 1
-                                                        < app.s3_objects.len()
-                                                    {
-                                                        app.selected_remote += 1;
+                                                } else if x >= chunks[remote_idx].x
+                                                    && x < chunks[remote_idx].x
+                                                        + chunks[remote_idx].width
+                                                {
+                                                    if is_down {
+                                                        if app.selected_remote + 1
+                                                            < app.s3_objects.len()
+                                                        {
+                                                            app.selected_remote += 1;
+                                                        }
+                                                    } else if app.selected_remote > 0 {
+                                                        app.selected_remote -= 1;
                                                     }
-                                                } else if app.selected_remote > 0 {
-                                                    app.selected_remote -= 1;
                                                 }
                                             } else if is_down {
                                                 if app.selected + 1 < app.visual_jobs.len() {

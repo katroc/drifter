@@ -11,7 +11,13 @@ use crate::components::file_picker::FilePicker;
 use crate::components::wizard::WizardState;
 use crate::core::config::Config;
 use crate::core::metrics::{HostMetricsSnapshot, MetricsCollector};
-use crate::db::{JobRow, list_active_jobs, list_history_jobs, list_quarantined_jobs};
+use crate::core::transfer::EndpointKind;
+use crate::core::transfer::TransferDirection;
+use crate::db::{
+    EndpointProfileRow, JobRow, JobTransferMetadata, get_default_destination_endpoint_profile,
+    get_default_source_endpoint_profile, get_job_transfer_metadata, list_active_jobs,
+    list_endpoint_profiles, list_history_jobs, list_quarantined_jobs,
+};
 use crate::services::uploader::S3Object;
 use crate::utils::lock_mutex;
 
@@ -45,8 +51,14 @@ pub enum ModalAction {
     None,
     ClearHistory,
     CancelJob(i64),
-    DeleteRemoteObject(String, String, bool), // key, current_path, is_dir
+    DeleteRemoteObject(String, String, bool, RemoteTarget), // key, current_path, is_dir, target
     QuitApp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteTarget {
+    Primary,
+    Secondary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +93,8 @@ pub enum InputMode {
 #[derive(Debug)]
 pub enum AppEvent {
     Notification(String),
-    RemoteFileList(String, Vec<S3Object>), // (path, objects)
+    RemoteFileList(Option<i64>, String, Vec<S3Object>), // (endpoint_id, path, objects)
+    RemoteFileListSecondary(Option<i64>, String, Vec<S3Object>), // (endpoint_id, path, objects)
     LogLine(String),
     RefreshRemote,
 }
@@ -129,6 +142,7 @@ use crate::coordinator::ProgressInfo;
 pub struct App {
     pub jobs: Vec<JobRow>,
     pub history: Vec<JobRow>,
+    pub job_transfer_metadata: HashMap<i64, JobTransferMetadata>,
     pub selected: usize,
     pub selected_history: usize,
     pub quarantine: Vec<JobRow>,
@@ -140,6 +154,18 @@ pub struct App {
     pub remote_cache: HashMap<String, (Vec<S3Object>, Instant)>, // path -> (objects, fetched_at)
     pub remote_request_pending: Option<String>,                  // path currently being fetched
     pub remote_loading: bool,
+    pub selected_remote_items: HashMap<String, S3Object>,
+    pub selected_remote_items_secondary: HashMap<String, S3Object>,
+    pub s3_objects_secondary: Vec<S3Object>,
+    pub selected_remote_secondary: usize,
+    pub remote_secondary_current_path: String,
+    pub remote_secondary_cache: HashMap<String, (Vec<S3Object>, Instant)>,
+    pub remote_secondary_request_pending: Option<String>,
+    pub remote_secondary_loading: bool,
+    pub transfer_direction: TransferDirection,
+    pub s3_profiles: Vec<EndpointProfileRow>,
+    pub transfer_source_endpoint_id: Option<i64>,
+    pub transfer_destination_endpoint_id: Option<i64>,
 
     pub last_refresh: Instant,
     pub status_message: String,
@@ -238,6 +264,7 @@ impl App {
         let mut app = Self {
             jobs: Vec::new(),
             history: Vec::new(),
+            job_transfer_metadata: HashMap::new(),
             quarantine: Vec::new(),
             selected: 0,
             selected_history: 0,
@@ -249,6 +276,18 @@ impl App {
             remote_cache: HashMap::new(),
             remote_request_pending: None,
             remote_loading: false,
+            selected_remote_items: HashMap::new(),
+            selected_remote_items_secondary: HashMap::new(),
+            s3_objects_secondary: Vec::new(),
+            selected_remote_secondary: 0,
+            remote_secondary_current_path: String::new(),
+            remote_secondary_cache: HashMap::new(),
+            remote_secondary_request_pending: None,
+            remote_secondary_loading: false,
+            transfer_direction: TransferDirection::LocalToS3,
+            s3_profiles: Vec::new(),
+            transfer_source_endpoint_id: None,
+            transfer_destination_endpoint_id: None,
 
             last_refresh: Instant::now() - Duration::from_secs(5),
             status_message: "Ready".to_string(),
@@ -312,6 +351,11 @@ impl App {
             creating_folder_name: String::new(),
         };
 
+        if let Ok(conn_guard) = lock_mutex(&conn) {
+            let _ = app.settings.load_secondary_profile_from_db(&conn_guard);
+            let _ = app.refresh_s3_profiles(&conn_guard);
+        }
+
         if let Some(watch_dir) = app
             .cached_config
             .watch_dir
@@ -363,6 +407,113 @@ impl App {
         self.status_message_at = Some(Instant::now());
     }
 
+    pub fn toggle_transfer_direction(&mut self) {
+        self.transfer_direction = match self.transfer_direction {
+            TransferDirection::LocalToS3 => TransferDirection::S3ToLocal,
+            TransferDirection::S3ToLocal => TransferDirection::S3ToS3,
+            TransferDirection::S3ToS3 => TransferDirection::LocalToS3,
+        };
+    }
+
+    fn contains_s3_profile_id(&self, id: Option<i64>) -> bool {
+        let Some(id) = id else {
+            return false;
+        };
+        self.s3_profiles.iter().any(|profile| profile.id == id)
+    }
+
+    pub fn refresh_s3_profiles(&mut self, conn: &Connection) -> Result<()> {
+        self.s3_profiles = list_endpoint_profiles(conn)?
+            .into_iter()
+            .filter(|profile| profile.kind == EndpointKind::S3)
+            .collect();
+
+        let first_s3 = self.s3_profiles.first().map(|profile| profile.id);
+        let default_source_s3 = get_default_source_endpoint_profile(conn)?
+            .filter(|profile| profile.kind == EndpointKind::S3)
+            .map(|profile| profile.id);
+        let default_destination_s3 = get_default_destination_endpoint_profile(conn)?
+            .filter(|profile| profile.kind == EndpointKind::S3)
+            .map(|profile| profile.id);
+
+        if !self.contains_s3_profile_id(self.transfer_source_endpoint_id) {
+            self.transfer_source_endpoint_id =
+                default_source_s3.or(default_destination_s3).or(first_s3);
+        }
+        if !self.contains_s3_profile_id(self.transfer_destination_endpoint_id) {
+            self.transfer_destination_endpoint_id =
+                default_destination_s3.or(default_source_s3).or(first_s3);
+        }
+
+        if self.s3_profiles.is_empty() {
+            self.transfer_source_endpoint_id = None;
+            self.transfer_destination_endpoint_id = None;
+        }
+
+        Ok(())
+    }
+
+    fn cycle_profile_id(&self, current: Option<i64>, forward: bool) -> Option<i64> {
+        if self.s3_profiles.is_empty() {
+            return None;
+        }
+
+        let current_idx = current.and_then(|id| self.s3_profiles.iter().position(|p| p.id == id));
+        let idx = match (current_idx, forward) {
+            (Some(i), true) => (i + 1) % self.s3_profiles.len(),
+            (Some(i), false) => (i + self.s3_profiles.len() - 1) % self.s3_profiles.len(),
+            (None, _) => 0,
+        };
+        Some(self.s3_profiles[idx].id)
+    }
+
+    pub fn endpoint_profile_name(&self, endpoint_id: Option<i64>) -> String {
+        let Some(endpoint_id) = endpoint_id else {
+            return "Unconfigured".to_string();
+        };
+        self.s3_profiles
+            .iter()
+            .find(|profile| profile.id == endpoint_id)
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| format!("Profile #{endpoint_id}"))
+    }
+
+    pub fn primary_remote_endpoint_id(&self) -> Option<i64> {
+        match self.transfer_direction {
+            TransferDirection::LocalToS3 => self.transfer_destination_endpoint_id,
+            TransferDirection::S3ToLocal | TransferDirection::S3ToS3 => {
+                self.transfer_source_endpoint_id
+            }
+        }
+    }
+
+    pub fn secondary_remote_endpoint_id(&self) -> Option<i64> {
+        if self.transfer_direction == TransferDirection::S3ToS3 {
+            self.transfer_destination_endpoint_id
+        } else {
+            None
+        }
+    }
+
+    pub fn cycle_primary_remote_endpoint(&mut self, forward: bool) -> Option<String> {
+        let next = self.cycle_profile_id(self.primary_remote_endpoint_id(), forward);
+        match self.transfer_direction {
+            TransferDirection::LocalToS3 => {
+                self.transfer_destination_endpoint_id = next;
+            }
+            TransferDirection::S3ToLocal | TransferDirection::S3ToS3 => {
+                self.transfer_source_endpoint_id = next;
+            }
+        }
+        Some(self.endpoint_profile_name(next))
+    }
+
+    pub fn cycle_secondary_remote_endpoint(&mut self, forward: bool) -> Option<String> {
+        let next = self.cycle_profile_id(self.transfer_destination_endpoint_id, forward);
+        self.transfer_destination_endpoint_id = next;
+        Some(self.endpoint_profile_name(next))
+    }
+
     pub fn refresh_jobs(&mut self, conn: &Connection) -> Result<()> {
         // Use trace! to avoid spamming logs every tick
         // tracing::trace!("Refreshing jobs");
@@ -374,6 +525,7 @@ impl App {
         };
         self.history = list_history_jobs(conn, 100, filter_str)?;
         self.quarantine = list_quarantined_jobs(conn, 100)?;
+        self.refresh_transfer_metadata(conn);
 
         let prev_visual_jobs_len = self.visual_jobs.len();
         self.rebuild_visual_lists();
@@ -398,6 +550,46 @@ impl App {
         Ok(())
     }
 
+    fn refresh_transfer_metadata(&mut self, conn: &Connection) {
+        self.job_transfer_metadata.clear();
+
+        let mut job_ids = HashSet::new();
+        for job in self
+            .jobs
+            .iter()
+            .chain(self.history.iter())
+            .chain(self.quarantine.iter())
+        {
+            job_ids.insert(job.id);
+        }
+
+        for job_id in job_ids {
+            match get_job_transfer_metadata(conn, job_id) {
+                Ok(Some(metadata)) => {
+                    self.job_transfer_metadata.insert(job_id, metadata);
+                }
+                Ok(None) => {}
+                Err(e)
+                    if e.to_string().contains("no such column")
+                        || e.to_string().contains("no such table") =>
+                {
+                    self.job_transfer_metadata.clear();
+                    return;
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    pub fn transfer_metadata_for_job(&self, job_id: i64) -> Option<&JobTransferMetadata> {
+        self.job_transfer_metadata.get(&job_id)
+    }
+
+    pub fn transfer_direction_for_job(&self, job_id: i64) -> Option<&str> {
+        self.transfer_metadata_for_job(job_id)
+            .and_then(|metadata| metadata.transfer_direction.as_deref())
+    }
+
     pub fn rebuild_visual_lists(&mut self) {
         let q_query = self.queue_search_query.to_lowercase();
         self.visual_jobs = self.build_visual_list(&self.jobs, &q_query);
@@ -406,6 +598,26 @@ impl App {
     }
 
     pub fn build_visual_list(&self, jobs: &[JobRow], filter_query: &str) -> Vec<VisualItem> {
+        fn display_leaf_name(path: &str) -> String {
+            let trimmed = path.trim_end_matches(['/', '\\']);
+            if trimmed.is_empty() {
+                return path.to_string();
+            }
+            Path::new(trimmed)
+                .file_name()
+                .and_then(|n| {
+                    let name = n.to_string_lossy().to_string();
+                    if name.is_empty() { None } else { Some(name) }
+                })
+                .or_else(|| {
+                    trimmed
+                        .rsplit(['/', '\\'])
+                        .find(|part| !part.is_empty())
+                        .map(std::string::ToString::to_string)
+                })
+                .unwrap_or_else(|| path.to_string())
+        }
+
         let filtered_jobs: Vec<(usize, &JobRow)> = if filter_query.is_empty() {
             jobs.iter().enumerate().collect()
         } else {
@@ -430,10 +642,7 @@ impl App {
                     .into_iter()
                     .map(|(i, job)| {
                         // Extract filename for display
-                        let name = Path::new(&job.source_path)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| job.source_path.clone());
+                        let name = display_leaf_name(&job.source_path);
 
                         VisualItem {
                             text: name,
@@ -451,15 +660,22 @@ impl App {
                 }
 
                 // 1. Calculate Common Prefix
-                // We must scan ALL paths since we aren't sorting anymore.
                 let paths: Vec<&Path> = jobs_to_process
                     .iter()
                     .map(|j| Path::new(&j.source_path))
                     .collect();
-                let p0 = paths[0];
+                let absolute_paths: Vec<&Path> =
+                    paths.iter().copied().filter(|p| p.is_absolute()).collect();
+                let common_candidate_paths: Vec<&Path> = if absolute_paths.len() >= 2 {
+                    absolute_paths.clone()
+                } else {
+                    paths.clone()
+                };
+
+                let p0 = common_candidate_paths[0];
                 let mut common_components: Vec<_> = p0.components().collect();
 
-                for p in &paths[1..] {
+                for p in &common_candidate_paths[1..] {
                     let comps: Vec<_> = p.components().collect();
                     let min_len = std::cmp::min(common_components.len(), comps.len());
                     let mut match_len = 0;
@@ -472,15 +688,20 @@ impl App {
                     }
                 }
 
-                let common_path_buf: std::path::PathBuf = common_components.iter().collect();
+                let mut common_path_buf: std::path::PathBuf = common_components.iter().collect();
+                if common_path_buf.as_os_str().is_empty()
+                    && !absolute_paths.is_empty()
+                    && let Ok(cwd) = std::env::current_dir()
+                    && absolute_paths.iter().any(|p| p.starts_with(&cwd))
+                {
+                    common_path_buf = cwd;
+                }
 
                 // 2. Heuristic for Base Path
 
                 // If common prefix is exactly a file path (e.g. single file in list),
                 // we should start "view" at its parent folder to show structure.
-                let common_is_file = jobs_to_process
-                    .iter()
-                    .any(|j| Path::new(&j.source_path) == common_path_buf);
+                let common_is_file = common_candidate_paths.contains(&common_path_buf.as_path());
 
                 let effective_common_path = if common_is_file {
                     common_path_buf
@@ -492,7 +713,18 @@ impl App {
                 };
 
                 // Check depths relative to effective common prefix
-                let max_depth = paths
+                let depth_reference_paths: Vec<&Path> = paths
+                    .iter()
+                    .copied()
+                    .filter(|p| p.strip_prefix(&effective_common_path).is_ok())
+                    .collect();
+                let depth_paths: Vec<&Path> = if depth_reference_paths.is_empty() {
+                    paths.clone()
+                } else {
+                    depth_reference_paths
+                };
+
+                let max_depth = depth_paths
                     .iter()
                     .map(|p| {
                         p.strip_prefix(&effective_common_path)
@@ -505,7 +737,7 @@ impl App {
 
                 // If max_depth <= 1, it means all items are immediate children.
                 // We show parent container context effectively.
-                let base_path_buf = if max_depth <= 1 && common_path_buf.components().count() > 0 {
+                let base_path_buf = if max_depth <= 1 && !common_path_buf.as_os_str().is_empty() {
                     effective_common_path
                         .parent()
                         .map(|p| p.to_path_buf())
@@ -535,7 +767,15 @@ impl App {
                     // Components of the relative path
                     let components: Vec<String> = rel_path
                         .components()
-                        .map(|c| c.as_os_str().to_string_lossy().to_string())
+                        .filter_map(|c| match c {
+                            std::path::Component::Normal(part) => {
+                                Some(part.to_string_lossy().to_string())
+                            }
+                            std::path::Component::ParentDir => Some("..".to_string()),
+                            std::path::Component::CurDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_) => None,
+                        })
                         .collect();
 
                     let mut current = &mut root;
@@ -570,10 +810,7 @@ impl App {
                                             // Actually, current implementation pushes `idx` from loop over `jobs_to_process`
                                             // which is an index into `jobs_to_process`.
                                             let f_path = &jobs_to_process[f_idx].source_path;
-                                            let f_name = std::path::Path::new(f_path)
-                                                .file_name()
-                                                .unwrap_or_default()
-                                                .to_string_lossy();
+                                            let f_name = display_leaf_name(f_path);
                                             if f_name == *filename {
                                                 return true;
                                             }
@@ -654,10 +891,7 @@ impl App {
                     for &it_idx in &node.files {
                         let job = jobs_to_process[it_idx];
                         let orig_idx = original_indices[it_idx];
-                        let filename = std::path::Path::new(&job.source_path)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| job.source_path.clone());
+                        let filename = display_leaf_name(&job.source_path);
 
                         items.push(VisualItem {
                             text: filename,
@@ -891,6 +1125,7 @@ impl App {
                 self.status_message = format!("Resumed job {}", job_id);
             }
         } else if status == "uploading"
+            || status == "transferring"
             || status == "scanning"
             || status == "queued"
             || status == "staged"

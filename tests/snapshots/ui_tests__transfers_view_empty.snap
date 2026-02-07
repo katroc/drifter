@@ -2,8 +2,8 @@
 source: tests/ui_tests.rs
 expression: output
 ---
-╭ Navigation ───╭ Local (Press 'a' to╮ Remote (S3): 0 [Path╮ History [All] ────────────────────────────────────────────╮
-│▌ Transfers    │ Size      Modified │Name                 │File                 Status           Size       Time      │
+╭ Navigation ───╭ Local Source (Press╮ Remote Destination (╮ History [All] ────────────────────────────────────────────╮
+│▌ Transfers    │ Size      Modified │Name                 │File                     Result   Route    Size    Duration│
 │  Quarantine   │ -         -        │                     │                                                           │
 │  Logs         │ -         -        │                     │                                                           │
 │  Settings     │ 1.0 KB    -        │                     │                                                           │
@@ -22,7 +22,7 @@ expression: output
 │               │                    │                     │                                                           │
 │               ╰────────────────────╯─────────────────────╯                                                           │
 │               │ Queue (Jobs)                             │                                                           │
-│               │File                 Statu Size Progr Time│                                                           │
+│               │File             Op Ro Fr To S Si Pr Av ET│                                                           │
 │               │                                          │                                                           │
 │               │                                          │                                                           │
 │               │                                          │                                                           │
@@ -41,4 +41,4 @@ expression: output
 │               │                                          │Disk Read:  0 B               Net Down: 0 B                │
 │               │                                          │Disk Write: 0 B               Net Up:   0 B                │
 ╰───────────────╰──────────────────────────────────────────╯───────────────────────────────────────────────────────────╯
-↑/↓ Select  │  a Browse  │  Tab Navigate             ClamAV: Connected  │  S3: Not Configured  │  Jobs: 0  │  Threats: 0
+↑/↓ Select  │  a Browse  │  v Mode  │  T             ClamAV: Connected  │  S3: Not Configured  │  Jobs: 0  │  Threats: 0

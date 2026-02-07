@@ -30,24 +30,57 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
             key_action("Enter", "Open"),
             key_action("Esc", "Back"),
         ],
-        InputMode::Browsing => vec![
-            key_action("←/→", "Navigate"),
-            key_action("↑/↓", "Select"),
-            key_action("/", "Filter"),
-            key_action("t", "Tree"),
-            key_action("Space", "Select"),
-            key_action("s", "Stage"),
-            key_action("Esc/q", "Exit"),
-        ],
-        InputMode::RemoteBrowsing => vec![
-            key_action("←/→", "Navigate"),
-            key_action("↑/↓", "Select"),
-            key_action("r", "Refresh"),
-            key_action("d", "Download"),
-            key_action("x", "Delete"),
-            key_action("n", "New Folder"),
-            key_action("Esc/q", "Exit"),
-        ],
+        InputMode::Browsing => {
+            let mut hints = vec![
+                key_action("←/→", "Navigate"),
+                key_action("↑/↓", "Select"),
+                key_action("/", "Filter"),
+                key_action("t", "Tree"),
+                key_action("Space", "Select"),
+                key_action("Esc/q", "Exit"),
+            ];
+            if matches!(
+                app.transfer_direction,
+                crate::core::transfer::TransferDirection::LocalToS3
+            ) {
+                hints.push(key_action("s", "Stage"));
+            } else {
+                hints.push(key_action("s", "Upload Off"));
+            }
+            hints.push(key_action("v", "Mode"));
+            hints
+        }
+        InputMode::RemoteBrowsing => {
+            let mut hints = vec![
+                key_action("←/→", "Navigate"),
+                key_action("↑/↓", "Select"),
+                key_action("[]", "Endpoint"),
+                key_action("r", "Refresh"),
+                key_action("d", "Download"),
+                key_action("x", "Delete"),
+                key_action("n", "New Folder"),
+                key_action("Esc/q", "Exit"),
+            ];
+            if matches!(
+                app.transfer_direction,
+                crate::core::transfer::TransferDirection::S3ToLocal
+                    | crate::core::transfer::TransferDirection::S3ToS3
+            ) {
+                hints.push(key_action("s", "Queue"));
+            }
+            if app.focus == AppFocus::Remote
+                || (app.focus == AppFocus::Browser
+                    && matches!(
+                        app.transfer_direction,
+                        crate::core::transfer::TransferDirection::S3ToS3
+                    ))
+            {
+                hints.push(key_action("Space", "Select"));
+                hints.push(key_action("c", "Clear Sel"));
+            }
+            hints.push(key_action("v", "Mode"));
+            hints
+        }
         InputMode::RemoteFolderCreate => {
             vec![key_action("Enter", "Create"), key_action("Esc", "Cancel")]
         }
@@ -69,7 +102,25 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
                     key_action("Tab/→", "Content"),
                     key_action("↑/↓", "Switch Tab"),
                 ],
-                AppFocus::Browser => vec![key_action("↑/↓", "Select"), key_action("a", "Browse")],
+                AppFocus::Browser => {
+                    let mut hints = if matches!(
+                        app.transfer_direction,
+                        crate::core::transfer::TransferDirection::S3ToS3
+                    ) {
+                        vec![
+                            key_action("[]", "Endpoint"),
+                            key_action("a", "Browse"),
+                            key_action("r", "Refresh"),
+                            key_action("x", "Delete"),
+                            key_action("Space", "Select"),
+                            key_action("c", "Clear Sel"),
+                        ]
+                    } else {
+                        vec![key_action("↑/↓", "Select"), key_action("a", "Browse")]
+                    };
+                    hints.push(key_action("v", "Mode"));
+                    hints
+                }
                 AppFocus::Queue => vec![
                     key_action("↑/↓", "Select"),
                     key_action("p", "Pause/Resume"),
@@ -81,19 +132,49 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
                     key_action("d", "Cancel"),
                 ],
                 AppFocus::History => vec![key_action("←", "Queue")],
-                AppFocus::Remote => vec![
-                    key_action("a", "Browse"),
-                    key_action("r", "Refresh"),
-                    key_action("d", "Download"),
-                    key_action("x", "Delete"),
-                ],
+                AppFocus::Remote => {
+                    let mut hints = vec![
+                        key_action("[]", "Endpoint"),
+                        key_action("a", "Browse"),
+                        key_action("r", "Refresh"),
+                        key_action("d", "Download"),
+                        key_action("x", "Delete"),
+                    ];
+                    if matches!(
+                        app.transfer_direction,
+                        crate::core::transfer::TransferDirection::S3ToLocal
+                            | crate::core::transfer::TransferDirection::S3ToS3
+                    ) {
+                        hints.push(key_action("s", "Queue"));
+                    }
+                    if matches!(
+                        app.transfer_direction,
+                        crate::core::transfer::TransferDirection::LocalToS3
+                            | crate::core::transfer::TransferDirection::S3ToLocal
+                            | crate::core::transfer::TransferDirection::S3ToS3
+                    ) {
+                        hints.push(key_action("Space", "Select"));
+                        hints.push(key_action("c", "Clear Sel"));
+                    }
+                    hints.push(key_action("v", "Mode"));
+                    hints
+                }
                 AppFocus::Quarantine => vec![
                     key_action("←", "Rail"),
                     key_action("d", "Clear"),
                     key_action("R", "Refresh"),
                 ],
                 AppFocus::SettingsCategory => match app.settings.active_category {
-                    SettingsCategory::S3 | SettingsCategory::Scanner => vec![
+                    SettingsCategory::S3 => vec![
+                        key_action("Tab/→", "Fields"),
+                        key_action("←", "Rail"),
+                        key_action("↑/↓", "Category"),
+                        key_action("[]", "Cycle S3"),
+                        key_action("n/x", "New/Del S3"),
+                        key_action("s", "Save"),
+                        key_action("t", "Test"),
+                    ],
+                    SettingsCategory::Scanner => vec![
                         key_action("Tab/→", "Fields"),
                         key_action("←", "Rail"),
                         key_action("↑/↓", "Category"),
@@ -108,7 +189,15 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
                     ],
                 },
                 AppFocus::SettingsFields => match app.settings.active_category {
-                    SettingsCategory::S3 | SettingsCategory::Scanner => vec![
+                    SettingsCategory::S3 => vec![
+                        key_action("←", "Category"),
+                        key_action("Enter", "Edit"),
+                        key_action("[]", "Cycle S3"),
+                        key_action("n/x", "New/Del S3"),
+                        key_action("s", "Save"),
+                        key_action("t", "Test"),
+                    ],
+                    SettingsCategory::Scanner => vec![
                         key_action("←", "Category"),
                         key_action("Enter", "Edit"),
                         key_action("s", "Save"),

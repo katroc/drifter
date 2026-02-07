@@ -1,8 +1,10 @@
+use crate::core::transfer::EndpointKind;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{Connection, params};
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,6 +38,13 @@ pub struct JobRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct JobEventRow {
+    pub event_type: String,
+    pub message: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct UploadPart {
     pub part_number: i64,
@@ -43,6 +52,39 @@ pub struct UploadPart {
     pub status: String,
     pub etag: Option<String>,
     pub checksum_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct EndpointProfileRow {
+    pub id: i64,
+    pub name: String,
+    pub kind: EndpointKind,
+    pub config: Value,
+    pub credential_ref: Option<String>,
+    pub is_default_source: bool,
+    pub is_default_destination: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewEndpointProfile {
+    pub name: String,
+    pub kind: EndpointKind,
+    pub config: Value,
+    pub credential_ref: Option<String>,
+    pub is_default_source: bool,
+    pub is_default_destination: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobTransferMetadata {
+    pub source_endpoint_id: Option<i64>,
+    pub destination_endpoint_id: Option<i64>,
+    pub transfer_direction: Option<String>,
+    pub conflict_policy: Option<String>,
+    pub scan_policy: Option<String>,
 }
 
 pub fn init_db(state_dir: &str) -> Result<Connection> {
@@ -78,6 +120,11 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
             source_path TEXT NOT NULL,
             staged_path TEXT,
             size_bytes INTEGER NOT NULL,
+            source_endpoint_id INTEGER,
+            destination_endpoint_id INTEGER,
+            transfer_direction TEXT,
+            conflict_policy TEXT,
+            scan_policy TEXT,
             scan_status TEXT,
             upload_status TEXT,
             s3_bucket TEXT,
@@ -130,6 +177,17 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS endpoint_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            credential_ref TEXT,
+            is_default_source INTEGER NOT NULL DEFAULT 0,
+            is_default_destination INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
 
         ",
     ) {
@@ -167,6 +225,18 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
         &conn,
         "ALTER TABLE jobs ADD COLUMN upload_duration_ms INTEGER",
     )?;
+    // Migration for endpoint-based transfer metadata
+    apply_optional_migration(
+        &conn,
+        "ALTER TABLE jobs ADD COLUMN source_endpoint_id INTEGER",
+    )?;
+    apply_optional_migration(
+        &conn,
+        "ALTER TABLE jobs ADD COLUMN destination_endpoint_id INTEGER",
+    )?;
+    apply_optional_migration(&conn, "ALTER TABLE jobs ADD COLUMN transfer_direction TEXT")?;
+    apply_optional_migration(&conn, "ALTER TABLE jobs ADD COLUMN conflict_policy TEXT")?;
+    apply_optional_migration(&conn, "ALTER TABLE jobs ADD COLUMN scan_policy TEXT")?;
 
     conn.execute_batch(
         "
@@ -178,15 +248,27 @@ pub fn init_db(state_dir: &str) -> Result<Connection> {
             ON jobs(status, id DESC);
         CREATE INDEX IF NOT EXISTS idx_jobs_session_id_id
             ON jobs(session_id, id);
+        CREATE INDEX IF NOT EXISTS idx_jobs_source_endpoint_id
+            ON jobs(source_endpoint_id);
+        CREATE INDEX IF NOT EXISTS idx_jobs_destination_endpoint_id
+            ON jobs(destination_endpoint_id);
         CREATE INDEX IF NOT EXISTS idx_uploads_job_id
             ON uploads(job_id);
         CREATE INDEX IF NOT EXISTS idx_parts_upload_id
             ON parts(upload_id);
         CREATE INDEX IF NOT EXISTS idx_events_job_id
             ON events(job_id);
+        CREATE INDEX IF NOT EXISTS idx_endpoint_profiles_kind
+            ON endpoint_profiles(kind);
+        CREATE INDEX IF NOT EXISTS idx_endpoint_profiles_default_source
+            ON endpoint_profiles(is_default_source);
+        CREATE INDEX IF NOT EXISTS idx_endpoint_profiles_default_destination
+            ON endpoint_profiles(is_default_destination);
         ",
     )
     .context("create sqlite indexes")?;
+
+    bootstrap_endpoint_profiles_from_legacy_settings(&conn)?;
 
     info!("Database initialized successfully at {:?}", db_path);
     Ok(conn)
@@ -243,6 +325,514 @@ impl<'a> TryFrom<&'a rusqlite::Row<'a>> for JobRow {
 // Helper to map a row to a JobRow
 fn map_job_row(row: &rusqlite::Row) -> rusqlite::Result<JobRow> {
     JobRow::try_from(row)
+}
+
+pub const ENDPOINT_PROFILE_COLUMNS: &str = "id, name, kind, config_json, credential_ref, is_default_source, is_default_destination, created_at, updated_at";
+
+fn endpoint_kind_to_str(kind: EndpointKind) -> &'static str {
+    match kind {
+        EndpointKind::Local => "local",
+        EndpointKind::S3 => "s3",
+    }
+}
+
+fn parse_endpoint_kind(raw: &str) -> Result<EndpointKind> {
+    match raw {
+        "local" => Ok(EndpointKind::Local),
+        "s3" => Ok(EndpointKind::S3),
+        other => anyhow::bail!("unsupported endpoint kind '{}'", other),
+    }
+}
+
+fn endpoint_profile_from_row(row: &rusqlite::Row) -> Result<EndpointProfileRow> {
+    let kind_raw: String = row.get(2)?;
+    let config_json: String = row.get(3)?;
+
+    let kind = parse_endpoint_kind(&kind_raw)?;
+    let config = serde_json::from_str::<Value>(&config_json)
+        .with_context(|| format!("parse endpoint config_json '{}'", config_json))?;
+
+    Ok(EndpointProfileRow {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        kind,
+        config,
+        credential_ref: row.get(4)?,
+        is_default_source: row.get::<_, i64>(5)? != 0,
+        is_default_destination: row.get::<_, i64>(6)? != 0,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+fn endpoint_profiles_table_exists(conn: &Connection) -> Result<bool> {
+    let mut stmt = conn.prepare(
+        "SELECT 1
+         FROM sqlite_master
+         WHERE type = 'table' AND name = 'endpoint_profiles'
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query([])?;
+    Ok(rows.next()?.is_some())
+}
+
+fn has_secret_value(conn: &Connection, key: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT value FROM secrets WHERE key = ? LIMIT 1")?;
+    let mut rows = stmt.query(params![key])?;
+    if let Some(row) = rows.next()? {
+        let stored_value: String = row.get(0)?;
+        Ok(!stored_value.trim().is_empty())
+    } else {
+        Ok(false)
+    }
+}
+
+fn bootstrap_endpoint_profiles_from_legacy_settings(conn: &Connection) -> Result<()> {
+    if count_endpoint_profiles(conn)? > 0 {
+        return Ok(());
+    }
+
+    let settings = load_all_settings(conn)?;
+    let get_setting = |key: &str| {
+        settings
+            .get(key)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+
+    let bucket = get_setting("s3_bucket");
+    let region = get_setting("s3_region");
+    let endpoint = get_setting("s3_endpoint");
+    let prefix = get_setting("s3_prefix");
+    let access_key = get_setting("s3_access_key");
+    let has_secret = has_secret_value(conn, "s3_secret")?;
+
+    let has_legacy_s3 = bucket.is_some()
+        || region.is_some()
+        || endpoint.is_some()
+        || prefix.is_some()
+        || access_key.is_some()
+        || has_secret;
+
+    let local_profile = NewEndpointProfile {
+        name: "Local Filesystem".to_string(),
+        kind: EndpointKind::Local,
+        config: serde_json::json!({ "root": "." }),
+        credential_ref: None,
+        is_default_source: true,
+        is_default_destination: !has_legacy_s3,
+    };
+    create_endpoint_profile(conn, &local_profile)?;
+
+    let mut config = Map::new();
+    if let Some(v) = bucket {
+        config.insert("bucket".to_string(), Value::String(v));
+    }
+    if let Some(v) = region {
+        config.insert("region".to_string(), Value::String(v));
+    }
+    if let Some(v) = endpoint {
+        config.insert("endpoint".to_string(), Value::String(v));
+    }
+    if let Some(v) = prefix {
+        config.insert("prefix".to_string(), Value::String(v));
+    }
+    if let Some(v) = access_key {
+        config.insert("access_key".to_string(), Value::String(v));
+    }
+
+    let credential_ref = if has_secret {
+        Some("s3_secret".to_string())
+    } else {
+        None
+    };
+
+    if has_legacy_s3 {
+        let profile = NewEndpointProfile {
+            name: "Legacy S3".to_string(),
+            kind: EndpointKind::S3,
+            config: Value::Object(config),
+            credential_ref,
+            is_default_source: false,
+            is_default_destination: true,
+        };
+
+        create_endpoint_profile(conn, &profile)?;
+        info!("Bootstrapped local and legacy S3 endpoint profiles");
+    } else {
+        info!("Bootstrapped local endpoint profile");
+    }
+    Ok(())
+}
+
+pub fn count_endpoint_profiles(conn: &Connection) -> Result<i64> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM endpoint_profiles", [], |row| {
+        row.get(0)
+    })?;
+    Ok(count)
+}
+
+pub fn create_endpoint_profile(conn: &Connection, profile: &NewEndpointProfile) -> Result<i64> {
+    let now = Utc::now().to_rfc3339();
+    let config_json = serde_json::to_string(&profile.config)?;
+    conn.execute(
+        "INSERT INTO endpoint_profiles (
+            name, kind, config_json, credential_ref, is_default_source, is_default_destination, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            profile.name.as_str(),
+            endpoint_kind_to_str(profile.kind),
+            config_json,
+            profile.credential_ref.as_deref(),
+            if profile.is_default_source { 1 } else { 0 },
+            if profile.is_default_destination { 1 } else { 0 },
+            now,
+            now
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+#[allow(dead_code)]
+pub fn get_endpoint_profile(
+    conn: &Connection,
+    endpoint_id: i64,
+) -> Result<Option<EndpointProfileRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM endpoint_profiles WHERE id = ?",
+        ENDPOINT_PROFILE_COLUMNS
+    ))?;
+    let mut rows = stmt.query(params![endpoint_id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(endpoint_profile_from_row(row)?))
+    } else {
+        Ok(None)
+    }
+}
+
+#[allow(dead_code)]
+pub fn get_endpoint_profile_by_name(
+    conn: &Connection,
+    name: &str,
+) -> Result<Option<EndpointProfileRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM endpoint_profiles WHERE name = ?",
+        ENDPOINT_PROFILE_COLUMNS
+    ))?;
+    let mut rows = stmt.query(params![name])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(endpoint_profile_from_row(row)?))
+    } else {
+        Ok(None)
+    }
+}
+
+#[allow(dead_code)]
+pub fn list_endpoint_profiles(conn: &Connection) -> Result<Vec<EndpointProfileRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM endpoint_profiles ORDER BY id ASC",
+        ENDPOINT_PROFILE_COLUMNS
+    ))?;
+    let mut rows = stmt.query([])?;
+    let mut profiles = Vec::new();
+    while let Some(row) = rows.next()? {
+        profiles.push(endpoint_profile_from_row(row)?);
+    }
+    Ok(profiles)
+}
+
+pub fn get_default_source_endpoint_profile(
+    conn: &Connection,
+) -> Result<Option<EndpointProfileRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM endpoint_profiles WHERE is_default_source = 1 ORDER BY id ASC LIMIT 1",
+        ENDPOINT_PROFILE_COLUMNS
+    ))?;
+    let mut rows = stmt.query([])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(endpoint_profile_from_row(row)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn get_default_destination_endpoint_profile(
+    conn: &Connection,
+) -> Result<Option<EndpointProfileRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM endpoint_profiles WHERE is_default_destination = 1 ORDER BY id ASC LIMIT 1",
+        ENDPOINT_PROFILE_COLUMNS
+    ))?;
+    let mut rows = stmt.query([])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(endpoint_profile_from_row(row)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn update_endpoint_profile(
+    conn: &Connection,
+    endpoint_id: i64,
+    config: &Value,
+    credential_ref: Option<&str>,
+    is_default_source: bool,
+    is_default_destination: bool,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    let config_json = serde_json::to_string(config)?;
+    conn.execute(
+        "UPDATE endpoint_profiles
+         SET config_json = ?, credential_ref = ?, is_default_source = ?, is_default_destination = ?, updated_at = ?
+         WHERE id = ?",
+        params![
+            config_json,
+            credential_ref,
+            if is_default_source { 1 } else { 0 },
+            if is_default_destination { 1 } else { 0 },
+            now,
+            endpoint_id
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn rename_endpoint_profile(conn: &Connection, endpoint_id: i64, name: &str) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE endpoint_profiles
+         SET name = ?, updated_at = ?
+         WHERE id = ?",
+        params![name, now, endpoint_id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_endpoint_profile(conn: &Connection, endpoint_id: i64) -> Result<()> {
+    let mut stmt = conn.prepare("SELECT kind FROM endpoint_profiles WHERE id = ?")?;
+    let mut rows = stmt.query(params![endpoint_id])?;
+    if let Some(row) = rows.next()? {
+        let kind_raw: String = row.get(0)?;
+        if parse_endpoint_kind(&kind_raw)? == EndpointKind::Local {
+            anyhow::bail!("cannot delete local endpoint profile");
+        }
+    }
+
+    conn.execute(
+        "DELETE FROM endpoint_profiles WHERE id = ?",
+        params![endpoint_id],
+    )?;
+    Ok(())
+}
+
+pub fn sync_default_destination_s3_profile(
+    conn: &Connection,
+    bucket: Option<&str>,
+    prefix: Option<&str>,
+    region: Option<&str>,
+    endpoint: Option<&str>,
+    access_key: Option<&str>,
+    credential_ref: Option<&str>,
+) -> Result<()> {
+    if !endpoint_profiles_table_exists(conn)? {
+        return Ok(());
+    }
+
+    let trim_non_empty = |v: Option<&str>| {
+        v.map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(std::string::ToString::to_string)
+    };
+
+    let mut config = Map::new();
+    if let Some(v) = trim_non_empty(bucket) {
+        config.insert("bucket".to_string(), Value::String(v));
+    }
+    if let Some(v) = trim_non_empty(prefix) {
+        config.insert("prefix".to_string(), Value::String(v));
+    }
+    if let Some(v) = trim_non_empty(region) {
+        config.insert("region".to_string(), Value::String(v));
+    }
+    if let Some(v) = trim_non_empty(endpoint) {
+        config.insert("endpoint".to_string(), Value::String(v));
+    }
+    if let Some(v) = trim_non_empty(access_key) {
+        config.insert("access_key".to_string(), Value::String(v));
+    }
+
+    let config_json = Value::Object(config);
+    let has_s3_data = config_json.as_object().is_some_and(|obj| !obj.is_empty())
+        || trim_non_empty(credential_ref).is_some();
+
+    let mut stmt = conn.prepare(
+        "SELECT id, kind
+         FROM endpoint_profiles
+         WHERE is_default_destination = 1
+         ORDER BY id ASC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query([])?;
+    let default_destination = if let Some(row) = rows.next()? {
+        Some((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    } else {
+        None
+    };
+    let now = Utc::now().to_rfc3339();
+
+    match default_destination {
+        Some((id, kind)) if kind == endpoint_kind_to_str(EndpointKind::S3) => {
+            conn.execute(
+                "UPDATE endpoint_profiles
+                 SET config_json = ?, credential_ref = ?, updated_at = ?
+                 WHERE id = ?",
+                params![
+                    serde_json::to_string(&config_json)?,
+                    trim_non_empty(credential_ref),
+                    now,
+                    id
+                ],
+            )?;
+        }
+        Some((id, _kind)) if has_s3_data => {
+            conn.execute(
+                "UPDATE endpoint_profiles
+                 SET is_default_destination = 0, updated_at = ?
+                 WHERE id = ?",
+                params![now, id],
+            )?;
+            let mut existing_stmt = conn.prepare(
+                "SELECT id
+                 FROM endpoint_profiles
+                 WHERE kind = 's3'
+                 ORDER BY id ASC
+                 LIMIT 1",
+            )?;
+            let mut existing_rows = existing_stmt.query([])?;
+            if let Some(row) = existing_rows.next()? {
+                let existing_id: i64 = row.get(0)?;
+                conn.execute(
+                    "UPDATE endpoint_profiles
+                     SET config_json = ?, credential_ref = ?, is_default_destination = 1, updated_at = ?
+                     WHERE id = ?",
+                    params![
+                        serde_json::to_string(&config_json)?,
+                        trim_non_empty(credential_ref),
+                        now,
+                        existing_id
+                    ],
+                )?;
+            } else {
+                create_endpoint_profile(
+                    conn,
+                    &NewEndpointProfile {
+                        name: "Primary S3".to_string(),
+                        kind: EndpointKind::S3,
+                        config: config_json,
+                        credential_ref: trim_non_empty(credential_ref),
+                        is_default_source: false,
+                        is_default_destination: true,
+                    },
+                )?;
+            }
+        }
+        None if has_s3_data => {
+            let mut existing_stmt = conn.prepare(
+                "SELECT id
+                 FROM endpoint_profiles
+                 WHERE kind = 's3'
+                 ORDER BY id ASC
+                 LIMIT 1",
+            )?;
+            let mut existing_rows = existing_stmt.query([])?;
+            if let Some(row) = existing_rows.next()? {
+                let existing_id: i64 = row.get(0)?;
+                conn.execute(
+                    "UPDATE endpoint_profiles
+                     SET config_json = ?, credential_ref = ?, is_default_destination = 1, updated_at = ?
+                     WHERE id = ?",
+                    params![
+                        serde_json::to_string(&config_json)?,
+                        trim_non_empty(credential_ref),
+                        now,
+                        existing_id
+                    ],
+                )?;
+            } else {
+                create_endpoint_profile(
+                    conn,
+                    &NewEndpointProfile {
+                        name: "Primary S3".to_string(),
+                        kind: EndpointKind::S3,
+                        config: config_json,
+                        credential_ref: trim_non_empty(credential_ref),
+                        is_default_source: false,
+                        is_default_destination: true,
+                    },
+                )?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+pub fn assign_default_transfer_metadata(conn: &Connection, job_id: i64) -> Result<()> {
+    let source = match get_default_source_endpoint_profile(conn) {
+        Ok(v) => v,
+        Err(e) if e.to_string().contains("no such table: endpoint_profiles") => {
+            debug!(
+                "Skipping transfer metadata assignment for job {}: {}",
+                job_id, e
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+    let destination = match get_default_destination_endpoint_profile(conn) {
+        Ok(v) => v,
+        Err(e) if e.to_string().contains("no such table: endpoint_profiles") => {
+            debug!(
+                "Skipping transfer metadata assignment for job {}: {}",
+                job_id, e
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+
+    let (transfer_direction, scan_policy) = match (&source, &destination) {
+        (Some(src), Some(dst)) => {
+            let direction = match (src.kind, dst.kind) {
+                (EndpointKind::Local, EndpointKind::S3) => Some("local_to_s3"),
+                (EndpointKind::S3, EndpointKind::Local) => Some("s3_to_local"),
+                (EndpointKind::S3, EndpointKind::S3) => Some("s3_to_s3"),
+                _ => None,
+            };
+            let scan_policy = if direction == Some("local_to_s3") {
+                Some("upload_only")
+            } else {
+                Some("never")
+            };
+            (
+                direction.map(std::string::ToString::to_string),
+                scan_policy.map(std::string::ToString::to_string),
+            )
+        }
+        _ => (None, None),
+    };
+
+    let metadata = JobTransferMetadata {
+        source_endpoint_id: source.map(|p| p.id),
+        destination_endpoint_id: destination.map(|p| p.id),
+        transfer_direction,
+        conflict_policy: Some("overwrite".to_string()),
+        scan_policy,
+    };
+
+    update_job_transfer_metadata(conn, job_id, &metadata)?;
+    Ok(())
 }
 
 pub fn list_active_jobs(conn: &Connection, limit: i64) -> Result<Vec<JobRow>> {
@@ -352,6 +942,54 @@ pub fn update_job_upload_id(conn: &Connection, job_id: i64, upload_id: &str) -> 
         params![upload_id, job_id],
     )?;
     Ok(())
+}
+
+pub fn update_job_transfer_metadata(
+    conn: &Connection,
+    job_id: i64,
+    metadata: &JobTransferMetadata,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE jobs
+         SET source_endpoint_id = ?,
+             destination_endpoint_id = ?,
+             transfer_direction = ?,
+             conflict_policy = ?,
+             scan_policy = ?
+         WHERE id = ?",
+        params![
+            metadata.source_endpoint_id,
+            metadata.destination_endpoint_id,
+            metadata.transfer_direction,
+            metadata.conflict_policy,
+            metadata.scan_policy,
+            job_id
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_job_transfer_metadata(
+    conn: &Connection,
+    job_id: i64,
+) -> Result<Option<JobTransferMetadata>> {
+    let mut stmt = conn.prepare(
+        "SELECT source_endpoint_id, destination_endpoint_id, transfer_direction, conflict_policy, scan_policy
+         FROM jobs
+         WHERE id = ?",
+    )?;
+    let mut rows = stmt.query(params![job_id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(JobTransferMetadata {
+            source_endpoint_id: row.get(0)?,
+            destination_endpoint_id: row.get(1)?,
+            transfer_direction: row.get(2)?,
+            conflict_policy: row.get(3)?,
+            scan_policy: row.get(4)?,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn create_job(
@@ -534,10 +1172,10 @@ pub fn cancel_job(conn: &Connection, job_id: i64) -> Result<()> {
 }
 
 // Clear history based on filter (All, Complete, Quarantined)
-// Always excludes "active" jobs (pending, scanning, uploading)
+// Always excludes "active" jobs (pending, scanning, uploading, transferring)
 pub fn clear_history(conn: &Connection, filter: Option<&str>) -> Result<()> {
     // 1. Identify IDs to delete
-    let mut query = "SELECT id FROM jobs WHERE status NOT IN ('pending', 'scanning', 'uploading', 'failed_retryable')".to_string();
+    let mut query = "SELECT id FROM jobs WHERE status NOT IN ('pending', 'scanning', 'uploading', 'transferring', 'failed_retryable')".to_string();
 
     match filter {
         Some("Quarantined") => {
@@ -599,6 +1237,29 @@ pub fn insert_event(conn: &Connection, job_id: i64, event_type: &str, message: &
         params![job_id, event_type, message, now],
     )?;
     Ok(())
+}
+
+pub fn list_job_events(conn: &Connection, job_id: i64, limit: usize) -> Result<Vec<JobEventRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT event_type, message, created_at
+         FROM events
+         WHERE job_id = ?
+         ORDER BY id DESC
+         LIMIT ?",
+    )?;
+    let rows = stmt.query_map(params![job_id, limit as i64], |row| {
+        Ok(JobEventRow {
+            event_type: row.get(0)?,
+            message: row.get(1)?,
+            created_at: row.get(2)?,
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 pub fn update_scan_status(
@@ -928,6 +1589,11 @@ mod tests {
                 source_path TEXT NOT NULL,
                 staged_path TEXT,
                 size_bytes INTEGER NOT NULL,
+                source_endpoint_id INTEGER,
+                destination_endpoint_id INTEGER,
+                transfer_direction TEXT,
+                conflict_policy TEXT,
+                scan_policy TEXT,
                 scan_status TEXT,
                 upload_status TEXT,
                 s3_bucket TEXT,
@@ -978,6 +1644,17 @@ mod tests {
             CREATE TABLE settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE endpoint_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                kind TEXT NOT NULL,
+                config_json TEXT NOT NULL DEFAULT '{}',
+                credential_ref TEXT,
+                is_default_source INTEGER NOT NULL DEFAULT 0,
+                is_default_destination INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             ",
         )?;
@@ -1415,6 +2092,68 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_update_and_get_job_transfer_metadata() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        let metadata = JobTransferMetadata {
+            source_endpoint_id: Some(10),
+            destination_endpoint_id: Some(20),
+            transfer_direction: Some("s3_to_local".to_string()),
+            conflict_policy: Some("overwrite".to_string()),
+            scan_policy: Some("never".to_string()),
+        };
+        update_job_transfer_metadata(&conn, job_id, &metadata)?;
+
+        let loaded = get_job_transfer_metadata(&conn, job_id)?
+            .expect("Transfer metadata should exist for created job");
+        assert_eq!(loaded, metadata);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_assign_default_transfer_metadata_local_to_s3() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let local_id = create_endpoint_profile(
+            &conn,
+            &NewEndpointProfile {
+                name: "Local FS".to_string(),
+                kind: EndpointKind::Local,
+                config: serde_json::json!({ "root": "." }),
+                credential_ref: None,
+                is_default_source: true,
+                is_default_destination: false,
+            },
+        )?;
+        let s3_id = create_endpoint_profile(
+            &conn,
+            &NewEndpointProfile {
+                name: "Archive S3".to_string(),
+                kind: EndpointKind::S3,
+                config: serde_json::json!({ "bucket": "archive", "region": "us-east-1" }),
+                credential_ref: Some("s3_secret".to_string()),
+                is_default_source: false,
+                is_default_destination: true,
+            },
+        )?;
+
+        let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
+        assign_default_transfer_metadata(&conn, job_id)?;
+
+        let loaded = get_job_transfer_metadata(&conn, job_id)?
+            .expect("Transfer metadata should exist for created job");
+        assert_eq!(loaded.source_endpoint_id, Some(local_id));
+        assert_eq!(loaded.destination_endpoint_id, Some(s3_id));
+        assert_eq!(loaded.transfer_direction, Some("local_to_s3".to_string()));
+        assert_eq!(loaded.conflict_policy, Some("overwrite".to_string()));
+        assert_eq!(loaded.scan_policy, Some("upload_only".to_string()));
+
+        Ok(())
+    }
+
     // --- Status Update Tests ---
 
     #[test]
@@ -1582,6 +2321,284 @@ mod tests {
         set_setting(&conn, "theme", "dark")?;
 
         assert!(has_settings(&conn)?);
+
+        Ok(())
+    }
+
+    // --- Endpoint Profile Tests ---
+
+    #[test]
+    fn test_create_and_list_endpoint_profiles() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let endpoint_id = create_endpoint_profile(
+            &conn,
+            &NewEndpointProfile {
+                name: "Primary S3".to_string(),
+                kind: EndpointKind::S3,
+                config: serde_json::json!({
+                    "bucket": "files-prod",
+                    "region": "us-east-1",
+                    "prefix": "uploads/"
+                }),
+                credential_ref: Some("s3_secret".to_string()),
+                is_default_source: false,
+                is_default_destination: true,
+            },
+        )?;
+
+        let endpoint = get_endpoint_profile(&conn, endpoint_id)?.expect("Endpoint should exist");
+        assert_eq!(endpoint.name, "Primary S3");
+        assert_eq!(endpoint.kind, EndpointKind::S3);
+        assert_eq!(endpoint.credential_ref, Some("s3_secret".to_string()));
+        assert!(endpoint.is_default_destination);
+        assert!(!endpoint.is_default_source);
+
+        let listed = list_endpoint_profiles(&conn)?;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, endpoint_id);
+        assert_eq!(
+            listed[0].config.get("bucket"),
+            Some(&Value::String("files-prod".to_string()))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_and_update_endpoint_profile_by_name() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        let endpoint_id = create_endpoint_profile(
+            &conn,
+            &NewEndpointProfile {
+                name: "Secondary S3".to_string(),
+                kind: EndpointKind::S3,
+                config: serde_json::json!({
+                    "bucket": "secondary-bucket",
+                    "region": "us-east-1"
+                }),
+                credential_ref: Some("secondary_secret_old".to_string()),
+                is_default_source: false,
+                is_default_destination: false,
+            },
+        )?;
+
+        let endpoint =
+            get_endpoint_profile_by_name(&conn, "Secondary S3")?.expect("Endpoint should exist");
+        assert_eq!(endpoint.id, endpoint_id);
+        assert_eq!(
+            endpoint.config.get("bucket"),
+            Some(&Value::String("secondary-bucket".to_string()))
+        );
+
+        let updated = serde_json::json!({
+            "bucket": "secondary-bucket-updated",
+            "region": "us-east-2",
+            "prefix": "x/"
+        });
+        update_endpoint_profile(
+            &conn,
+            endpoint_id,
+            &updated,
+            Some("secondary_secret_new"),
+            true,
+            false,
+        )?;
+
+        let updated_row = get_endpoint_profile_by_name(&conn, "Secondary S3")?
+            .expect("Updated endpoint should exist");
+        assert_eq!(
+            updated_row.config.get("bucket"),
+            Some(&Value::String("secondary-bucket-updated".to_string()))
+        );
+        assert_eq!(
+            updated_row.credential_ref,
+            Some("secondary_secret_new".to_string())
+        );
+        assert!(updated_row.is_default_source);
+        assert!(!updated_row.is_default_destination);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_bootstrap_endpoint_profiles_from_legacy_settings() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        set_setting(&conn, "s3_bucket", "legacy-bucket")?;
+        set_setting(&conn, "s3_region", "us-east-1")?;
+        set_setting(&conn, "s3_prefix", "incoming/")?;
+        set_setting(&conn, "s3_access_key", "AKIA_TEST")?;
+        set_secret(&conn, "s3_secret", "legacy-secret")?;
+
+        bootstrap_endpoint_profiles_from_legacy_settings(&conn)?;
+
+        let profiles = list_endpoint_profiles(&conn)?;
+        assert_eq!(profiles.len(), 2);
+
+        let local = profiles
+            .iter()
+            .find(|p| p.kind == EndpointKind::Local)
+            .expect("Local profile should be created during bootstrap");
+        let profile = profiles
+            .iter()
+            .find(|p| p.name == "Legacy S3")
+            .expect("Legacy S3 profile should be created during bootstrap");
+
+        assert_eq!(local.name, "Local Filesystem");
+        assert!(local.is_default_source);
+        assert!(!local.is_default_destination);
+        assert_eq!(profile.kind, EndpointKind::S3);
+        assert_eq!(profile.credential_ref, Some("s3_secret".to_string()));
+        assert_eq!(
+            profile.config.get("bucket"),
+            Some(&Value::String("legacy-bucket".to_string()))
+        );
+        assert_eq!(
+            profile.config.get("region"),
+            Some(&Value::String("us-east-1".to_string()))
+        );
+
+        // Idempotent on subsequent runs.
+        bootstrap_endpoint_profiles_from_legacy_settings(&conn)?;
+        assert_eq!(count_endpoint_profiles(&conn)?, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_bootstrap_endpoint_profiles_without_legacy_settings() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        bootstrap_endpoint_profiles_from_legacy_settings(&conn)?;
+
+        let profiles = list_endpoint_profiles(&conn)?;
+        assert_eq!(profiles.len(), 1);
+        let local = &profiles[0];
+        assert_eq!(local.kind, EndpointKind::Local);
+        assert_eq!(local.name, "Local Filesystem");
+        assert!(local.is_default_source);
+        assert!(local.is_default_destination);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_default_endpoint_profiles() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        create_endpoint_profile(
+            &conn,
+            &NewEndpointProfile {
+                name: "Local FS".to_string(),
+                kind: EndpointKind::Local,
+                config: serde_json::json!({ "root": "/" }),
+                credential_ref: None,
+                is_default_source: true,
+                is_default_destination: false,
+            },
+        )?;
+
+        create_endpoint_profile(
+            &conn,
+            &NewEndpointProfile {
+                name: "Archive S3".to_string(),
+                kind: EndpointKind::S3,
+                config: serde_json::json!({
+                    "bucket": "archive-bucket",
+                    "region": "us-east-1"
+                }),
+                credential_ref: Some("s3_secret".to_string()),
+                is_default_source: false,
+                is_default_destination: true,
+            },
+        )?;
+
+        let default_source = get_default_source_endpoint_profile(&conn)?
+            .expect("Default source endpoint should be present");
+        let default_destination = get_default_destination_endpoint_profile(&conn)?
+            .expect("Default destination endpoint should be present");
+
+        assert_eq!(default_source.name, "Local FS");
+        assert_eq!(default_source.kind, EndpointKind::Local);
+        assert_eq!(default_destination.name, "Archive S3");
+        assert_eq!(default_destination.kind, EndpointKind::S3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_default_destination_s3_profile_creates_profile() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        sync_default_destination_s3_profile(
+            &conn,
+            Some("sync-bucket"),
+            Some("inbound/"),
+            Some("us-east-1"),
+            Some("https://sync.example"),
+            Some("SYNC_ACCESS_KEY"),
+            Some("s3_secret"),
+        )?;
+
+        let profile = get_default_destination_endpoint_profile(&conn)?
+            .expect("Default destination profile should exist");
+        assert_eq!(profile.kind, EndpointKind::S3);
+        assert_eq!(
+            profile.config.get("bucket"),
+            Some(&Value::String("sync-bucket".to_string()))
+        );
+        assert_eq!(
+            profile.config.get("access_key"),
+            Some(&Value::String("SYNC_ACCESS_KEY".to_string()))
+        );
+        assert_eq!(profile.credential_ref, Some("s3_secret".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_default_destination_s3_profile_updates_existing_s3_default() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        create_endpoint_profile(
+            &conn,
+            &NewEndpointProfile {
+                name: "Initial S3".to_string(),
+                kind: EndpointKind::S3,
+                config: serde_json::json!({
+                    "bucket": "old-bucket",
+                    "region": "us-west-1"
+                }),
+                credential_ref: Some("old_secret".to_string()),
+                is_default_source: false,
+                is_default_destination: true,
+            },
+        )?;
+
+        sync_default_destination_s3_profile(
+            &conn,
+            Some("new-bucket"),
+            Some("archive/"),
+            Some("us-east-1"),
+            None,
+            Some("NEW_ACCESS_KEY"),
+            Some("new_secret"),
+        )?;
+
+        let profile = get_default_destination_endpoint_profile(&conn)?
+            .expect("Default destination profile should still exist");
+        assert_eq!(profile.kind, EndpointKind::S3);
+        assert_eq!(
+            profile.config.get("bucket"),
+            Some(&Value::String("new-bucket".to_string()))
+        );
+        assert_eq!(
+            profile.config.get("region"),
+            Some(&Value::String("us-east-1".to_string()))
+        );
+        assert_eq!(profile.credential_ref, Some("new_secret".to_string()));
 
         Ok(())
     }

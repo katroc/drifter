@@ -3,7 +3,7 @@ source: tests/ui_tests.rs
 expression: output
 ---
 ╭ Navigation ───╭ System Logs [Level: INFO] (Scroll: arrows╮ History [All] ────────────────────────────────────────────╮
-│  Transfers    │                                          │File                 Status           Size       Time      │
+│  Transfers    │                                          │File                     Result   Route    Size    Duration│
 │  Quarantine   │                                          │                                                           │
 │▌ Logs         │                                          │                                                           │
 │  Settings     │                                          │                                                           │

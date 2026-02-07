@@ -2,40 +2,40 @@
 source: tests/ui_tests.rs
 expression: output
 ---
-╭ Navigation ───╭ Local /test/path───╮ Remote (S3): 0 [Path╮ Job #1 Details ───────────────────────────────────────────╮
-│▌ Transfers    │ Size      Modified │Name                 │Status: uploading                                          │
-│  Quarantine   │ -         -        │                     │Path:   /uploads/report.csv                                │
-│  Logs         │ -         -        │                     │Session: test-session                                      │
-│  Settings     │ 1.0 KB    -        │                     │Report:  scan_report_test-session.txt                      │
-│               │ 2.0 MB    -        │                     │Size:   1.14 MB                                            │
-│               │                    │                     │Scan:   clean                                              │
-│               │                    │                     │Upload: none                                               │
-│               │                    │                     │Scan Time:   500ms                                         │
+╭ Navigation ───╭ Local Source /test/╮ Remote Destination (╮ Job #1 Details ───────────────────────────────────────────╮
+│▌ Transfers    │ Size      Modified │Name                 │SUMMARY                                                    │
+│  Quarantine   │ -         -        │                     │Result     : uploading                                     │
+│  Logs         │ -         -        │                     │Operation  : Transfer                                      │
+│  Settings     │ 1.0 KB    -        │                     │Size       : 1.14 MB                                       │
+│               │ 2.0 MB    -        │                     │Avg Rate   : -                                             │
+│               │                    │                     │Session    : test-session                                  │
+│               │                    │                     │Started    : 2026-01-15T10:30:00+00:00                     │
+│               │                    │                     │Finished   : -                                             │
 │               │                    │                     │                                                           │
-│               │                    │                     │DATA INTEGRITY (SHA256):                                   │
-│               │                    │                     │Local:  Calculating...                                     │
-│               │                    │                     │Remote: Not uploaded                                       │
+│               │                    │                     │TRANSFER                                                   │
+│               │                    │                     │Source     : /uploads/report.csv                           │
+│               │                    │                     │Dest       : /uploads/report.csv                           │
+│               │                    │                     │Source Ep  : -                                             │
+│               │                    │                     │Dest Ep    : -                                             │
+│               │                    │                     │Upload     : none                                          │
+│               │                    │                     │Scan       : clean                                         │
 │               │                    │                     │                                                           │
-│               │                    │                     │DETAILS / ERRORS:                                          │
-│               │                    │                     │none                                                       │
-│               │                    │                     │                                                           │
-│               │                    │                     │                                                           │
-│               ╰────────────────────╯─────────────────────╯                                                           │
-│               │ Queue (Jobs)                             │                                                           │
-│               │File                 Statu Size Progr Time│                                                           │
-│               │📄  report.csv        uploa 1.14 ░░░░░ 2h a│                                                           │
-│               │📄  photo.jpg         compl 4.58 █████ 2h a│                                                           │
+│               ╰────────────────────╯─────────────────────╯POLICY                                                     │
+│               │ Queue (Jobs)                             │Conflict   : -                                             │
+│               │File             Op Ro Fr To S Si Pr Av ET│Scan Mode  : -                                             │
+│               │📄  report.csv    Tr -  -  -  u 1. ░░ -  - │Scan Time  : 500ms                                         │
+│               │📄  photo.jpg     Tr -  -  -  c 4. ██ -  - │Retry      : attempt 1                                     │
 │               │                                          │                                                           │
+│               │                                          │INTEGRITY                                                  │
+│               │                                          │Verdict    : Not Available                                 │
+│               │                                          │Remote     : Not uploaded                                  │
+│               │                                          │Local      : Calculating...                                │
 │               │                                          │                                                           │
+│               │                                          │ERROR                                                      │
+│               │                                          │Message    : none                                          │
 │               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
+│               │                                          │RECENT EVENTS                                              │
+│               │                                          │Events     : none                                          │
 │               │                                          │───────────────────────────────────────────────────────────╯
 │               │                                          │ Metrics                                                   │
 │               │                                          │Disk Read:  0 B               Net Down: 0 B                │

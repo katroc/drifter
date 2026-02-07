@@ -188,8 +188,9 @@ async fn run_watch_worker(
 
                         let session_id = Uuid::new_v4().to_string();
                         let path_str = path.to_string_lossy().to_string();
-                        let result =
-                            ingest_path(conn_clone, &path_str, &session_id, None).await.map(|_| ());
+                        let result = ingest_path(conn_clone, &path_str, &session_id, None, None)
+                            .await
+                            .map(|_| ());
                         (path, result)
                     });
                 }

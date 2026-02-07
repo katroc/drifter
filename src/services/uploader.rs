@@ -41,6 +41,16 @@ pub struct S3Object {
     pub is_parent: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct S3EndpointConfig {
+    pub bucket: String,
+    pub prefix: Option<String>,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Uploader {}
 
@@ -50,19 +60,47 @@ impl Uploader {
     }
 
     async fn create_client(config: &Config) -> Result<(Client, String)> {
-        let bucket = config.s3_bucket.as_deref().unwrap_or_default();
-        let region = config.s3_region.as_deref().unwrap_or("us-east-1").trim();
-        let endpoint = config.s3_endpoint.as_deref();
-        let access_key = config.s3_access_key.as_deref().map(|s| s.trim());
-        let secret_key = config.s3_secret_key.as_deref().map(|s| s.trim());
+        let endpoint = S3EndpointConfig {
+            bucket: config.s3_bucket.clone().unwrap_or_default(),
+            prefix: config.s3_prefix.clone(),
+            region: config.s3_region.clone(),
+            endpoint: config.s3_endpoint.clone(),
+            access_key: config.s3_access_key.clone(),
+            secret_key: config.s3_secret_key.clone(),
+        };
+        Self::create_client_for_endpoint(&endpoint).await
+    }
 
-        if bucket.is_empty() {
-            return Err(anyhow::anyhow!("S3 bucket not configured"));
-        }
+    async fn create_client_for_endpoint(
+        endpoint_cfg: &S3EndpointConfig,
+    ) -> Result<(Client, String)> {
+        let bucket = endpoint_cfg.bucket.trim();
+        let region = endpoint_cfg.region.as_deref().unwrap_or("us-east-1").trim();
+        let endpoint = endpoint_cfg.endpoint.as_deref().map(str::trim);
+        let access_key = endpoint_cfg.access_key.as_ref().and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        let secret_key = endpoint_cfg.secret_key.as_ref().and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
 
         #[allow(deprecated)]
         let mut config_loader =
             aws_config::from_env().region(aws_config::Region::new(region.to_string()));
+
+        if bucket.is_empty() {
+            return Err(anyhow::anyhow!("S3 bucket not configured"));
+        }
 
         if let (Some(ak), Some(sk)) = (access_key, secret_key) {
             let creds = Credentials::new(ak.to_string(), sk.to_string(), None, None, "static");
@@ -84,6 +122,36 @@ impl Uploader {
         Ok((client, bucket.to_string()))
     }
 
+    fn normalized_prefix(prefix: Option<&str>) -> Option<String> {
+        let raw = prefix?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let trimmed = raw.trim_matches('/');
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(format!("{trimmed}/"))
+        }
+    }
+
+    pub fn resolve_object_key(endpoint_cfg: &S3EndpointConfig, object_key: &str) -> String {
+        let key = object_key.trim_start_matches('/');
+        if key.is_empty() {
+            return String::new();
+        }
+
+        let Some(prefix) = Self::normalized_prefix(endpoint_cfg.prefix.as_deref()) else {
+            return key.to_string();
+        };
+
+        if key == prefix.trim_end_matches('/') || key.starts_with(&prefix) {
+            key.to_string()
+        } else {
+            format!("{prefix}{key}")
+        }
+    }
+
     fn parent_folder_marker_key(key: &str) -> Option<String> {
         let trimmed = key.trim_end_matches('/');
         let (parent, _) = trimmed.rsplit_once('/')?;
@@ -91,6 +159,42 @@ impl Uploader {
             return None;
         }
         Some(format!("{}/", parent.trim_end_matches('/')))
+    }
+
+    fn normalize_endpoint_url(endpoint: Option<&str>) -> Option<String> {
+        let raw = endpoint?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(trimmed.trim_end_matches('/').to_ascii_lowercase())
+    }
+
+    pub(crate) fn supports_server_side_copy(
+        source_endpoint: &S3EndpointConfig,
+        destination_endpoint: &S3EndpointConfig,
+    ) -> bool {
+        Self::normalize_endpoint_url(source_endpoint.endpoint.as_deref())
+            == Self::normalize_endpoint_url(destination_endpoint.endpoint.as_deref())
+    }
+
+    fn encode_copy_source_key(key: &str) -> String {
+        let mut encoded = String::with_capacity(key.len());
+        for &b in key.as_bytes() {
+            let keep =
+                b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'/' | b'!');
+            if keep {
+                encoded.push(char::from(b));
+            } else {
+                encoded.push('%');
+                encoded.push_str(&format!("{:02X}", b));
+            }
+        }
+        encoded
+    }
+
+    fn format_copy_source(bucket: &str, key: &str) -> String {
+        format!("{bucket}/{}", Self::encode_copy_source_key(key))
     }
 
     fn apply_sse_create_multipart(
@@ -309,6 +413,259 @@ impl Uploader {
         });
 
         Ok(objects)
+    }
+
+    /// Recursively list files under a folder key (prefix). Returns files only.
+    pub async fn list_files_recursive(config: &Config, folder_key: &str) -> Result<Vec<S3Object>> {
+        let (client, bucket) = Self::create_client(config).await?;
+
+        let mut prefix = folder_key.to_string();
+        if !prefix.ends_with('/') {
+            prefix.push('/');
+        }
+
+        let mut files = Vec::new();
+        let mut continuation_token = None;
+
+        loop {
+            let mut req = client.list_objects_v2().bucket(&bucket).prefix(&prefix);
+            if let Some(token) = continuation_token.take() {
+                req = req.continuation_token(token);
+            }
+
+            let resp = req.send().await.context("Failed to list folder contents")?;
+
+            let is_truncated = resp.is_truncated().unwrap_or(false);
+            let next_token = resp.next_continuation_token.clone();
+
+            for obj in resp.contents.unwrap_or_default() {
+                let key = obj.key().unwrap_or("").to_string();
+                if key.is_empty() || key.ends_with('/') {
+                    continue;
+                }
+
+                let size = obj.size().unwrap_or(0);
+                let last_modified = obj
+                    .last_modified()
+                    .map(|d| d.to_string())
+                    .unwrap_or_default();
+
+                files.push(S3Object {
+                    name: key.clone(),
+                    key,
+                    size,
+                    last_modified,
+                    is_dir: false,
+                    is_parent: false,
+                });
+            }
+
+            if is_truncated {
+                continuation_token = next_token.map(|s| s.to_string());
+            } else {
+                break;
+            }
+        }
+
+        files.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(files)
+    }
+
+    pub async fn object_exists(endpoint_cfg: &S3EndpointConfig, object_key: &str) -> Result<bool> {
+        let (client, bucket) = Self::create_client_for_endpoint(endpoint_cfg).await?;
+        let resolved_key = Self::resolve_object_key(endpoint_cfg, object_key);
+
+        match client
+            .head_object()
+            .bucket(bucket)
+            .key(resolved_key)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                if let Some(service_err) = e.as_service_error()
+                    && matches!(
+                        service_err.code(),
+                        Some("NotFound") | Some("NoSuchKey") | Some("404") | Some("NoSuchObject")
+                    )
+                {
+                    return Ok(false);
+                }
+                Err(e).context("Failed to check destination object")
+            }
+        }
+    }
+
+    pub async fn copy_between_endpoints(
+        source_endpoint: &S3EndpointConfig,
+        destination_endpoint: &S3EndpointConfig,
+        source_key: &str,
+        destination_key: &str,
+        part_size_mb: u64,
+    ) -> Result<()> {
+        let (source_client, source_bucket) =
+            Self::create_client_for_endpoint(source_endpoint).await?;
+        let (destination_client, destination_bucket) =
+            Self::create_client_for_endpoint(destination_endpoint).await?;
+
+        let resolved_source_key = Self::resolve_object_key(source_endpoint, source_key);
+        let resolved_destination_key =
+            Self::resolve_object_key(destination_endpoint, destination_key);
+
+        if resolved_source_key.is_empty() {
+            anyhow::bail!("source object key is empty");
+        }
+        if resolved_destination_key.is_empty() {
+            anyhow::bail!("destination object key is empty");
+        }
+
+        if !Self::supports_server_side_copy(source_endpoint, destination_endpoint) {
+            anyhow::bail!(
+                "s3_to_s3 server-side copy requires matching S3 endpoint URLs; source endpoint '{}' and destination endpoint '{}' differ",
+                source_endpoint.endpoint.as_deref().unwrap_or("aws-default"),
+                destination_endpoint
+                    .endpoint
+                    .as_deref()
+                    .unwrap_or("aws-default")
+            );
+        }
+
+        let copy_source = Self::format_copy_source(&source_bucket, &resolved_source_key);
+
+        let head = source_client
+            .head_object()
+            .bucket(&source_bucket)
+            .key(&resolved_source_key)
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to read source object metadata s3://{}/{}",
+                    source_bucket, resolved_source_key
+                )
+            })?;
+        let source_size = head.content_length().unwrap_or(0).max(0) as u64;
+
+        // PutObject can only store objects up to 5GiB.
+        if source_size <= 5 * 1024 * 1024 * 1024 {
+            destination_client
+                .copy_object()
+                .bucket(&destination_bucket)
+                .key(&resolved_destination_key)
+                .copy_source(&copy_source)
+                .send()
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to copy source object s3://{}/{} to s3://{}/{}",
+                        source_bucket,
+                        resolved_source_key,
+                        destination_bucket,
+                        resolved_destination_key
+                    )
+                })?;
+            return Ok(());
+        }
+
+        let min_part_size = 5 * 1024 * 1024u64;
+        let desired_part_size = part_size_mb.saturating_mul(1024 * 1024).max(min_part_size);
+        let required_min_part_size = source_size.div_ceil(10_000);
+        let part_size = desired_part_size.max(required_min_part_size);
+
+        let create_multipart = destination_client
+            .create_multipart_upload()
+            .bucket(&destination_bucket)
+            .key(&resolved_destination_key)
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to start multipart copy to s3://{}/{}",
+                    destination_bucket, resolved_destination_key
+                )
+            })?;
+
+        let upload_id = create_multipart
+            .upload_id()
+            .map(std::string::ToString::to_string)
+            .context("multipart upload did not return upload_id")?;
+
+        let copy_result = async {
+            let mut completed_parts = Vec::new();
+            let mut part_number: i32 = 1;
+            let mut offset: u64 = 0;
+
+            while offset < source_size {
+                let end = std::cmp::min(offset + part_size - 1, source_size - 1);
+                let range_header = format!("bytes={offset}-{end}");
+                let part_resp = destination_client
+                    .upload_part_copy()
+                    .bucket(&destination_bucket)
+                    .key(&resolved_destination_key)
+                    .upload_id(&upload_id)
+                    .part_number(part_number)
+                    .copy_source(&copy_source)
+                    .copy_source_range(range_header)
+                    .send()
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to copy multipart part {} to s3://{}/{}",
+                            part_number, destination_bucket, resolved_destination_key
+                        )
+                    })?;
+
+                let etag = part_resp
+                    .copy_part_result()
+                    .and_then(|result| result.e_tag())
+                    .map(std::string::ToString::to_string)
+                    .context("multipart copy part missing ETag")?;
+                completed_parts.push(
+                    CompletedPart::builder()
+                        .part_number(part_number)
+                        .e_tag(etag)
+                        .build(),
+                );
+
+                part_number += 1;
+                offset = end + 1;
+            }
+
+            let completed_upload = CompletedMultipartUpload::builder()
+                .set_parts(Some(completed_parts))
+                .build();
+
+            destination_client
+                .complete_multipart_upload()
+                .bucket(&destination_bucket)
+                .key(&resolved_destination_key)
+                .upload_id(&upload_id)
+                .multipart_upload(completed_upload)
+                .send()
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to complete multipart copy to s3://{}/{}",
+                        destination_bucket, resolved_destination_key
+                    )
+                })?;
+            Result::<()>::Ok(())
+        }
+        .await;
+
+        if let Err(e) = copy_result {
+            let _ = destination_client
+                .abort_multipart_upload()
+                .bucket(&destination_bucket)
+                .key(&resolved_destination_key)
+                .upload_id(&upload_id)
+                .send()
+                .await;
+            return Err(e);
+        }
+
+        Ok(())
     }
 
     pub async fn download_file(config: &Config, key: &str, dest: &Path) -> Result<()> {
@@ -560,6 +917,9 @@ impl Uploader {
                         details: "Resuming: Listing parts...".to_string(),
                         parts_done: 0,
                         parts_total: 0,
+                        bytes_done: 0,
+                        bytes_total: 0,
+                        elapsed_secs: 0,
                     },
                 );
             }
@@ -741,6 +1101,9 @@ impl Uploader {
                             details,
                             parts_done: parts_done as usize,
                             parts_total: m_total_parts,
+                            bytes_done: n,
+                            bytes_total: m_file_size,
+                            elapsed_secs: elapsed.as_secs(),
                         },
                     );
                 }
@@ -1021,6 +1384,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_resolve_object_key_without_prefix() {
+        let endpoint = S3EndpointConfig {
+            bucket: "bucket".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            endpoint: None,
+            access_key: None,
+            secret_key: None,
+        };
+        assert_eq!(
+            Uploader::resolve_object_key(&endpoint, "a/b.txt"),
+            "a/b.txt"
+        );
+    }
+
+    #[test]
+    fn test_resolve_object_key_with_prefix() {
+        let endpoint = S3EndpointConfig {
+            bucket: "bucket".to_string(),
+            prefix: Some("incoming".to_string()),
+            region: Some("us-east-1".to_string()),
+            endpoint: None,
+            access_key: None,
+            secret_key: None,
+        };
+        assert_eq!(
+            Uploader::resolve_object_key(&endpoint, "a/b.txt"),
+            "incoming/a/b.txt"
+        );
+        assert_eq!(
+            Uploader::resolve_object_key(&endpoint, "incoming/a/b.txt"),
+            "incoming/a/b.txt"
+        );
+    }
+
+    #[test]
     fn test_parent_folder_marker_key_nested_path() {
         let marker = Uploader::parent_folder_marker_key("docker/docker-compose.yml");
         assert_eq!(marker.as_deref(), Some("docker/"));
@@ -1036,6 +1435,57 @@ mod tests {
     fn test_parent_folder_marker_key_root_file() {
         let marker = Uploader::parent_folder_marker_key("file.txt");
         assert_eq!(marker, None);
+    }
+
+    #[test]
+    fn test_supports_server_side_copy_when_endpoints_match() {
+        let source = S3EndpointConfig {
+            bucket: "source".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            endpoint: Some("https://s3.example.com/".to_string()),
+            access_key: None,
+            secret_key: None,
+        };
+        let destination = S3EndpointConfig {
+            bucket: "destination".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            endpoint: Some("https://s3.example.com".to_string()),
+            access_key: None,
+            secret_key: None,
+        };
+        assert!(Uploader::supports_server_side_copy(&source, &destination));
+    }
+
+    #[test]
+    fn test_supports_server_side_copy_when_endpoints_differ() {
+        let source = S3EndpointConfig {
+            bucket: "source".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            endpoint: Some("https://s3-a.example.com".to_string()),
+            access_key: None,
+            secret_key: None,
+        };
+        let destination = S3EndpointConfig {
+            bucket: "destination".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            endpoint: Some("https://s3-b.example.com".to_string()),
+            access_key: None,
+            secret_key: None,
+        };
+        assert!(!Uploader::supports_server_side_copy(&source, &destination));
+    }
+
+    #[test]
+    fn test_format_copy_source_encodes_key() {
+        let formatted = Uploader::format_copy_source("my-bucket", "folder/a b+lambda-λ.txt");
+        assert_eq!(
+            formatted,
+            "my-bucket/folder/a%20b%2Blambda-%CE%BB.txt".to_string()
+        );
     }
 
     // --- Part Size Calculation Tests ---
