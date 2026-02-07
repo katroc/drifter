@@ -376,6 +376,17 @@ fn endpoint_profiles_table_exists(conn: &Connection) -> Result<bool> {
     Ok(rows.next()?.is_some())
 }
 
+fn has_secret_value(conn: &Connection, key: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT value FROM secrets WHERE key = ? LIMIT 1")?;
+    let mut rows = stmt.query(params![key])?;
+    if let Some(row) = rows.next()? {
+        let stored_value: String = row.get(0)?;
+        Ok(!stored_value.trim().is_empty())
+    } else {
+        Ok(false)
+    }
+}
+
 fn bootstrap_endpoint_profiles_from_legacy_settings(conn: &Connection) -> Result<()> {
     if count_endpoint_profiles(conn)? > 0 {
         return Ok(());
@@ -394,9 +405,7 @@ fn bootstrap_endpoint_profiles_from_legacy_settings(conn: &Connection) -> Result
     let endpoint = get_setting("s3_endpoint");
     let prefix = get_setting("s3_prefix");
     let access_key = get_setting("s3_access_key");
-    let has_secret = get_secret(conn, "s3_secret")?
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
+    let has_secret = has_secret_value(conn, "s3_secret")?;
 
     let has_legacy_s3 = bucket.is_some()
         || region.is_some()
