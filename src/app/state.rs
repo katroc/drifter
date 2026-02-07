@@ -598,6 +598,26 @@ impl App {
     }
 
     pub fn build_visual_list(&self, jobs: &[JobRow], filter_query: &str) -> Vec<VisualItem> {
+        fn display_leaf_name(path: &str) -> String {
+            let trimmed = path.trim_end_matches(['/', '\\']);
+            if trimmed.is_empty() {
+                return path.to_string();
+            }
+            Path::new(trimmed)
+                .file_name()
+                .and_then(|n| {
+                    let name = n.to_string_lossy().to_string();
+                    if name.is_empty() { None } else { Some(name) }
+                })
+                .or_else(|| {
+                    trimmed
+                        .rsplit(['/', '\\'])
+                        .find(|part| !part.is_empty())
+                        .map(std::string::ToString::to_string)
+                })
+                .unwrap_or_else(|| path.to_string())
+        }
+
         let filtered_jobs: Vec<(usize, &JobRow)> = if filter_query.is_empty() {
             jobs.iter().enumerate().collect()
         } else {
@@ -622,10 +642,7 @@ impl App {
                     .into_iter()
                     .map(|(i, job)| {
                         // Extract filename for display
-                        let name = Path::new(&job.source_path)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| job.source_path.clone());
+                        let name = display_leaf_name(&job.source_path);
 
                         VisualItem {
                             text: name,
@@ -643,15 +660,22 @@ impl App {
                 }
 
                 // 1. Calculate Common Prefix
-                // We must scan ALL paths since we aren't sorting anymore.
                 let paths: Vec<&Path> = jobs_to_process
                     .iter()
                     .map(|j| Path::new(&j.source_path))
                     .collect();
-                let p0 = paths[0];
+                let absolute_paths: Vec<&Path> =
+                    paths.iter().copied().filter(|p| p.is_absolute()).collect();
+                let common_candidate_paths: Vec<&Path> = if absolute_paths.len() >= 2 {
+                    absolute_paths.clone()
+                } else {
+                    paths.clone()
+                };
+
+                let p0 = common_candidate_paths[0];
                 let mut common_components: Vec<_> = p0.components().collect();
 
-                for p in &paths[1..] {
+                for p in &common_candidate_paths[1..] {
                     let comps: Vec<_> = p.components().collect();
                     let min_len = std::cmp::min(common_components.len(), comps.len());
                     let mut match_len = 0;
@@ -664,15 +688,20 @@ impl App {
                     }
                 }
 
-                let common_path_buf: std::path::PathBuf = common_components.iter().collect();
+                let mut common_path_buf: std::path::PathBuf = common_components.iter().collect();
+                if common_path_buf.as_os_str().is_empty()
+                    && !absolute_paths.is_empty()
+                    && let Ok(cwd) = std::env::current_dir()
+                    && absolute_paths.iter().any(|p| p.starts_with(&cwd))
+                {
+                    common_path_buf = cwd;
+                }
 
                 // 2. Heuristic for Base Path
 
                 // If common prefix is exactly a file path (e.g. single file in list),
                 // we should start "view" at its parent folder to show structure.
-                let common_is_file = jobs_to_process
-                    .iter()
-                    .any(|j| Path::new(&j.source_path) == common_path_buf);
+                let common_is_file = common_candidate_paths.contains(&common_path_buf.as_path());
 
                 let effective_common_path = if common_is_file {
                     common_path_buf
@@ -684,7 +713,18 @@ impl App {
                 };
 
                 // Check depths relative to effective common prefix
-                let max_depth = paths
+                let depth_reference_paths: Vec<&Path> = paths
+                    .iter()
+                    .copied()
+                    .filter(|p| p.strip_prefix(&effective_common_path).is_ok())
+                    .collect();
+                let depth_paths: Vec<&Path> = if depth_reference_paths.is_empty() {
+                    paths.clone()
+                } else {
+                    depth_reference_paths
+                };
+
+                let max_depth = depth_paths
                     .iter()
                     .map(|p| {
                         p.strip_prefix(&effective_common_path)
@@ -697,7 +737,7 @@ impl App {
 
                 // If max_depth <= 1, it means all items are immediate children.
                 // We show parent container context effectively.
-                let base_path_buf = if max_depth <= 1 && common_path_buf.components().count() > 0 {
+                let base_path_buf = if max_depth <= 1 && !common_path_buf.as_os_str().is_empty() {
                     effective_common_path
                         .parent()
                         .map(|p| p.to_path_buf())
@@ -727,7 +767,15 @@ impl App {
                     // Components of the relative path
                     let components: Vec<String> = rel_path
                         .components()
-                        .map(|c| c.as_os_str().to_string_lossy().to_string())
+                        .filter_map(|c| match c {
+                            std::path::Component::Normal(part) => {
+                                Some(part.to_string_lossy().to_string())
+                            }
+                            std::path::Component::ParentDir => Some("..".to_string()),
+                            std::path::Component::CurDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_) => None,
+                        })
                         .collect();
 
                     let mut current = &mut root;
@@ -762,10 +810,7 @@ impl App {
                                             // Actually, current implementation pushes `idx` from loop over `jobs_to_process`
                                             // which is an index into `jobs_to_process`.
                                             let f_path = &jobs_to_process[f_idx].source_path;
-                                            let f_name = std::path::Path::new(f_path)
-                                                .file_name()
-                                                .unwrap_or_default()
-                                                .to_string_lossy();
+                                            let f_name = display_leaf_name(f_path);
                                             if f_name == *filename {
                                                 return true;
                                             }
@@ -846,10 +891,7 @@ impl App {
                     for &it_idx in &node.files {
                         let job = jobs_to_process[it_idx];
                         let orig_idx = original_indices[it_idx];
-                        let filename = std::path::Path::new(&job.source_path)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| job.source_path.clone());
+                        let filename = display_leaf_name(&job.source_path);
 
                         items.push(VisualItem {
                             text: filename,

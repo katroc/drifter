@@ -22,6 +22,9 @@ pub struct ProgressInfo {
     pub details: String,
     pub parts_done: usize,
     pub parts_total: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub elapsed_secs: u64,
 }
 
 #[derive(Clone)]
@@ -175,7 +178,7 @@ impl Coordinator {
             let available_scan_slots = scan_limit.saturating_sub(active_scans as usize);
             for _ in 0..available_scan_slots {
                 enum ScanDispatch {
-                    Spawn(JobRow),
+                    Spawn(Box<JobRow>),
                     Skipped,
                     Empty,
                 }
@@ -196,7 +199,7 @@ impl Coordinator {
                             ScanDispatch::Skipped
                         } else {
                             db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
-                            ScanDispatch::Spawn(job)
+                            ScanDispatch::Spawn(Box::new(job))
                         }
                     } else {
                         ScanDispatch::Empty

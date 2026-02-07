@@ -903,6 +903,9 @@ impl Uploader {
                         details: "Resuming: Listing parts...".to_string(),
                         parts_done: 0,
                         parts_total: 0,
+                        bytes_done: 0,
+                        bytes_total: 0,
+                        elapsed_secs: 0,
                     },
                 );
             }
@@ -1084,6 +1087,9 @@ impl Uploader {
                             details,
                             parts_done: parts_done as usize,
                             parts_total: m_total_parts,
+                            bytes_done: n,
+                            bytes_total: m_file_size,
+                            elapsed_secs: elapsed.as_secs(),
                         },
                     );
                 }

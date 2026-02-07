@@ -91,13 +91,29 @@ fn transfer_phase_label(app: &App, job: &crate::db::JobRow) -> String {
     job.status.clone()
 }
 
+fn queue_status_label(app: &App, job: &crate::db::JobRow) -> String {
+    if job.status == "retry_pending" {
+        if let Some(next_retry) = &job.next_retry_at
+            && let Ok(target) = chrono::DateTime::parse_from_rfc3339(next_retry)
+        {
+            let diff = target
+                .signed_duration_since(chrono::Utc::now())
+                .num_seconds()
+                .max(0);
+            return format!("retry {}s", diff);
+        }
+        return "retrying".to_string();
+    }
+    transfer_phase_label(app, job)
+}
+
 fn history_status_label(app: &App, job: &crate::db::JobRow) -> String {
     match job.status.as_str() {
         "quarantined" => {
-            if let Some(err) = &job.error {
-                if let Some(name) = err.strip_prefix("Infected: ") {
-                    return truncate_with_ellipsis(name, 15);
-                }
+            if let Some(err) = &job.error
+                && let Some(name) = err.strip_prefix("Infected: ")
+            {
+                return truncate_with_ellipsis(name, 15);
             }
             "Threat Detected".to_string()
         }
@@ -121,6 +137,24 @@ fn transfer_route_label(direction: Option<&str>) -> Option<&'static str> {
     }
 }
 
+fn transfer_route_short(direction: Option<&str>) -> &'static str {
+    match direction {
+        Some("local_to_s3") => "L->S3",
+        Some("s3_to_local") => "S3->L",
+        Some("s3_to_s3") => "S3->S3",
+        _ => "-",
+    }
+}
+
+fn transfer_operation_label(direction: Option<&str>) -> &'static str {
+    match direction {
+        Some("local_to_s3") => "Upload",
+        Some("s3_to_local") => "Download",
+        Some("s3_to_s3") => "Copy",
+        _ => "Transfer",
+    }
+}
+
 fn transfer_field_labels(direction: Option<&str>, phase: &str) -> (&'static str, &'static str) {
     if phase == "copying" || direction == Some("s3_to_s3") {
         return ("Copy:   ", "Copy Time:   ");
@@ -129,6 +163,101 @@ fn transfer_field_labels(direction: Option<&str>, phase: &str) -> (&'static str,
         return ("Download:", "Download Time:");
     }
     ("Upload: ", "Upload Time: ")
+}
+
+fn job_endpoints(app: &App, job: &crate::db::JobRow) -> (String, String) {
+    let metadata = app.transfer_metadata_for_job(job.id);
+    let direction = metadata.and_then(|m| m.transfer_direction.as_deref());
+    let source_id = metadata.and_then(|m| m.source_endpoint_id);
+    let destination_id = metadata.and_then(|m| m.destination_endpoint_id);
+
+    match direction {
+        Some("local_to_s3") => (
+            "Local".to_string(),
+            app.endpoint_profile_name(destination_id),
+        ),
+        Some("s3_to_local") => (app.endpoint_profile_name(source_id), "Local".to_string()),
+        Some("s3_to_s3") => (
+            app.endpoint_profile_name(source_id),
+            app.endpoint_profile_name(destination_id),
+        ),
+        _ => ("-".to_string(), "-".to_string()),
+    }
+}
+
+fn job_source_destination_values(app: &App, job: &crate::db::JobRow) -> (String, String) {
+    let direction = app.transfer_direction_for_job(job.id);
+    match direction {
+        Some("local_to_s3") => {
+            let destination = job
+                .s3_key
+                .clone()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| job.staged_path.clone())
+                .unwrap_or_else(|| "-".to_string());
+            (job.source_path.clone(), destination)
+        }
+        Some("s3_to_local") => {
+            let source = job
+                .s3_key
+                .clone()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| job.source_path.clone());
+            let destination = job.staged_path.clone().unwrap_or_else(|| "-".to_string());
+            (source, destination)
+        }
+        Some("s3_to_s3") => {
+            let source = job
+                .s3_key
+                .clone()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| job.source_path.clone());
+            let destination = job
+                .staged_path
+                .clone()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| job.s3_key.clone())
+                .unwrap_or_else(|| "-".to_string());
+            (source, destination)
+        }
+        _ => (
+            job.source_path.clone(),
+            job.staged_path.clone().unwrap_or_else(|| "-".to_string()),
+        ),
+    }
+}
+
+fn format_eta_short(total_secs: u64) -> String {
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    if hours > 0 {
+        format!("{hours}h{mins}m")
+    } else if mins > 0 {
+        format!("{mins}m{secs}s")
+    } else {
+        format!("{secs}s")
+    }
+}
+
+fn queue_avg_eta(app: &App, job: &crate::db::JobRow) -> (String, String) {
+    if job.status != "uploading" {
+        return ("-".to_string(), "-".to_string());
+    }
+    let Some(info) = app.cached_progress.get(&job.id) else {
+        return ("-".to_string(), "-".to_string());
+    };
+    if info.elapsed_secs < 3 || info.bytes_total == 0 || info.bytes_done < 1024 * 1024 {
+        return ("-".to_string(), "-".to_string());
+    }
+
+    let rate_bps = info.bytes_done / info.elapsed_secs.max(1);
+    if rate_bps == 0 {
+        return ("-".to_string(), "-".to_string());
+    }
+    let remaining_bytes = info.bytes_total.saturating_sub(info.bytes_done);
+    let eta_secs = remaining_bytes / rate_bps.max(1);
+    (format_bytes_rate(rate_bps), format_eta_short(eta_secs))
 }
 
 pub fn ui(f: &mut Frame, app: &App) {
@@ -214,7 +343,7 @@ pub fn ui(f: &mut Frame, app: &App) {
         // History focused: Split view
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
             .split(right_panel);
 
         draw_history(f, app, chunks[0]);
@@ -638,9 +767,11 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
         app.theme.border_style()
     };
 
-    let header_cells = ["File", "Status", "Size", "Progress", "Time"]
-        .iter()
-        .map(|h| Cell::from(*h).style(app.theme.header_style()));
+    let header_cells = [
+        "File", "Op", "Route", "From", "To", "Status", "Size", "Progress", "Avg", "ETA",
+    ]
+    .iter()
+    .map(|h| Cell::from(*h).style(app.theme.header_style()));
     let header = Row::new(header_cells)
         .style(app.theme.header_style())
         .height(1);
@@ -743,7 +874,13 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
 
             if let Some(job_idx) = item.index_in_jobs {
                 let job = &app.jobs[job_idx];
-                let status_label = transfer_phase_label(app, job);
+                let status_label = queue_status_label(app, job);
+                let direction = app.transfer_direction_for_job(job.id);
+                let operation_label = transfer_operation_label(direction);
+                let route_label = transfer_route_short(direction);
+                let (source_endpoint, destination_endpoint) = job_endpoints(app, job);
+                let source_short = truncate_with_ellipsis(&source_endpoint, 10);
+                let destination_short = truncate_with_ellipsis(&destination_endpoint, 10);
 
                 let p_str = {
                     if job.status == "uploading" || job.status == "transferring" {
@@ -766,7 +903,7 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
                                     info.percent
                                 )
                             } else {
-                                "░░░░░░░░░░ 0%".to_string()
+                                "░░░░░░░░░░   0%".to_string()
                             }
                         }
                     } else if job.status == "complete" {
@@ -779,8 +916,7 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
                         "----------".to_string()
                     }
                 };
-
-                let time_str = format_relative_time(&job.created_at);
+                let (avg_rate, eta) = queue_avg_eta(app, job);
 
                 let status_style = if is_selected {
                     app.theme.selection_style()
@@ -793,23 +929,27 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
                     app.theme.progress_style()
                 };
 
-                let p_indicator = if job.priority != 0 {
-                    format!("[P:{}] ", job.priority)
-                } else {
-                    String::new()
-                };
-
                 Row::new(vec![
                     Cell::from(display_name),
-                    Cell::from(format!("{}{}", p_indicator, status_label)).style(status_style),
+                    Cell::from(operation_label),
+                    Cell::from(route_label),
+                    Cell::from(source_short),
+                    Cell::from(destination_short),
+                    Cell::from(status_label).style(status_style),
                     Cell::from(format_bytes(job.size_bytes as u64)),
                     Cell::from(p_str).style(progress_style),
-                    Cell::from(time_str),
+                    Cell::from(avg_rate),
+                    Cell::from(eta),
                 ])
                 .style(row_style)
             } else {
                 Row::new(vec![
                     Cell::from(display_name),
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(""),
                     Cell::from(""),
                     Cell::from(""),
                     Cell::from(""),
@@ -825,11 +965,16 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Min(20),
-            Constraint::Length(12),
+            Constraint::Min(16),
+            Constraint::Length(8),
+            Constraint::Length(8),
             Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(12),
+            Constraint::Length(9),
             Constraint::Length(16),
             Constraint::Length(10),
+            Constraint::Length(8),
         ],
     )
     .header(header);
@@ -844,7 +989,7 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
         app.theme.border_style()
     };
 
-    let header_cells = ["File", "Status", "Size", "Time"]
+    let header_cells = ["File", "Result", "Route", "Size", "Duration"]
         .iter()
         .map(|h| Cell::from(*h).style(app.theme.header_style()));
     let header = Row::new(header_cells)
@@ -934,8 +1079,13 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
             if let Some(job_idx) = item.index_in_jobs {
                 let job = &app.history[job_idx];
                 let status_str = history_status_label(app, job);
-
-                let time_str = format_relative_time(&job.created_at);
+                let direction = app.transfer_direction_for_job(job.id);
+                let route_str = transfer_route_short(direction);
+                let duration = job
+                    .upload_duration_ms
+                    .or(job.scan_duration_ms)
+                    .map(format_duration_ms)
+                    .unwrap_or_else(|| "-".to_string());
 
                 let status_style = if is_selected {
                     app.theme.selection_style()
@@ -952,13 +1102,15 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
                 Row::new(vec![
                     Cell::from(display_name),
                     Cell::from(status_str).style(status_style),
+                    Cell::from(route_str),
                     Cell::from(format_bytes(job.size_bytes as u64)),
-                    Cell::from(time_str),
+                    Cell::from(duration),
                 ])
                 .style(row_style)
             } else {
                 Row::new(vec![
                     Cell::from(display_name),
+                    Cell::from(""),
                     Cell::from(""),
                     Cell::from(""),
                     Cell::from(""),
@@ -970,9 +1122,10 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Min(20),
-            Constraint::Length(16),
-            Constraint::Length(10),
+            Constraint::Min(24),
+            Constraint::Length(12),
+            Constraint::Length(8),
+            Constraint::Length(9),
             Constraint::Length(10),
         ],
     )
@@ -1002,125 +1155,188 @@ fn draw_job_details(
         .border_style(app.theme.border_style())
         .style(app.theme.panel_style());
 
+    let metadata = app.transfer_metadata_for_job(job.id);
+    let transfer_direction = metadata.and_then(|m| m.transfer_direction.as_deref());
+    let conflict_policy = metadata
+        .and_then(|m| m.conflict_policy.as_deref())
+        .unwrap_or("-");
+    let scan_policy = metadata
+        .and_then(|m| m.scan_policy.as_deref())
+        .unwrap_or("-");
     let scan_status = job.scan_status.as_deref().unwrap_or("none");
-    let upload_status = job.upload_status.as_deref().unwrap_or("none");
+    let transfer_status = job.upload_status.as_deref().unwrap_or("none");
     let error = job.error.as_deref().unwrap_or("none");
     let phase_label = transfer_phase_label(app, job);
-    let transfer_direction = app.transfer_direction_for_job(job.id);
+    let operation = transfer_operation_label(transfer_direction);
     let (transfer_label, duration_label) = transfer_field_labels(transfer_direction, &phase_label);
+    let transfer_label_name = transfer_label.trim().trim_end_matches(':');
+    let duration_label_name = duration_label.trim().trim_end_matches(':');
+    let (source_endpoint, destination_endpoint) = job_endpoints(app, job);
+    let (source_value, destination_value) = job_source_destination_values(app, job);
 
-    let mut text = vec![
-        Line::from(vec![
-            Span::styled("Status: ", app.theme.highlight_style()),
-            Span::styled(
-                phase_label.clone(),
-                app.theme.status_style(status_kind(job.status.as_str())),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Path:   ", app.theme.highlight_style()),
-            Span::styled(job.source_path.clone(), app.theme.text_style()),
-        ]),
-        Line::from(vec![
-            Span::styled("Session:", app.theme.highlight_style()),
-            Span::styled(format!(" {}", job.session_id), app.theme.text_style()),
-        ]),
-        Line::from(vec![
-            Span::styled("Report: ", app.theme.highlight_style()),
-            Span::styled(
-                format!(" scan_report_{}.txt", job.session_id),
-                app.theme.text_style(),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Size:   ", app.theme.highlight_style()),
-            Span::styled(format_bytes(job.size_bytes as u64), app.theme.text_style()),
-        ]),
-        Line::from(vec![
-            Span::styled("Scan:   ", app.theme.highlight_style()),
-            Span::styled(scan_status, app.theme.text_style()),
-        ]),
-        Line::from(vec![
-            Span::styled(transfer_label, app.theme.highlight_style()),
-            Span::styled(upload_status, app.theme.text_style()),
-        ]),
-    ];
+    let avg_rate = if let Some(ms) = job.upload_duration_ms {
+        if ms > 0 && job.size_bytes > 0 {
+            format_bytes_rate((job.size_bytes as u64).saturating_mul(1000) / ms as u64)
+        } else {
+            "-".to_string()
+        }
+    } else {
+        "-".to_string()
+    };
 
+    let recent_events = {
+        let conn = match lock_mutex(&app.conn) {
+            Ok(conn) => conn,
+            Err(_) => {
+                let p = Paragraph::new("Unable to load details")
+                    .block(block)
+                    .wrap(Wrap { trim: true });
+                f.render_widget(p, area);
+                return;
+            }
+        };
+        crate::db::list_job_events(&conn, job.id, 6).unwrap_or_default()
+    };
+    let finished_at = if matches!(
+        job.status.as_str(),
+        "complete" | "failed" | "cancelled" | "quarantined" | "quarantined_removed"
+    ) {
+        recent_events.first().map(|event| event.created_at.as_str())
+    } else {
+        None
+    };
+
+    let local_checksum = job.checksum.as_deref().unwrap_or("Calculating...");
+    let remote_checksum = job.remote_checksum.as_deref().unwrap_or("Not uploaded");
+    let remote_style = if job.status == "complete" && job.remote_checksum.is_some() {
+        app.theme.status_style(StatusKind::Success)
+    } else {
+        app.theme.text_style()
+    };
+    let checksum_verdict = match (job.checksum.as_deref(), job.remote_checksum.as_deref()) {
+        (Some(local), Some(remote)) if local == remote => ("Match", StatusKind::Success),
+        (Some(_), Some(_)) => ("Mismatch", StatusKind::Error),
+        _ => ("Not Available", StatusKind::Warning),
+    };
+
+    let value_max = area.width.saturating_sub(16) as usize;
+    let compact_details = join_top_border || area.height <= 22;
+    let mut text: Vec<Line> = Vec::new();
+    macro_rules! push_heading {
+        ($title:expr $(,)?) => {{
+            if !text.is_empty() {
+                text.push(Line::from(""));
+            }
+            text.push(Line::from(Span::styled(
+                $title.to_string(),
+                app.theme
+                    .highlight_style()
+                    .add_modifier(Modifier::UNDERLINED),
+            )));
+        }};
+    }
+    macro_rules! push_field {
+        ($label:expr, $value:expr, $style:expr $(,)?) => {{
+            let display = truncate_with_ellipsis($value, value_max.max(8));
+            text.push(Line::from(vec![
+                Span::styled(format!("{:<11}: ", $label), app.theme.highlight_style()),
+                Span::styled(display, $style),
+            ]));
+        }};
+    }
+
+    push_heading!("SUMMARY");
+    push_field!(
+        "Result",
+        &phase_label,
+        app.theme.status_style(status_kind(job.status.as_str())),
+    );
+    push_field!("Operation", operation, app.theme.text_style());
     if let Some(route) = transfer_route_label(transfer_direction) {
-        text.insert(
-            1,
-            Line::from(vec![
-                Span::styled("Route:  ", app.theme.highlight_style()),
-                Span::styled(route, app.theme.text_style()),
-            ]),
+        push_field!("Route", route, app.theme.text_style());
+    }
+    push_field!(
+        "Size",
+        &format_bytes(job.size_bytes as u64),
+        app.theme.text_style()
+    );
+    if let Some(ms) = job.upload_duration_ms {
+        push_field!(
+            duration_label_name,
+            &format_duration_ms(ms),
+            app.theme.text_style(),
+        );
+    }
+    push_field!("Avg Rate", &avg_rate, app.theme.text_style());
+    if !compact_details {
+        push_field!("Session", &job.session_id, app.theme.text_style());
+        push_field!("Started", &job.created_at, app.theme.text_style());
+        push_field!(
+            "Finished",
+            finished_at.unwrap_or("-"),
+            app.theme.text_style()
         );
     }
 
-    if let Some(ms) = job.scan_duration_ms {
-        text.push(Line::from(vec![
-            Span::styled("Scan Time:   ", app.theme.highlight_style()),
-            Span::styled(format_duration_ms(ms), app.theme.text_style()),
-        ]));
+    push_heading!("TRANSFER");
+    push_field!("Source", &source_value, app.theme.text_style());
+    push_field!("Dest", &destination_value, app.theme.text_style());
+    if !compact_details {
+        push_field!("Source Ep", &source_endpoint, app.theme.text_style());
+        push_field!("Dest Ep", &destination_endpoint, app.theme.text_style());
+    }
+    push_field!(transfer_label_name, transfer_status, app.theme.text_style());
+    push_field!("Scan", scan_status, app.theme.text_style());
+
+    if compact_details {
+        push_heading!("POLICY");
+        push_field!(
+            "Rules",
+            &format!("{conflict_policy} / {scan_policy}"),
+            app.theme.text_style(),
+        );
+    } else {
+        push_heading!("POLICY");
+        push_field!("Conflict", conflict_policy, app.theme.text_style());
+        push_field!("Scan Mode", scan_policy, app.theme.text_style());
+        if let Some(ms) = job.scan_duration_ms {
+            push_field!("Scan Time", &format_duration_ms(ms), app.theme.text_style());
+        }
+        push_field!(
+            "Retry",
+            &format!(
+                "attempt {}{}",
+                job.retry_count + 1,
+                job.next_retry_at
+                    .as_deref()
+                    .map(|v| format!(", next={v}"))
+                    .unwrap_or_default()
+            ),
+            app.theme.text_style(),
+        );
     }
 
-    if let Some(ms) = job.upload_duration_ms {
-        text.push(Line::from(vec![
-            Span::styled(duration_label, app.theme.highlight_style()),
-            Span::styled(format_duration_ms(ms), app.theme.text_style()),
-        ]));
-    }
-
-    // Show multipart upload progress if job is uploading
     if job.status == "uploading" && phase_label == "uploading" {
+        if let Some(info) = app.cached_progress.get(&job.id)
+            && info.parts_total > 0
         {
-            let progress_map = &app.cached_progress;
-            if let Some(info_ref) = progress_map.get(&job.id) {
-                // Clone the info so we can drop the lock
-                let info = info_ref.clone();
-
-                if info.parts_total > 0 {
-                    let parts_done = info.parts_done;
-                    let parts_total = info.parts_total;
-                    let details = info.details.clone();
-
-                    text.push(Line::from(""));
-                    text.push(Line::from(Span::styled(
-                        "MULTIPART UPLOAD:",
-                        app.theme
-                            .highlight_style()
-                            .add_modifier(Modifier::UNDERLINED),
-                    )));
-
-                    let bar_width = 20;
-                    let filled = (parts_done * bar_width) / parts_total.max(1);
-                    let bar = format!(
-                        "[{}{}] {}/{}",
-                        "█".repeat(filled),
-                        "░".repeat(bar_width - filled),
-                        parts_done,
-                        parts_total
-                    );
-                    text.push(Line::from(vec![
-                        Span::styled("Parts:  ", app.theme.highlight_style()),
-                        Span::styled(bar, app.theme.progress_style()),
-                    ]));
-
-                    text.push(Line::from(vec![
-                        Span::styled("Detail: ", app.theme.highlight_style()),
-                        Span::styled(details, app.theme.text_style()),
-                    ]));
-                }
+            push_heading!("MULTIPART");
+            let bar_width = 20;
+            let filled = (info.parts_done * bar_width) / info.parts_total.max(1);
+            let bar = format!(
+                "[{}{}] {}/{}",
+                "█".repeat(filled),
+                "░".repeat(bar_width - filled),
+                info.parts_done,
+                info.parts_total
+            );
+            push_field!("Parts", &bar, app.theme.progress_style());
+            if !compact_details {
+                push_field!("Detail", &info.details, app.theme.text_style());
             }
         }
     } else if job.status == "retry_pending" {
-        text.push(Line::from(""));
-        text.push(Line::from(Span::styled(
-            "RETRY PENDING:",
-            app.theme
-                .status_style(StatusKind::Warning)
-                .add_modifier(Modifier::UNDERLINED),
-        )));
-
+        push_heading!("RETRY");
         if let Some(next_retry) = &job.next_retry_at
             && let Ok(target) = chrono::DateTime::parse_from_rfc3339(next_retry)
         {
@@ -1128,7 +1344,7 @@ fn draw_job_details(
             let diff = target.signed_duration_since(now).num_seconds();
             let wait_msg = if diff > 0 {
                 format!(
-                    "Retrying in {} seconds (Attempt {}/{})",
+                    "Retrying in {}s (attempt {}/{})",
                     diff,
                     job.retry_count + 1,
                     5
@@ -1136,55 +1352,70 @@ fn draw_job_details(
             } else {
                 "Retrying momentarily...".to_string()
             };
-
-            text.push(Line::from(vec![
-                Span::styled("Status: ", app.theme.highlight_style()),
-                Span::styled(wait_msg, app.theme.status_style(StatusKind::Warning)),
-            ]));
+            push_field!(
+                "State",
+                &wait_msg,
+                app.theme.status_style(StatusKind::Warning)
+            );
         }
     }
 
-    text.push(Line::from(""));
-    text.push(Line::from(Span::styled(
-        "DATA INTEGRITY (SHA256):",
-        app.theme
-            .highlight_style()
-            .add_modifier(Modifier::UNDERLINED),
-    )));
+    push_heading!("INTEGRITY");
+    push_field!(
+        "Verdict",
+        checksum_verdict.0,
+        app.theme.status_style(checksum_verdict.1),
+    );
+    push_field!("Remote", remote_checksum, remote_style);
+    if !compact_details {
+        push_field!("Local", local_checksum, app.theme.text_style());
+    }
 
-    let local_checksum = job.checksum.as_deref().unwrap_or("Calculating...");
-    let remote_checksum = job.remote_checksum.as_deref().unwrap_or("Not uploaded");
+    if !compact_details || error != "none" {
+        push_heading!("ERROR");
+        push_field!(
+            "Message",
+            error,
+            if error != "none" {
+                app.theme.status_style(StatusKind::Error)
+            } else {
+                app.theme.text_style()
+            },
+        );
+    }
 
-    let remote_style = if job.status == "complete" && job.remote_checksum.is_some() {
-        app.theme.status_style(StatusKind::Success)
-    } else {
-        app.theme.text_style()
-    };
-
-    text.push(Line::from(vec![
-        Span::styled("Local:  ", app.theme.highlight_style()),
-        Span::styled(local_checksum, app.theme.text_style()),
-    ]));
-    text.push(Line::from(vec![
-        Span::styled("Remote: ", app.theme.highlight_style()),
-        Span::styled(remote_checksum, remote_style),
-    ]));
-
-    text.push(Line::from(""));
-    text.push(Line::from(Span::styled(
-        "DETAILS / ERRORS:",
-        app.theme
-            .highlight_style()
-            .add_modifier(Modifier::UNDERLINED),
-    )));
-    text.push(Line::from(Span::styled(
-        error,
-        if error != "none" {
-            app.theme.status_style(StatusKind::Error)
+    if compact_details {
+        push_heading!("LATEST EVENT");
+        if let Some(event) = recent_events.first() {
+            let when = format_relative_time(&event.created_at);
+            let msg = truncate_with_ellipsis(&event.message, value_max.saturating_sub(14).max(12));
+            text.push(Line::from(vec![
+                Span::styled(format!("{when:>8} "), app.theme.muted_style()),
+                Span::styled(msg, app.theme.text_style()),
+            ]));
         } else {
-            app.theme.text_style()
-        },
-    )));
+            push_field!("Events", "none", app.theme.text_style());
+        }
+    } else {
+        push_heading!("RECENT EVENTS");
+        if recent_events.is_empty() {
+            push_field!("Events", "none", app.theme.text_style());
+        } else {
+            for event in &recent_events {
+                let when = format_relative_time(&event.created_at);
+                let msg =
+                    truncate_with_ellipsis(&event.message, value_max.saturating_sub(20).max(12));
+                text.push(Line::from(vec![
+                    Span::styled(format!("{when:>8} "), app.theme.muted_style()),
+                    Span::styled(
+                        format!("{:<10}", event.event_type),
+                        app.theme.highlight_style(),
+                    ),
+                    Span::styled(msg, app.theme.text_style()),
+                ]));
+            }
+        }
+    }
 
     let p = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
     f.render_widget(p, area);

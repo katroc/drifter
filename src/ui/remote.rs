@@ -10,6 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Row, Table, TableState},
 };
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_remote(
     f: &mut Frame,
     app: &App,

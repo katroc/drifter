@@ -38,6 +38,13 @@ pub struct JobRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct JobEventRow {
+    pub event_type: String,
+    pub message: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct UploadPart {
     pub part_number: i64,
@@ -494,6 +501,7 @@ pub fn get_endpoint_profile(
     }
 }
 
+#[allow(dead_code)]
 pub fn get_endpoint_profile_by_name(
     conn: &Connection,
     name: &str,
@@ -1220,6 +1228,29 @@ pub fn insert_event(conn: &Connection, job_id: i64, event_type: &str, message: &
         params![job_id, event_type, message, now],
     )?;
     Ok(())
+}
+
+pub fn list_job_events(conn: &Connection, job_id: i64, limit: usize) -> Result<Vec<JobEventRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT event_type, message, created_at
+         FROM events
+         WHERE job_id = ?
+         ORDER BY id DESC
+         LIMIT ?",
+    )?;
+    let rows = stmt.query_map(params![job_id, limit as i64], |row| {
+        Ok(JobEventRow {
+            event_type: row.get(0)?,
+            message: row.get(1)?,
+            created_at: row.get(2)?,
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 pub fn update_scan_status(

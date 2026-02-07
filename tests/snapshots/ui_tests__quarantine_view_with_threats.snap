@@ -3,39 +3,39 @@ source: tests/ui_tests.rs
 expression: output
 ---
 ╭ Navigation ───╭ Quarantine Zone ─────────────────────────╮ Job #1 Details ───────────────────────────────────────────╮
-│  Transfers    │File                 Threat Status  Time  │Status: quarantined                                        │
-│▌ Quarantine   │malware.exe          -      Detecte 2h ago│Path:   /uploads/malware.exe                               │
-│  Logs         │                                          │Session: test-session                                      │
-│  Settings     │                                          │Report:  scan_report_test-session.txt                      │
-│               │                                          │Size:   488.28 KB                                          │
-│               │                                          │Scan:   infected                                           │
-│               │                                          │Upload: none                                               │
-│               │                                          │Scan Time:   500ms                                         │
+│  Transfers    │File                 Threat Status  Time  │SUMMARY                                                    │
+│▌ Quarantine   │malware.exe          -      Detecte 23d ag│Result     : quarantined                                   │
+│  Logs         │                                          │Operation  : Transfer                                      │
+│  Settings     │                                          │Size       : 488.28 KB                                     │
+│               │                                          │Avg Rate   : -                                             │
+│               │                                          │Session    : test-session                                  │
+│               │                                          │Started    : 2026-01-15T10:30:00+00:00                     │
+│               │                                          │Finished   : -                                             │
 │               │                                          │                                                           │
-│               │                                          │DATA INTEGRITY (SHA256):                                   │
-│               │                                          │Local:  Calculating...                                     │
-│               │                                          │Remote: Not uploaded                                       │
+│               │                                          │TRANSFER                                                   │
+│               │                                          │Source     : /uploads/malware.exe                          │
+│               │                                          │Dest       : /uploads/malware.exe                          │
+│               │                                          │Source Ep  : -                                             │
+│               │                                          │Dest Ep    : -                                             │
+│               │                                          │Upload     : none                                          │
+│               │                                          │Scan       : infected                                      │
 │               │                                          │                                                           │
-│               │                                          │DETAILS / ERRORS:                                          │
-│               │                                          │Infected: Win.Trojan.Agent-123456                          │
+│               │                                          │POLICY                                                     │
+│               │                                          │Conflict   : -                                             │
+│               │                                          │Scan Mode  : -                                             │
+│               │                                          │Scan Time  : 500ms                                         │
+│               │                                          │Retry      : attempt 1                                     │
 │               │                                          │                                                           │
+│               │                                          │INTEGRITY                                                  │
+│               │                                          │Verdict    : Not Available                                 │
+│               │                                          │Remote     : Not uploaded                                  │
+│               │                                          │Local      : Calculating...                                │
 │               │                                          │                                                           │
+│               │                                          │ERROR                                                      │
+│               │                                          │Message    : Infected: Win.Trojan.Agent-123456             │
 │               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
-│               │                                          │                                                           │
+│               │                                          │RECENT EVENTS                                              │
+│               │                                          │Events     : none                                          │
 │               │                                          │───────────────────────────────────────────────────────────╯
 │               │                                          │ Metrics                                                   │
 │               │                                          │Disk Read:  0 B               Net Down: 0 B                │

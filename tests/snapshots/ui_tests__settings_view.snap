@@ -3,10 +3,16 @@ source: tests/ui_tests.rs
 expression: output
 ---
 ╭ Navigation ───╭ Configuration ───────────────────────────╮ History [All] ────────────────────────────────────────────╮
-│  Transfers    │ S3 Storage    │╭S3 Endpoint─────────────╮│File                 Status           Size       Time      │
-│  Quarantine   │ Scanner       ││                        ││                                                           │
+│  Transfers    │ S3 Storage    │╭Profile─────────────────╮│File                     Result   Route    Size    Duration│
+│  Quarantine   │ Scanner       ││Unconfigured            ││                                                           │
 │  Logs         │ Performance   │╰────────────────────────╯│                                                           │
-│▌ Settings     │ Theme         │╭S3 Bucket───────────────╮│                                                           │
+│▌ Settings     │ Theme         │╭Profile Name────────────╮│                                                           │
+│               │               ││Unconfigured            ││                                                           │
+│               │               │╰────────────────────────╯│                                                           │
+│               │               │╭S3 Endpoint─────────────╮│                                                           │
+│               │               ││                        ││                                                           │
+│               │               │╰────────────────────────╯│                                                           │
+│               │               │╭S3 Bucket───────────────╮│                                                           │
 │               │               ││                        ││                                                           │
 │               │               │╰────────────────────────╯│                                                           │
 │               │               │╭S3 Region───────────────╮│                                                           │
@@ -21,12 +27,6 @@ expression: output
 │               │               │╭S3 Secret Key───────────╮│                                                           │
 │               │               ││*******                 ││                                                           │
 │               │               │╰────────────────────────╯│                                                           │
-│               │               │                          │                                                           │
-│               │               │                          │                                                           │
-│               │               │                          │                                                           │
-│               │               │                          │                                                           │
-│               │               │                          │                                                           │
-│               │               │                          │                                                           │
 │               │               │                          │                                                           │
 │               │               │                          │                                                           │
 │               │               │                          │                                                           │
