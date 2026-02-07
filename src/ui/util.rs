@@ -166,7 +166,7 @@ pub fn status_kind(status: &str) -> StatusKind {
         "complete" => StatusKind::Success,
         "quarantined" | "failed" => StatusKind::Error,
         "quarantined_removed" => StatusKind::Info,
-        "uploading" | "scanning" => StatusKind::Info,
+        "uploading" | "transferring" | "scanning" => StatusKind::Info,
         _ => StatusKind::Warning,
     }
 }

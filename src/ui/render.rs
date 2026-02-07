@@ -64,6 +64,73 @@ fn draw_shadow(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+fn transfer_phase_label(app: &App, job: &crate::db::JobRow) -> String {
+    if job.status == "uploading" || job.status == "transferring" {
+        return match job.upload_status.as_deref() {
+            Some("copying") => "copying".to_string(),
+            Some("downloading") => "downloading".to_string(),
+            _ => {
+                if job.status == "transferring" {
+                    "transferring".to_string()
+                } else {
+                    "uploading".to_string()
+                }
+            }
+        };
+    }
+
+    if job.status == "complete" {
+        return match app.transfer_direction_for_job(job.id) {
+            Some("s3_to_s3") => "copied".to_string(),
+            Some("s3_to_local") => "downloaded".to_string(),
+            Some("local_to_s3") => "uploaded".to_string(),
+            _ => "complete".to_string(),
+        };
+    }
+
+    job.status.clone()
+}
+
+fn history_status_label(app: &App, job: &crate::db::JobRow) -> String {
+    match job.status.as_str() {
+        "quarantined" => {
+            if let Some(err) = &job.error {
+                if let Some(name) = err.strip_prefix("Infected: ") {
+                    return truncate_with_ellipsis(name, 15);
+                }
+            }
+            "Threat Detected".to_string()
+        }
+        "quarantined_removed" => "Threat Removed".to_string(),
+        "complete" => match app.transfer_direction_for_job(job.id) {
+            Some("s3_to_s3") => "Copied".to_string(),
+            Some("s3_to_local") => "Downloaded".to_string(),
+            Some("local_to_s3") => "Uploaded".to_string(),
+            _ => "Done".to_string(),
+        },
+        other => other.to_string(),
+    }
+}
+
+fn transfer_route_label(direction: Option<&str>) -> Option<&'static str> {
+    match direction {
+        Some("local_to_s3") => Some("Local -> S3"),
+        Some("s3_to_local") => Some("S3 -> Local"),
+        Some("s3_to_s3") => Some("S3 -> S3 (Server-Side Copy)"),
+        _ => None,
+    }
+}
+
+fn transfer_field_labels(direction: Option<&str>, phase: &str) -> (&'static str, &'static str) {
+    if phase == "copying" || direction == Some("s3_to_s3") {
+        return ("Copy:   ", "Copy Time:   ");
+    }
+    if phase == "downloading" || direction == Some("s3_to_local") {
+        return ("Download:", "Download Time:");
+    }
+    ("Upload: ", "Upload Time: ")
+}
+
 pub fn ui(f: &mut Frame, app: &App) {
     if app.show_wizard {
         draw_wizard(f, app);
@@ -243,12 +310,16 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
 
     match app.transfer_direction {
         crate::core::transfer::TransferDirection::S3ToLocal => {
+            let source_label = format!(
+                "Remote Source ({})",
+                app.endpoint_profile_name(app.transfer_source_endpoint_id)
+            );
             crate::ui::remote::render_remote(
                 f,
                 app,
                 horizontal_chunks[0],
                 &app.theme,
-                "Remote Source (S3)",
+                &source_label,
                 true,
                 &app.s3_objects,
                 &app.remote_current_path,
@@ -260,12 +331,20 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
             draw_browser(f, app, horizontal_chunks[1], "Local Destination", false);
         }
         crate::core::transfer::TransferDirection::S3ToS3 => {
+            let source_label = format!(
+                "Remote Source ({})",
+                app.endpoint_profile_name(app.transfer_source_endpoint_id)
+            );
+            let destination_label = format!(
+                "Remote Destination ({})",
+                app.endpoint_profile_name(app.transfer_destination_endpoint_id)
+            );
             crate::ui::remote::render_remote(
                 f,
                 app,
                 horizontal_chunks[0],
                 &app.theme,
-                "Remote Source (Primary S3)",
+                &source_label,
                 true,
                 &app.s3_objects,
                 &app.remote_current_path,
@@ -279,7 +358,7 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
                 app,
                 horizontal_chunks[1],
                 &app.theme,
-                "Remote Destination (Secondary S3)",
+                &destination_label,
                 false,
                 &app.s3_objects_secondary,
                 &app.remote_secondary_current_path,
@@ -290,13 +369,17 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
             );
         }
         crate::core::transfer::TransferDirection::LocalToS3 => {
+            let destination_label = format!(
+                "Remote Destination ({})",
+                app.endpoint_profile_name(app.transfer_destination_endpoint_id)
+            );
             draw_browser(f, app, horizontal_chunks[0], "Local Source", true);
             crate::ui::remote::render_remote(
                 f,
                 app,
                 horizontal_chunks[1],
                 &app.theme,
-                "Remote Destination (S3)",
+                &destination_label,
                 false,
                 &app.s3_objects,
                 &app.remote_current_path,
@@ -660,10 +743,15 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
 
             if let Some(job_idx) = item.index_in_jobs {
                 let job = &app.jobs[job_idx];
+                let status_label = transfer_phase_label(app, job);
 
                 let p_str = {
-                    if job.status == "uploading" {
-                        {
+                    if job.status == "uploading" || job.status == "transferring" {
+                        if status_label == "copying" {
+                            "SERVER COPY".to_string()
+                        } else if status_label == "downloading" {
+                            "DOWNLOADING".to_string()
+                        } else {
                             let p_map = &app.cached_progress;
                             let entry = p_map.get(&job.id).cloned();
                             if let Some(info) = entry {
@@ -713,7 +801,7 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
 
                 Row::new(vec![
                     Cell::from(display_name),
-                    Cell::from(format!("{}{}", p_indicator, job.status)).style(status_style),
+                    Cell::from(format!("{}{}", p_indicator, status_label)).style(status_style),
                     Cell::from(format_bytes(job.size_bytes as u64)),
                     Cell::from(p_str).style(progress_style),
                     Cell::from(time_str),
@@ -845,24 +933,7 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
 
             if let Some(job_idx) = item.index_in_jobs {
                 let job = &app.history[job_idx];
-
-                let status_str = match job.status.as_str() {
-                    "quarantined" => {
-                        if let Some(err) = &job.error {
-                            if let Some(name) = err.strip_prefix("Infected: ") {
-                                // Extract virus name, maybe truncate if too long
-                                truncate_with_ellipsis(name, 15)
-                            } else {
-                                "Threat Detected".to_string()
-                            }
-                        } else {
-                            "Threat Detected".to_string()
-                        }
-                    }
-                    "quarantined_removed" => "Threat Removed".to_string(),
-                    "complete" => "Done".to_string(),
-                    s => s.to_string(),
-                };
+                let status_str = history_status_label(app, job);
 
                 let time_str = format_relative_time(&job.created_at);
 
@@ -934,12 +1005,15 @@ fn draw_job_details(
     let scan_status = job.scan_status.as_deref().unwrap_or("none");
     let upload_status = job.upload_status.as_deref().unwrap_or("none");
     let error = job.error.as_deref().unwrap_or("none");
+    let phase_label = transfer_phase_label(app, job);
+    let transfer_direction = app.transfer_direction_for_job(job.id);
+    let (transfer_label, duration_label) = transfer_field_labels(transfer_direction, &phase_label);
 
     let mut text = vec![
         Line::from(vec![
             Span::styled("Status: ", app.theme.highlight_style()),
             Span::styled(
-                job.status.clone(),
+                phase_label.clone(),
                 app.theme.status_style(status_kind(job.status.as_str())),
             ),
         ]),
@@ -967,10 +1041,20 @@ fn draw_job_details(
             Span::styled(scan_status, app.theme.text_style()),
         ]),
         Line::from(vec![
-            Span::styled("Upload: ", app.theme.highlight_style()),
+            Span::styled(transfer_label, app.theme.highlight_style()),
             Span::styled(upload_status, app.theme.text_style()),
         ]),
     ];
+
+    if let Some(route) = transfer_route_label(transfer_direction) {
+        text.insert(
+            1,
+            Line::from(vec![
+                Span::styled("Route:  ", app.theme.highlight_style()),
+                Span::styled(route, app.theme.text_style()),
+            ]),
+        );
+    }
 
     if let Some(ms) = job.scan_duration_ms {
         text.push(Line::from(vec![
@@ -981,13 +1065,13 @@ fn draw_job_details(
 
     if let Some(ms) = job.upload_duration_ms {
         text.push(Line::from(vec![
-            Span::styled("Upload Time: ", app.theme.highlight_style()),
+            Span::styled(duration_label, app.theme.highlight_style()),
             Span::styled(format_duration_ms(ms), app.theme.text_style()),
         ]));
     }
 
     // Show multipart upload progress if job is uploading
-    if job.status == "uploading" {
+    if job.status == "uploading" && phase_label == "uploading" {
         {
             let progress_map = &app.cached_progress;
             if let Some(info_ref) = progress_map.get(&job.id) {
@@ -1268,6 +1352,7 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
     let fields = match app.settings.active_category {
         SettingsCategory::S3 => vec![
             ("Profile", app.settings.selected_s3_profile_label()),
+            ("Profile Name", app.settings.selected_s3_profile_name()),
             ("S3 Endpoint", app.settings.selected_s3_endpoint()),
             ("S3 Bucket", app.settings.selected_s3_bucket()),
             ("S3 Region", app.settings.selected_s3_region()),
@@ -1276,7 +1361,7 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
             (
                 "S3 Secret Key",
                 app.settings.selected_s3_secret_key_display(
-                    app.settings.editing && app.settings.selected_field == 6,
+                    app.settings.editing && app.settings.selected_field == 7,
                 ),
             ),
         ],

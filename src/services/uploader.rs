@@ -147,6 +147,42 @@ impl Uploader {
         Some(format!("{}/", parent.trim_end_matches('/')))
     }
 
+    fn normalize_endpoint_url(endpoint: Option<&str>) -> Option<String> {
+        let raw = endpoint?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(trimmed.trim_end_matches('/').to_ascii_lowercase())
+    }
+
+    pub(crate) fn supports_server_side_copy(
+        source_endpoint: &S3EndpointConfig,
+        destination_endpoint: &S3EndpointConfig,
+    ) -> bool {
+        Self::normalize_endpoint_url(source_endpoint.endpoint.as_deref())
+            == Self::normalize_endpoint_url(destination_endpoint.endpoint.as_deref())
+    }
+
+    fn encode_copy_source_key(key: &str) -> String {
+        let mut encoded = String::with_capacity(key.len());
+        for &b in key.as_bytes() {
+            let keep =
+                b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'/' | b'!');
+            if keep {
+                encoded.push(char::from(b));
+            } else {
+                encoded.push('%');
+                encoded.push_str(&format!("{:02X}", b));
+            }
+        }
+        encoded
+    }
+
+    fn format_copy_source(bucket: &str, key: &str) -> String {
+        format!("{bucket}/{}", Self::encode_copy_source_key(key))
+    }
+
     fn apply_sse_create_multipart(
         mut req: aws_sdk_s3::operation::create_multipart_upload::builders::CreateMultipartUploadFluentBuilder,
         config: &Config,
@@ -470,6 +506,19 @@ impl Uploader {
             anyhow::bail!("destination object key is empty");
         }
 
+        if !Self::supports_server_side_copy(source_endpoint, destination_endpoint) {
+            anyhow::bail!(
+                "s3_to_s3 server-side copy requires matching S3 endpoint URLs; source endpoint '{}' and destination endpoint '{}' differ",
+                source_endpoint.endpoint.as_deref().unwrap_or("aws-default"),
+                destination_endpoint
+                    .endpoint
+                    .as_deref()
+                    .unwrap_or("aws-default")
+            );
+        }
+
+        let copy_source = Self::format_copy_source(&source_bucket, &resolved_source_key);
+
         let head = source_client
             .head_object()
             .bucket(&source_bucket)
@@ -486,30 +535,20 @@ impl Uploader {
 
         // PutObject can only store objects up to 5GiB.
         if source_size <= 5 * 1024 * 1024 * 1024 {
-            let source_object = source_client
-                .get_object()
-                .bucket(&source_bucket)
-                .key(&resolved_source_key)
-                .send()
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to read source object s3://{}/{}",
-                        source_bucket, resolved_source_key
-                    )
-                })?;
-
             destination_client
-                .put_object()
+                .copy_object()
                 .bucket(&destination_bucket)
                 .key(&resolved_destination_key)
-                .body(source_object.body)
+                .copy_source(&copy_source)
                 .send()
                 .await
                 .with_context(|| {
                     format!(
-                        "Failed to write destination object s3://{}/{}",
-                        destination_bucket, resolved_destination_key
+                        "Failed to copy source object s3://{}/{} to s3://{}/{}",
+                        source_bucket,
+                        resolved_source_key,
+                        destination_bucket,
+                        resolved_destination_key
                     )
                 })?;
             return Ok(());
@@ -546,47 +585,28 @@ impl Uploader {
             while offset < source_size {
                 let end = std::cmp::min(offset + part_size - 1, source_size - 1);
                 let range_header = format!("bytes={offset}-{end}");
-                let part_resp = source_client
-                    .get_object()
-                    .bucket(&source_bucket)
-                    .key(&resolved_source_key)
-                    .range(range_header)
-                    .send()
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Failed to fetch source range for s3://{}/{}",
-                            source_bucket, resolved_source_key
-                        )
-                    })?;
-
-                let bytes = part_resp
-                    .body
-                    .collect()
-                    .await
-                    .context("Failed to read source range body")?
-                    .into_bytes();
-
-                let upload_part = destination_client
-                    .upload_part()
+                let part_resp = destination_client
+                    .upload_part_copy()
                     .bucket(&destination_bucket)
                     .key(&resolved_destination_key)
                     .upload_id(&upload_id)
                     .part_number(part_number)
-                    .body(aws_sdk_s3::primitives::ByteStream::from(bytes))
+                    .copy_source(&copy_source)
+                    .copy_source_range(range_header)
                     .send()
                     .await
                     .with_context(|| {
                         format!(
-                            "Failed to upload multipart part {} to s3://{}/{}",
+                            "Failed to copy multipart part {} to s3://{}/{}",
                             part_number, destination_bucket, resolved_destination_key
                         )
                     })?;
 
-                let etag = upload_part
-                    .e_tag()
+                let etag = part_resp
+                    .copy_part_result()
+                    .and_then(|result| result.e_tag())
                     .map(std::string::ToString::to_string)
-                    .context("multipart upload part missing ETag")?;
+                    .context("multipart copy part missing ETag")?;
                 completed_parts.push(
                     CompletedPart::builder()
                         .part_number(part_number)
@@ -1395,6 +1415,57 @@ mod tests {
     fn test_parent_folder_marker_key_root_file() {
         let marker = Uploader::parent_folder_marker_key("file.txt");
         assert_eq!(marker, None);
+    }
+
+    #[test]
+    fn test_supports_server_side_copy_when_endpoints_match() {
+        let source = S3EndpointConfig {
+            bucket: "source".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            endpoint: Some("https://s3.example.com/".to_string()),
+            access_key: None,
+            secret_key: None,
+        };
+        let destination = S3EndpointConfig {
+            bucket: "destination".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            endpoint: Some("https://s3.example.com".to_string()),
+            access_key: None,
+            secret_key: None,
+        };
+        assert!(Uploader::supports_server_side_copy(&source, &destination));
+    }
+
+    #[test]
+    fn test_supports_server_side_copy_when_endpoints_differ() {
+        let source = S3EndpointConfig {
+            bucket: "source".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            endpoint: Some("https://s3-a.example.com".to_string()),
+            access_key: None,
+            secret_key: None,
+        };
+        let destination = S3EndpointConfig {
+            bucket: "destination".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            endpoint: Some("https://s3-b.example.com".to_string()),
+            access_key: None,
+            secret_key: None,
+        };
+        assert!(!Uploader::supports_server_side_copy(&source, &destination));
+    }
+
+    #[test]
+    fn test_format_copy_source_encodes_key() {
+        let formatted = Uploader::format_copy_source("my-bucket", "folder/a b+lambda-λ.txt");
+        assert_eq!(
+            formatted,
+            "my-bucket/folder/a%20b%2Blambda-%CE%BB.txt".to_string()
+        );
     }
 
     // --- Part Size Calculation Tests ---

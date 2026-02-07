@@ -11,8 +11,13 @@ use crate::components::file_picker::FilePicker;
 use crate::components::wizard::WizardState;
 use crate::core::config::Config;
 use crate::core::metrics::{HostMetricsSnapshot, MetricsCollector};
+use crate::core::transfer::EndpointKind;
 use crate::core::transfer::TransferDirection;
-use crate::db::{JobRow, list_active_jobs, list_history_jobs, list_quarantined_jobs};
+use crate::db::{
+    EndpointProfileRow, JobRow, JobTransferMetadata, get_default_destination_endpoint_profile,
+    get_default_source_endpoint_profile, get_job_transfer_metadata, list_active_jobs,
+    list_endpoint_profiles, list_history_jobs, list_quarantined_jobs,
+};
 use crate::services::uploader::S3Object;
 use crate::utils::lock_mutex;
 
@@ -88,8 +93,8 @@ pub enum InputMode {
 #[derive(Debug)]
 pub enum AppEvent {
     Notification(String),
-    RemoteFileList(String, Vec<S3Object>), // (path, objects)
-    RemoteFileListSecondary(String, Vec<S3Object>), // (path, objects)
+    RemoteFileList(Option<i64>, String, Vec<S3Object>), // (endpoint_id, path, objects)
+    RemoteFileListSecondary(Option<i64>, String, Vec<S3Object>), // (endpoint_id, path, objects)
     LogLine(String),
     RefreshRemote,
 }
@@ -137,6 +142,7 @@ use crate::coordinator::ProgressInfo;
 pub struct App {
     pub jobs: Vec<JobRow>,
     pub history: Vec<JobRow>,
+    pub job_transfer_metadata: HashMap<i64, JobTransferMetadata>,
     pub selected: usize,
     pub selected_history: usize,
     pub quarantine: Vec<JobRow>,
@@ -157,6 +163,9 @@ pub struct App {
     pub remote_secondary_request_pending: Option<String>,
     pub remote_secondary_loading: bool,
     pub transfer_direction: TransferDirection,
+    pub s3_profiles: Vec<EndpointProfileRow>,
+    pub transfer_source_endpoint_id: Option<i64>,
+    pub transfer_destination_endpoint_id: Option<i64>,
 
     pub last_refresh: Instant,
     pub status_message: String,
@@ -255,6 +264,7 @@ impl App {
         let mut app = Self {
             jobs: Vec::new(),
             history: Vec::new(),
+            job_transfer_metadata: HashMap::new(),
             quarantine: Vec::new(),
             selected: 0,
             selected_history: 0,
@@ -275,6 +285,9 @@ impl App {
             remote_secondary_request_pending: None,
             remote_secondary_loading: false,
             transfer_direction: TransferDirection::LocalToS3,
+            s3_profiles: Vec::new(),
+            transfer_source_endpoint_id: None,
+            transfer_destination_endpoint_id: None,
 
             last_refresh: Instant::now() - Duration::from_secs(5),
             status_message: "Ready".to_string(),
@@ -340,6 +353,7 @@ impl App {
 
         if let Ok(conn_guard) = lock_mutex(&conn) {
             let _ = app.settings.load_secondary_profile_from_db(&conn_guard);
+            let _ = app.refresh_s3_profiles(&conn_guard);
         }
 
         if let Some(watch_dir) = app
@@ -401,6 +415,105 @@ impl App {
         };
     }
 
+    fn contains_s3_profile_id(&self, id: Option<i64>) -> bool {
+        let Some(id) = id else {
+            return false;
+        };
+        self.s3_profiles.iter().any(|profile| profile.id == id)
+    }
+
+    pub fn refresh_s3_profiles(&mut self, conn: &Connection) -> Result<()> {
+        self.s3_profiles = list_endpoint_profiles(conn)?
+            .into_iter()
+            .filter(|profile| profile.kind == EndpointKind::S3)
+            .collect();
+
+        let first_s3 = self.s3_profiles.first().map(|profile| profile.id);
+        let default_source_s3 = get_default_source_endpoint_profile(conn)?
+            .filter(|profile| profile.kind == EndpointKind::S3)
+            .map(|profile| profile.id);
+        let default_destination_s3 = get_default_destination_endpoint_profile(conn)?
+            .filter(|profile| profile.kind == EndpointKind::S3)
+            .map(|profile| profile.id);
+
+        if !self.contains_s3_profile_id(self.transfer_source_endpoint_id) {
+            self.transfer_source_endpoint_id =
+                default_source_s3.or(default_destination_s3).or(first_s3);
+        }
+        if !self.contains_s3_profile_id(self.transfer_destination_endpoint_id) {
+            self.transfer_destination_endpoint_id =
+                default_destination_s3.or(default_source_s3).or(first_s3);
+        }
+
+        if self.s3_profiles.is_empty() {
+            self.transfer_source_endpoint_id = None;
+            self.transfer_destination_endpoint_id = None;
+        }
+
+        Ok(())
+    }
+
+    fn cycle_profile_id(&self, current: Option<i64>, forward: bool) -> Option<i64> {
+        if self.s3_profiles.is_empty() {
+            return None;
+        }
+
+        let current_idx = current.and_then(|id| self.s3_profiles.iter().position(|p| p.id == id));
+        let idx = match (current_idx, forward) {
+            (Some(i), true) => (i + 1) % self.s3_profiles.len(),
+            (Some(i), false) => (i + self.s3_profiles.len() - 1) % self.s3_profiles.len(),
+            (None, _) => 0,
+        };
+        Some(self.s3_profiles[idx].id)
+    }
+
+    pub fn endpoint_profile_name(&self, endpoint_id: Option<i64>) -> String {
+        let Some(endpoint_id) = endpoint_id else {
+            return "Unconfigured".to_string();
+        };
+        self.s3_profiles
+            .iter()
+            .find(|profile| profile.id == endpoint_id)
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| format!("Profile #{endpoint_id}"))
+    }
+
+    pub fn primary_remote_endpoint_id(&self) -> Option<i64> {
+        match self.transfer_direction {
+            TransferDirection::LocalToS3 => self.transfer_destination_endpoint_id,
+            TransferDirection::S3ToLocal | TransferDirection::S3ToS3 => {
+                self.transfer_source_endpoint_id
+            }
+        }
+    }
+
+    pub fn secondary_remote_endpoint_id(&self) -> Option<i64> {
+        if self.transfer_direction == TransferDirection::S3ToS3 {
+            self.transfer_destination_endpoint_id
+        } else {
+            None
+        }
+    }
+
+    pub fn cycle_primary_remote_endpoint(&mut self, forward: bool) -> Option<String> {
+        let next = self.cycle_profile_id(self.primary_remote_endpoint_id(), forward);
+        match self.transfer_direction {
+            TransferDirection::LocalToS3 => {
+                self.transfer_destination_endpoint_id = next;
+            }
+            TransferDirection::S3ToLocal | TransferDirection::S3ToS3 => {
+                self.transfer_source_endpoint_id = next;
+            }
+        }
+        Some(self.endpoint_profile_name(next))
+    }
+
+    pub fn cycle_secondary_remote_endpoint(&mut self, forward: bool) -> Option<String> {
+        let next = self.cycle_profile_id(self.transfer_destination_endpoint_id, forward);
+        self.transfer_destination_endpoint_id = next;
+        Some(self.endpoint_profile_name(next))
+    }
+
     pub fn refresh_jobs(&mut self, conn: &Connection) -> Result<()> {
         // Use trace! to avoid spamming logs every tick
         // tracing::trace!("Refreshing jobs");
@@ -412,6 +525,7 @@ impl App {
         };
         self.history = list_history_jobs(conn, 100, filter_str)?;
         self.quarantine = list_quarantined_jobs(conn, 100)?;
+        self.refresh_transfer_metadata(conn);
 
         let prev_visual_jobs_len = self.visual_jobs.len();
         self.rebuild_visual_lists();
@@ -434,6 +548,46 @@ impl App {
 
         self.last_refresh = Instant::now();
         Ok(())
+    }
+
+    fn refresh_transfer_metadata(&mut self, conn: &Connection) {
+        self.job_transfer_metadata.clear();
+
+        let mut job_ids = HashSet::new();
+        for job in self
+            .jobs
+            .iter()
+            .chain(self.history.iter())
+            .chain(self.quarantine.iter())
+        {
+            job_ids.insert(job.id);
+        }
+
+        for job_id in job_ids {
+            match get_job_transfer_metadata(conn, job_id) {
+                Ok(Some(metadata)) => {
+                    self.job_transfer_metadata.insert(job_id, metadata);
+                }
+                Ok(None) => {}
+                Err(e)
+                    if e.to_string().contains("no such column")
+                        || e.to_string().contains("no such table") =>
+                {
+                    self.job_transfer_metadata.clear();
+                    return;
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    pub fn transfer_metadata_for_job(&self, job_id: i64) -> Option<&JobTransferMetadata> {
+        self.job_transfer_metadata.get(&job_id)
+    }
+
+    pub fn transfer_direction_for_job(&self, job_id: i64) -> Option<&str> {
+        self.transfer_metadata_for_job(job_id)
+            .and_then(|metadata| metadata.transfer_direction.as_deref())
     }
 
     pub fn rebuild_visual_lists(&mut self) {
@@ -929,6 +1083,7 @@ impl App {
                 self.status_message = format!("Resumed job {}", job_id);
             }
         } else if status == "uploading"
+            || status == "transferring"
             || status == "scanning"
             || status == "queued"
             || status == "staged"

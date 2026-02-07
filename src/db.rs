@@ -580,6 +580,34 @@ pub fn update_endpoint_profile(
     Ok(())
 }
 
+pub fn rename_endpoint_profile(conn: &Connection, endpoint_id: i64, name: &str) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE endpoint_profiles
+         SET name = ?, updated_at = ?
+         WHERE id = ?",
+        params![name, now, endpoint_id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_endpoint_profile(conn: &Connection, endpoint_id: i64) -> Result<()> {
+    let mut stmt = conn.prepare("SELECT kind FROM endpoint_profiles WHERE id = ?")?;
+    let mut rows = stmt.query(params![endpoint_id])?;
+    if let Some(row) = rows.next()? {
+        let kind_raw: String = row.get(0)?;
+        if parse_endpoint_kind(&kind_raw)? == EndpointKind::Local {
+            anyhow::bail!("cannot delete local endpoint profile");
+        }
+    }
+
+    conn.execute(
+        "DELETE FROM endpoint_profiles WHERE id = ?",
+        params![endpoint_id],
+    )?;
+    Ok(())
+}
+
 pub fn sync_default_destination_s3_profile(
     conn: &Connection,
     bucket: Option<&str>,
@@ -1127,10 +1155,10 @@ pub fn cancel_job(conn: &Connection, job_id: i64) -> Result<()> {
 }
 
 // Clear history based on filter (All, Complete, Quarantined)
-// Always excludes "active" jobs (pending, scanning, uploading)
+// Always excludes "active" jobs (pending, scanning, uploading, transferring)
 pub fn clear_history(conn: &Connection, filter: Option<&str>) -> Result<()> {
     // 1. Identify IDs to delete
-    let mut query = "SELECT id FROM jobs WHERE status NOT IN ('pending', 'scanning', 'uploading', 'failed_retryable')".to_string();
+    let mut query = "SELECT id FROM jobs WHERE status NOT IN ('pending', 'scanning', 'uploading', 'transferring', 'failed_retryable')".to_string();
 
     match filter {
         Some("Quarantined") => {

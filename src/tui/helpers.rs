@@ -1,8 +1,10 @@
 use crate::app::state::{App, AppEvent, LayoutTarget, RemoteTarget};
 use crate::core::config::Config;
+use crate::core::transfer::EndpointKind;
 use crate::db;
 use crate::services::uploader::{S3Object, Uploader};
 use crate::utils::lock_mutex;
+use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,6 +13,73 @@ use tracing::warn;
 use uuid::Uuid;
 
 const REMOTE_CACHE_TTL_SECS: u64 = 30;
+
+fn endpoint_config_string(config: &serde_json::Value, key: &str) -> Option<String> {
+    config
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(std::string::ToString::to_string)
+}
+
+fn apply_endpoint_to_config(
+    cfg: &mut Config,
+    profile: &db::EndpointProfileRow,
+    secret: Option<String>,
+) {
+    cfg.s3_bucket = endpoint_config_string(&profile.config, "bucket");
+    cfg.s3_prefix = endpoint_config_string(&profile.config, "prefix");
+    cfg.s3_region = endpoint_config_string(&profile.config, "region");
+    cfg.s3_endpoint = endpoint_config_string(&profile.config, "endpoint");
+    cfg.s3_access_key = endpoint_config_string(&profile.config, "access_key");
+    cfg.s3_secret_key = secret;
+}
+
+pub(crate) async fn config_for_endpoint(app: &App, endpoint_id: Option<i64>) -> Result<Config> {
+    let endpoint_id = endpoint_id.context("no endpoint selected")?;
+    let mut cfg = app.config.lock().await.clone();
+    let (profile, secret) = {
+        let conn = lock_mutex(&app.conn)?;
+        let profile = db::get_endpoint_profile(&conn, endpoint_id)?
+            .with_context(|| format!("endpoint profile id={} not found", endpoint_id))?;
+        if profile.kind != EndpointKind::S3 {
+            anyhow::bail!("endpoint '{}' is not S3", profile.name);
+        }
+        let secret = if let Some(secret_ref) = profile.credential_ref.as_deref() {
+            db::get_secret(&conn, secret_ref)?
+        } else {
+            None
+        };
+        (profile, secret)
+    };
+    apply_endpoint_to_config(&mut cfg, &profile, secret);
+    Ok(cfg)
+}
+
+fn remote_cache_key(endpoint_id: Option<i64>, path: &str) -> String {
+    match endpoint_id {
+        Some(id) => format!("{id}::{path}"),
+        None => format!("none::{path}"),
+    }
+}
+
+fn resolve_local_endpoint_id(conn: &rusqlite::Connection) -> Result<Option<i64>> {
+    if let Some(profile) = db::get_default_source_endpoint_profile(conn)?
+        && profile.kind == EndpointKind::Local
+    {
+        return Ok(Some(profile.id));
+    }
+    if let Some(profile) = db::get_default_destination_endpoint_profile(conn)?
+        && profile.kind == EndpointKind::Local
+    {
+        return Ok(Some(profile.id));
+    }
+    Ok(db::list_endpoint_profiles(conn)?
+        .into_iter()
+        .find(|profile| profile.kind == EndpointKind::Local)
+        .map(|profile| profile.id))
+}
 
 pub(crate) async fn adjust_layout_dimension(
     config: &Arc<AsyncMutex<Config>>,
@@ -63,16 +132,27 @@ pub(crate) async fn update_layout_message(app: &mut App, target: LayoutTarget) {
 /// Request remote list with caching and deduplication.
 /// Returns true if a request was initiated, false if served from cache or skipped.
 pub(crate) async fn request_remote_list(app: &mut App, force_refresh: bool) -> bool {
+    let endpoint_id = app.primary_remote_endpoint_id();
+    if endpoint_id.is_none() {
+        app.s3_objects.clear();
+        app.selected_remote = 0;
+        app.remote_loading = false;
+        app.remote_request_pending = None;
+        app.set_status("No S3 endpoint selected for this panel.".to_string());
+        return false;
+    }
+
     let current_path = app.remote_current_path.clone();
+    let request_key = remote_cache_key(endpoint_id, &current_path);
 
     if let Some(ref pending) = app.remote_request_pending
-        && pending == &current_path
+        && pending == &request_key
     {
         return false;
     }
 
     if !force_refresh
-        && let Some((cached_files, fetched_at)) = app.remote_cache.get(&current_path)
+        && let Some((cached_files, fetched_at)) = app.remote_cache.get(&request_key)
         && fetched_at.elapsed().as_secs() < REMOTE_CACHE_TTL_SECS
     {
         let mut files = cached_files.clone();
@@ -96,11 +176,19 @@ pub(crate) async fn request_remote_list(app: &mut App, force_refresh: bool) -> b
     }
 
     app.remote_loading = true;
-    app.remote_request_pending = Some(current_path.clone());
+    app.remote_request_pending = Some(request_key);
     app.set_status("Loading remote...".to_string());
 
     let tx = app.async_tx.clone();
-    let config_clone = app.config.lock().await.clone();
+    let config_clone = match config_for_endpoint(app, endpoint_id).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            app.remote_loading = false;
+            app.remote_request_pending = None;
+            app.set_status(format!("Remote endpoint config error: {}", e));
+            return false;
+        }
+    };
     let path_for_request = current_path.clone();
 
     tokio::spawn(async move {
@@ -111,7 +199,11 @@ pub(crate) async fn request_remote_list(app: &mut App, force_refresh: bool) -> b
         };
         match Uploader::list_bucket_contents(&config_clone, path_arg).await {
             Ok(files) => {
-                if let Err(e) = tx.send(AppEvent::RemoteFileList(path_for_request, files)) {
+                if let Err(e) = tx.send(AppEvent::RemoteFileList(
+                    endpoint_id,
+                    path_for_request,
+                    files,
+                )) {
                     warn!("Failed to send remote file list event: {}", e);
                 }
             }
@@ -132,16 +224,27 @@ pub(crate) async fn request_remote_list(app: &mut App, force_refresh: bool) -> b
 }
 
 pub(crate) async fn request_secondary_remote_list(app: &mut App, force_refresh: bool) -> bool {
+    let endpoint_id = app.secondary_remote_endpoint_id();
+    if endpoint_id.is_none() {
+        app.s3_objects_secondary.clear();
+        app.selected_remote_secondary = 0;
+        app.remote_secondary_loading = false;
+        app.remote_secondary_request_pending = None;
+        app.set_status("No S3 destination endpoint selected.".to_string());
+        return false;
+    }
+
     let current_path = app.remote_secondary_current_path.clone();
+    let request_key = remote_cache_key(endpoint_id, &current_path);
 
     if let Some(ref pending) = app.remote_secondary_request_pending
-        && pending == &current_path
+        && pending == &request_key
     {
         return false;
     }
 
     if !force_refresh
-        && let Some((cached_files, fetched_at)) = app.remote_secondary_cache.get(&current_path)
+        && let Some((cached_files, fetched_at)) = app.remote_secondary_cache.get(&request_key)
         && fetched_at.elapsed().as_secs() < REMOTE_CACHE_TTL_SECS
     {
         let mut files = cached_files.clone();
@@ -167,19 +270,18 @@ pub(crate) async fn request_secondary_remote_list(app: &mut App, force_refresh: 
         return false;
     }
 
-    let mut config_clone = app.config.lock().await.clone();
-    app.settings
-        .apply_secondary_s3_profile_to_config(&mut config_clone);
-
-    if !config_clone.is_s3_ready() {
-        app.s3_objects_secondary.clear();
-        app.selected_remote_secondary = 0;
-        app.set_status("Secondary S3 profile is not configured.".to_string());
-        return false;
-    }
+    let config_clone = match config_for_endpoint(app, endpoint_id).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            app.s3_objects_secondary.clear();
+            app.selected_remote_secondary = 0;
+            app.set_status(format!("Secondary endpoint config error: {}", e));
+            return false;
+        }
+    };
 
     app.remote_secondary_loading = true;
-    app.remote_secondary_request_pending = Some(current_path.clone());
+    app.remote_secondary_request_pending = Some(request_key);
     app.set_status("Loading secondary remote...".to_string());
 
     let tx = app.async_tx.clone();
@@ -193,8 +295,11 @@ pub(crate) async fn request_secondary_remote_list(app: &mut App, force_refresh: 
         };
         match Uploader::list_bucket_contents(&config_clone, path_arg).await {
             Ok(files) => {
-                if let Err(e) = tx.send(AppEvent::RemoteFileListSecondary(path_for_request, files))
-                {
+                if let Err(e) = tx.send(AppEvent::RemoteFileListSecondary(
+                    endpoint_id,
+                    path_for_request,
+                    files,
+                )) {
                     warn!("Failed to send secondary remote file list event: {}", e);
                 }
             }
@@ -215,10 +320,6 @@ pub(crate) async fn request_secondary_remote_list(app: &mut App, force_refresh: 
     true
 }
 
-pub(crate) fn s3_ready(config: &Config) -> bool {
-    config.is_s3_ready()
-}
-
 pub(crate) fn selected_remote_object(app: &App) -> Option<S3Object> {
     app.s3_objects.get(app.selected_remote).cloned()
 }
@@ -232,7 +333,13 @@ pub(crate) fn selected_secondary_remote_object(app: &App) -> Option<S3Object> {
 pub(crate) async fn start_remote_download(app: &mut App, key: String) {
     app.set_status(format!("Downloading {}...", key));
     let tx = app.async_tx.clone();
-    let config_clone = app.config.lock().await.clone();
+    let config_clone = match config_for_endpoint(app, app.primary_remote_endpoint_id()).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            app.set_status(format!("Download endpoint error: {}", e));
+            return;
+        }
+    };
 
     let download_dir = dirs::download_dir().unwrap_or_else(|| PathBuf::from("."));
     let dest = download_dir.join(
@@ -312,7 +419,14 @@ pub(crate) async fn queue_remote_download_batch(
 
     let mut files_to_queue: Vec<(String, i64, PathBuf)> = Vec::new();
     let mut seen_source_keys = HashSet::new();
-    let config_clone = app.config.lock().await.clone();
+    let source_endpoint_id = app.primary_remote_endpoint_id();
+    let config_clone = match config_for_endpoint(app, source_endpoint_id).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            app.set_status(format!("Source endpoint error: {}", e));
+            return;
+        }
+    };
 
     for obj in objects {
         if obj.is_parent {
@@ -377,12 +491,8 @@ pub(crate) async fn queue_remote_download_batch(
     let session_id = Uuid::new_v4().to_string();
     let result = (|| -> anyhow::Result<(usize, usize, Option<i64>)> {
         let conn = lock_mutex(&app.conn)?;
-        let source_ep = db::get_default_destination_endpoint_profile(&conn)?
-            .filter(|p| p.kind == crate::core::transfer::EndpointKind::S3)
-            .map(|p| p.id);
-        let destination_ep = db::get_default_source_endpoint_profile(&conn)?
-            .filter(|p| p.kind == crate::core::transfer::EndpointKind::Local)
-            .map(|p| p.id);
+        let source_ep = source_endpoint_id;
+        let destination_ep = resolve_local_endpoint_id(&conn)?;
 
         let mut queued = 0usize;
         let mut failed = 0usize;
@@ -485,7 +595,16 @@ pub(crate) async fn queue_remote_s3_copy_batch(app: &mut App, objects: Vec<S3Obj
         return;
     }
 
-    let source_prefix = app.config.lock().await.s3_prefix.clone();
+    let source_endpoint_id = app.transfer_source_endpoint_id;
+    let destination_endpoint_id = app.transfer_destination_endpoint_id;
+    let config_clone = match config_for_endpoint(app, source_endpoint_id).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            app.set_status(format!("Source endpoint error: {}", e));
+            return;
+        }
+    };
+    let source_prefix = config_clone.s3_prefix.clone();
     let destination_base = if app.remote_secondary_current_path.is_empty() {
         String::new()
     } else if app.remote_secondary_current_path.ends_with('/') {
@@ -494,7 +613,6 @@ pub(crate) async fn queue_remote_s3_copy_batch(app: &mut App, objects: Vec<S3Obj
         format!("{}/", app.remote_secondary_current_path)
     };
 
-    let config_clone = app.config.lock().await.clone();
     if objects.len() == 1 {
         app.set_status(format!("Planning S3 copy for {}...", objects[0].name));
     } else {
@@ -552,20 +670,12 @@ pub(crate) async fn queue_remote_s3_copy_batch(app: &mut App, objects: Vec<S3Obj
     let session_id = Uuid::new_v4().to_string();
     let result = (|| -> anyhow::Result<(usize, usize, Option<i64>)> {
         let conn = lock_mutex(&app.conn)?;
-        let source_ep = db::get_endpoint_profile_by_name(&conn, "Primary S3")?
-            .or(db::get_default_destination_endpoint_profile(&conn)?)
-            .filter(|p| p.kind == crate::core::transfer::EndpointKind::S3)
-            .map(|p| p.id);
-        let Some(source_ep) = source_ep else {
-            anyhow::bail!("Primary S3 profile is not configured.");
+        let Some(source_ep) = source_endpoint_id else {
+            anyhow::bail!("Source S3 endpoint is not selected.");
         };
-
-        let destination_profile = db::get_endpoint_profile_by_name(&conn, "Secondary S3")?
-            .filter(|p| p.kind == crate::core::transfer::EndpointKind::S3);
-        let Some(destination_profile) = destination_profile else {
-            anyhow::bail!("Secondary S3 profile is not configured. Update Settings > S3.");
+        let Some(destination_ep) = destination_endpoint_id else {
+            anyhow::bail!("Destination S3 endpoint is not selected.");
         };
-        let destination_ep = Some(destination_profile.id);
 
         let mut queued = 0usize;
         let mut failed = 0usize;
@@ -578,7 +688,7 @@ pub(crate) async fn queue_remote_s3_copy_batch(app: &mut App, objects: Vec<S3Obj
                         job_id,
                         &db::JobTransferMetadata {
                             source_endpoint_id: Some(source_ep),
-                            destination_endpoint_id: destination_ep,
+                            destination_endpoint_id: Some(destination_ep),
                             transfer_direction: Some("s3_to_s3".to_string()),
                             conflict_policy: Some("overwrite".to_string()),
                             scan_policy: Some("never".to_string()),
@@ -673,12 +783,17 @@ pub(crate) async fn prepare_remote_delete(
         RemoteTarget::Primary => app.remote_current_path.clone(),
         RemoteTarget::Secondary => app.remote_secondary_current_path.clone(),
     };
-
-    let mut config_clone = app.config.lock().await.clone();
-    if target == RemoteTarget::Secondary {
-        app.settings
-            .apply_secondary_s3_profile_to_config(&mut config_clone);
-    }
+    let endpoint_id = match target {
+        RemoteTarget::Primary => app.primary_remote_endpoint_id(),
+        RemoteTarget::Secondary => app.secondary_remote_endpoint_id(),
+    };
+    let config_clone = match config_for_endpoint(app, endpoint_id).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            app.set_status(format!("Remote endpoint error: {}", e));
+            return;
+        }
+    };
 
     if is_dir {
         let dir_key = if key.ends_with('/') {

@@ -1,4 +1,7 @@
-use crate::db::{assign_default_transfer_metadata, create_job, insert_event, update_job_staged};
+use crate::db::{
+    JobTransferMetadata, assign_default_transfer_metadata, create_job, insert_event,
+    update_job_staged, update_job_transfer_metadata,
+};
 use crate::utils::lock_mutex;
 use anyhow::Result;
 use rusqlite::Connection;
@@ -12,6 +15,7 @@ pub async fn ingest_path(
     path: &str,
     session_id: &str,
     destination_prefix: Option<&str>,
+    transfer_metadata_override: Option<JobTransferMetadata>,
 ) -> Result<usize> {
     debug!("Ingesting path: {}", path);
     let root = PathBuf::from(path);
@@ -84,7 +88,14 @@ pub async fn ingest_path(
         };
 
         let conn = lock_mutex(&conn_mutex)?;
-        if let Err(e) = assign_default_transfer_metadata(&conn, job_id) {
+        if let Some(metadata) = transfer_metadata_override.as_ref() {
+            if let Err(e) = update_job_transfer_metadata(&conn, job_id, metadata) {
+                warn!(
+                    "Failed to apply transfer metadata override for job {}: {}",
+                    job_id, e
+                );
+            }
+        } else if let Err(e) = assign_default_transfer_metadata(&conn, job_id) {
             warn!(
                 "Failed to assign default transfer metadata for job {}: {}",
                 job_id, e

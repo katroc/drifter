@@ -5,7 +5,7 @@ use crate::ui::util::{format_bytes, truncate_with_ellipsis};
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
-    style::Modifier,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Row, Table, TableState},
 };
@@ -98,16 +98,33 @@ pub fn render_remote(
     let rows: Vec<Row> = objects
         .iter()
         .map(|obj| {
-            let (icon, base_style) = if obj.is_dir {
+            let is_marked =
+                selected_items.is_some_and(|items| !obj.is_parent && items.contains_key(&obj.key));
+
+            let (icon, mut name_style) = if obj.is_dir && !is_marked {
                 ("📁", theme.text_style().fg(theme.info))
+            } else if obj.is_dir {
+                ("📁", theme.status_style(StatusKind::Success))
+            } else if is_marked {
+                ("📄", theme.status_style(StatusKind::Success))
             } else {
                 ("📄", theme.text_style())
             };
-            let style = if focused {
-                base_style
+
+            if !focused {
+                name_style = name_style.patch(theme.dim_style());
+            }
+
+            let mut meta_style = if is_marked {
+                theme
+                    .status_style(StatusKind::Success)
+                    .add_modifier(Modifier::DIM)
             } else {
-                base_style.patch(theme.dim_style())
+                theme.text_style().add_modifier(Modifier::DIM)
             };
+            if !focused {
+                meta_style = meta_style.patch(theme.dim_style());
+            }
 
             let size_str = if obj.is_parent {
                 String::new()
@@ -125,38 +142,17 @@ pub fn render_remote(
                 obj.name.clone()
             };
             let clipped_name = truncate_with_ellipsis(&display_name, max_name_chars);
-            let selected_marker = if let Some(items) = selected_items {
-                if obj.is_parent {
-                    "   "
-                } else if items.contains_key(&obj.key) {
-                    "[x]"
-                } else {
-                    "[ ]"
-                }
-            } else {
-                ""
-            };
-            let leading = if selected_items.is_some() {
-                format!("{selected_marker} ")
-            } else {
-                String::new()
-            };
 
             let mut cells = vec![Cell::from(Line::from(vec![Span::styled(
-                format!("{leading}{icon} {clipped_name}"),
-                style,
+                format!("{icon} {clipped_name}"),
+                name_style,
             )]))];
 
             if column_mode >= 2 {
-                cells.push(
-                    Cell::from(size_str).style(theme.text_style().add_modifier(Modifier::DIM)),
-                );
+                cells.push(Cell::from(size_str).style(meta_style));
             }
             if column_mode >= 3 {
-                cells.push(
-                    Cell::from(obj.last_modified.clone())
-                        .style(theme.text_style().add_modifier(Modifier::DIM)),
-                );
+                cells.push(Cell::from(obj.last_modified.clone()).style(meta_style));
             }
 
             Row::new(cells)
@@ -194,7 +190,13 @@ pub fn render_remote(
         ),
     }
     .header(header)
-    .highlight_style(theme.selection_style())
+    // Keep selected-row background emphasis without forcing a foreground color,
+    // so multi-selected items remain visibly marked even when cursor-selected.
+    .highlight_style(
+        Style::default()
+            .bg(theme.selection_bg)
+            .add_modifier(Modifier::BOLD),
+    )
     .highlight_symbol("> ");
 
     f.render_stateful_widget(table, inner_area, &mut state);

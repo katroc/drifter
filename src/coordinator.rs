@@ -247,7 +247,8 @@ impl Coordinator {
             let conn = lock_mutex(&self.conn)?;
             (
                 cfg.concurrency_upload_global,
-                db::count_jobs_with_status(&conn, "uploading")?,
+                db::count_jobs_with_status(&conn, "uploading")?
+                    + db::count_jobs_with_status(&conn, "transferring")?,
             )
         };
 
@@ -256,7 +257,24 @@ impl Coordinator {
             let scanned_job = {
                 let conn = lock_mutex(&self.conn)?;
                 if let Some(job) = db::get_next_job(&conn, "scanned")? {
-                    db::update_upload_status(&conn, job.id, "uploading", "uploading")?;
+                    let transfer_direction = match db::get_job_transfer_metadata(&conn, job.id) {
+                        Ok(metadata) => metadata.and_then(|value| value.transfer_direction),
+                        Err(e)
+                            if e.to_string().contains("no such column")
+                                || e.to_string().contains("no such table") =>
+                        {
+                            None
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    let is_s3_to_s3 = transfer_direction.as_deref() == Some("s3_to_s3");
+                    let initial_status = if is_s3_to_s3 {
+                        "transferring"
+                    } else {
+                        "uploading"
+                    };
+                    let initial_phase = if is_s3_to_s3 { "copying" } else { "uploading" };
+                    db::update_upload_status(&conn, job.id, initial_phase, initial_status)?;
                     Some(job)
                 } else {
                     None
@@ -396,7 +414,7 @@ impl Coordinator {
             .unwrap_or("local_to_s3");
 
         match transfer_direction {
-            "local_to_s3" => self.process_upload(job).await,
+            "local_to_s3" => self.process_upload(job, transfer_metadata.as_ref()).await,
             "s3_to_local" => {
                 self.process_s3_to_local(job, transfer_metadata.as_ref())
                     .await
@@ -484,6 +502,30 @@ impl Coordinator {
         Ok((source, destination))
     }
 
+    fn resolve_upload_destination_endpoint(
+        conn: &Connection,
+        metadata: Option<&db::JobTransferMetadata>,
+    ) -> Result<S3EndpointConfig> {
+        let destination_profile = if let Some(id) = metadata.and_then(|m| m.destination_endpoint_id)
+        {
+            db::get_endpoint_profile(conn, id)?
+                .with_context(|| format!("missing destination endpoint profile id={id}"))?
+        } else {
+            db::get_default_destination_endpoint_profile(conn)?
+                .context("missing default destination endpoint profile for local_to_s3 transfer")?
+        };
+        Self::endpoint_profile_to_s3_config(conn, &destination_profile)
+    }
+
+    fn apply_s3_endpoint_to_config(cfg: &mut Config, endpoint: S3EndpointConfig) {
+        cfg.s3_bucket = Some(endpoint.bucket);
+        cfg.s3_prefix = endpoint.prefix;
+        cfg.s3_region = endpoint.region;
+        cfg.s3_endpoint = endpoint.endpoint;
+        cfg.s3_access_key = endpoint.access_key;
+        cfg.s3_secret_key = endpoint.secret_key;
+    }
+
     async fn process_s3_to_s3(
         &self,
         job: &JobRow,
@@ -516,6 +558,27 @@ impl Coordinator {
                 return Ok(());
             }
         };
+
+        if !Uploader::supports_server_side_copy(&source_endpoint, &destination_endpoint) {
+            {
+                let conn = lock_mutex(&self.conn)?;
+                db::update_job_error(
+                    &conn,
+                    job.id,
+                    "failed",
+                    "s3_to_s3 requires matching source/destination endpoint URLs for server-side copy",
+                )?;
+                db::insert_event(
+                    &conn,
+                    job.id,
+                    "transfer",
+                    "server-side copy requires matching source/destination endpoint URLs",
+                )?;
+            }
+            self.check_and_report(&job.session_id).await?;
+            self.notify_work();
+            return Ok(());
+        }
 
         let source_region = source_endpoint
             .region
@@ -667,7 +730,7 @@ impl Coordinator {
 
         {
             let conn = lock_mutex(&self.conn)?;
-            db::update_upload_status(&conn, job.id, "starting", "uploading")?;
+            db::update_upload_status(&conn, job.id, "copying", "transferring")?;
             db::insert_event(
                 &conn,
                 job.id,
@@ -874,7 +937,7 @@ impl Coordinator {
 
         {
             let conn = lock_mutex(&self.conn)?;
-            db::update_upload_status(&conn, job.id, "starting", "uploading")?;
+            db::update_upload_status(&conn, job.id, "downloading", "uploading")?;
             db::insert_event(
                 &conn,
                 job.id,
@@ -960,16 +1023,49 @@ impl Coordinator {
         Ok(())
     }
 
-    async fn process_upload(&self, job: &JobRow) -> Result<()> {
+    async fn process_upload(
+        &self,
+        job: &JobRow,
+        metadata: Option<&db::JobTransferMetadata>,
+    ) -> Result<()> {
         let path = match &job.staged_path {
             Some(p) => p.clone(),
             None => return Ok(()),
         };
 
-        let config = {
+        let mut config = {
             let config_guard = lock_async_mutex(&self.config).await;
             config_guard.clone()
         };
+        let endpoint_resolution = {
+            let conn = lock_mutex(&self.conn)?;
+            Self::resolve_upload_destination_endpoint(&conn, metadata)
+        };
+        match endpoint_resolution {
+            Ok(endpoint) => {
+                Self::apply_s3_endpoint_to_config(&mut config, endpoint);
+            }
+            Err(e) => {
+                {
+                    let conn = lock_mutex(&self.conn)?;
+                    db::update_job_error(
+                        &conn,
+                        job.id,
+                        "failed",
+                        &format!("unable to resolve upload destination endpoint: {}", e),
+                    )?;
+                    db::insert_event(
+                        &conn,
+                        job.id,
+                        "transfer",
+                        &format!("unable to resolve upload destination endpoint: {}", e),
+                    )?;
+                }
+                self.check_and_report(&job.session_id).await?;
+                self.notify_work();
+                return Ok(());
+            }
+        }
         let uploader = Uploader::new(&config);
 
         // Set status to "uploading" BEFORE starting upload

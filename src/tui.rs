@@ -1,5 +1,5 @@
 use crate::core::config::Config;
-use crate::core::transfer::TransferDirection;
+use crate::core::transfer::{EndpointKind, TransferDirection};
 mod helpers;
 
 use crate::services::ingest::ingest_path;
@@ -32,10 +32,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use self::helpers::{
-    adjust_layout_dimension, prepare_remote_delete, queue_remote_download,
+    adjust_layout_dimension, config_for_endpoint, prepare_remote_delete, queue_remote_download,
     queue_remote_download_batch, queue_remote_s3_copy, queue_remote_s3_copy_batch,
     request_remote_list, request_secondary_remote_list, reset_all_layout_dimensions,
-    reset_layout_dimension, s3_ready, selected_remote_object, selected_secondary_remote_object,
+    reset_layout_dimension, selected_remote_object, selected_secondary_remote_object,
     start_remote_download, update_layout_message,
 };
 use crate::app::settings::{SettingsCategory, SettingsState};
@@ -134,6 +134,70 @@ fn toggle_secondary_remote_selection(app: &mut App, obj: S3Object) {
     }
 }
 
+async fn cycle_primary_remote_endpoint(app: &mut App, forward: bool) {
+    if app.s3_profiles.is_empty() {
+        app.set_status("No S3 endpoint profiles configured.".to_string());
+        return;
+    }
+    let name = app
+        .cycle_primary_remote_endpoint(forward)
+        .unwrap_or_else(|| "Unconfigured".to_string());
+    app.remote_current_path.clear();
+    app.selected_remote = 0;
+    app.selected_remote_items.clear();
+    app.remote_cache.clear();
+    request_remote_list(app, true).await;
+    app.set_status(format!("Primary remote endpoint: {}", name));
+}
+
+async fn cycle_secondary_remote_endpoint(app: &mut App, forward: bool) {
+    if app.s3_profiles.is_empty() {
+        app.set_status("No S3 endpoint profiles configured.".to_string());
+        return;
+    }
+    let name = app
+        .cycle_secondary_remote_endpoint(forward)
+        .unwrap_or_else(|| "Unconfigured".to_string());
+    app.remote_secondary_current_path.clear();
+    app.selected_remote_secondary = 0;
+    app.selected_remote_items_secondary.clear();
+    app.remote_secondary_cache.clear();
+    request_secondary_remote_list(app, true).await;
+    app.set_status(format!("Secondary remote endpoint: {}", name));
+}
+
+fn resolve_local_source_endpoint_id(conn: &Connection) -> Option<i64> {
+    if let Ok(Some(profile)) = crate::db::get_default_source_endpoint_profile(conn)
+        && profile.kind == EndpointKind::Local
+    {
+        return Some(profile.id);
+    }
+    if let Ok(Some(profile)) = crate::db::get_default_destination_endpoint_profile(conn)
+        && profile.kind == EndpointKind::Local
+    {
+        return Some(profile.id);
+    }
+    crate::db::list_endpoint_profiles(conn)
+        .ok()?
+        .into_iter()
+        .find(|profile| profile.kind == EndpointKind::Local)
+        .map(|profile| profile.id)
+}
+
+fn local_to_s3_metadata(
+    conn: &Connection,
+    destination_endpoint_id: Option<i64>,
+) -> Option<crate::db::JobTransferMetadata> {
+    let destination_endpoint_id = destination_endpoint_id?;
+    Some(crate::db::JobTransferMetadata {
+        source_endpoint_id: resolve_local_source_endpoint_id(conn),
+        destination_endpoint_id: Some(destination_endpoint_id),
+        transfer_direction: Some("local_to_s3".to_string()),
+        conflict_policy: Some("overwrite".to_string()),
+        scan_policy: Some("upload_only".to_string()),
+    })
+}
+
 pub async fn run_tui(args: TuiArgs) -> Result<()> {
     let TuiArgs {
         conn_mutex,
@@ -169,19 +233,11 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
         app.refresh_jobs(&conn)?;
     }
 
-    let should_prefetch_remote = {
-        let cfg = app.config.lock().await;
-        s3_ready(&cfg)
-    };
-    if should_prefetch_remote {
+    if app.primary_remote_endpoint_id().is_some() {
         request_remote_list(&mut app, false).await;
     }
-    {
-        let mut cfg = app.config.lock().await.clone();
-        app.settings.apply_secondary_s3_profile_to_config(&mut cfg);
-        if cfg.is_s3_ready() {
-            request_secondary_remote_list(&mut app, false).await;
-        }
+    if app.secondary_remote_endpoint_id().is_some() {
+        request_secondary_remote_list(&mut app, false).await;
     }
 
     // Start Log Watcher
@@ -230,19 +286,25 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                 AppEvent::Notification(msg) => {
                     app.set_status(msg);
                 }
-                AppEvent::RemoteFileList(path, files) => {
+                AppEvent::RemoteFileList(endpoint_id, path, files) => {
+                    let request_key = match endpoint_id {
+                        Some(id) => format!("{id}::{path}"),
+                        None => format!("none::{path}"),
+                    };
                     // Clear loading state if this was the pending request
-                    if app.remote_request_pending.as_ref() == Some(&path) {
+                    if app.remote_request_pending.as_ref() == Some(&request_key) {
                         app.remote_loading = false;
                         app.remote_request_pending = None;
                     }
 
                     // Store in cache (without parent entry)
                     app.remote_cache
-                        .insert(path.clone(), (files.clone(), Instant::now()));
+                        .insert(request_key, (files.clone(), Instant::now()));
 
-                    // Only update display if still viewing this path
-                    if app.remote_current_path == path {
+                    // Only update display if still viewing this endpoint/path.
+                    if app.remote_current_path == path
+                        && app.primary_remote_endpoint_id() == endpoint_id
+                    {
                         let mut display_files = files;
                         // Prepend ".." entry if not at root
                         if !path.is_empty() {
@@ -264,16 +326,22 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                         app.set_status(msg);
                     }
                 }
-                AppEvent::RemoteFileListSecondary(path, files) => {
-                    if app.remote_secondary_request_pending.as_ref() == Some(&path) {
+                AppEvent::RemoteFileListSecondary(endpoint_id, path, files) => {
+                    let request_key = match endpoint_id {
+                        Some(id) => format!("{id}::{path}"),
+                        None => format!("none::{path}"),
+                    };
+                    if app.remote_secondary_request_pending.as_ref() == Some(&request_key) {
                         app.remote_secondary_loading = false;
                         app.remote_secondary_request_pending = None;
                     }
 
                     app.remote_secondary_cache
-                        .insert(path.clone(), (files.clone(), Instant::now()));
+                        .insert(request_key, (files.clone(), Instant::now()));
 
-                    if app.remote_secondary_current_path == path {
+                    if app.remote_secondary_current_path == path
+                        && app.secondary_remote_endpoint_id() == endpoint_id
+                    {
                         let mut display_files = files;
                         if !path.is_empty() {
                             display_files.insert(
@@ -291,7 +359,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                         app.s3_objects_secondary = display_files;
                         app.selected_remote_secondary = 0;
                         let msg = format!(
-                            "Loaded {} items from Secondary S3",
+                            "Loaded {} items from secondary remote",
                             app.s3_objects_secondary.len()
                         );
                         app.set_status(msg);
@@ -305,17 +373,10 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                 }
                 AppEvent::RefreshRemote => {
                     // Refresh remote panel after upload completion (force refresh to show new files)
-                    let should_refresh = {
-                        let cfg = app.config.lock().await;
-                        s3_ready(&cfg)
-                    };
-                    if should_refresh {
+                    if app.primary_remote_endpoint_id().is_some() {
                         request_remote_list(&mut app, true).await;
                     }
-                    let mut secondary_cfg = app.config.lock().await.clone();
-                    app.settings
-                        .apply_secondary_s3_profile_to_config(&mut secondary_cfg);
-                    if secondary_cfg.is_s3_ready() {
+                    if app.secondary_remote_endpoint_id().is_some() {
                         request_secondary_remote_list(&mut app, true).await;
                     }
                 }
@@ -409,7 +470,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                             match key.code {
                                 KeyCode::Char('y') | KeyCode::Enter => {
                                     // Execute Action
-                                    match app.pending_action {
+                                    match app.pending_action.clone() {
                                         ModalAction::None => {}
                                         ModalAction::ClearHistory => {
                                             let conn = lock_mutex(&conn_mutex)?;
@@ -467,12 +528,29 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                         ) => {
                                             app.status_message = format!("Deleting {}...", key);
                                             let tx = app.async_tx.clone();
-                                            let mut config_clone = app.config.lock().await.clone();
-                                            if target == RemoteTarget::Secondary {
-                                                app.settings.apply_secondary_s3_profile_to_config(
-                                                    &mut config_clone,
-                                                );
-                                            }
+                                            let endpoint_id = match target {
+                                                RemoteTarget::Primary => {
+                                                    app.primary_remote_endpoint_id()
+                                                }
+                                                RemoteTarget::Secondary => {
+                                                    app.secondary_remote_endpoint_id()
+                                                }
+                                            };
+                                            let config_clone = match config_for_endpoint(
+                                                &app,
+                                                endpoint_id,
+                                            )
+                                            .await
+                                            {
+                                                Ok(cfg) => cfg,
+                                                Err(e) => {
+                                                    app.status_message = format!(
+                                                        "Delete failed: endpoint not configured ({})",
+                                                        e
+                                                    );
+                                                    continue;
+                                                }
+                                            };
 
                                             tokio::spawn(async move {
                                                 let res = if is_dir {
@@ -524,12 +602,14 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                 let event = match target {
                                                                     RemoteTarget::Primary => {
                                                                         AppEvent::RemoteFileList(
+                                                                            endpoint_id,
                                                                             path_context.clone(),
                                                                             files,
                                                                         )
                                                                     }
                                                                     RemoteTarget::Secondary => {
                                                                         AppEvent::RemoteFileListSecondary(
+                                                                            endpoint_id,
                                                                             path_context.clone(),
                                                                             files,
                                                                         )
@@ -1009,7 +1089,21 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                         };
 
                                         let tx = app.async_tx.clone();
-                                        let config = app.config.lock().await.clone();
+                                        let config = match config_for_endpoint(
+                                            &app,
+                                            app.primary_remote_endpoint_id(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(cfg) => cfg,
+                                            Err(e) => {
+                                                app.status_message = format!(
+                                                    "Create folder failed: endpoint not configured ({})",
+                                                    e
+                                                );
+                                                continue;
+                                            }
+                                        };
                                         let folder_name_clone = folder_name.clone();
 
                                         tokio::spawn(async move {
@@ -1077,6 +1171,14 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                 {
                                     match app.input_mode {
                                         InputMode::Normal => match key.code {
+                                            KeyCode::Char(']') => {
+                                                cycle_secondary_remote_endpoint(&mut app, true)
+                                                    .await;
+                                            }
+                                            KeyCode::Char('[') => {
+                                                cycle_secondary_remote_endpoint(&mut app, false)
+                                                    .await;
+                                            }
                                             KeyCode::Char('a') | KeyCode::Enter => {
                                                 app.input_mode = InputMode::RemoteBrowsing;
                                                 app.status_message =
@@ -1140,6 +1242,14 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             _ => {}
                                         },
                                         InputMode::RemoteBrowsing => match key.code {
+                                            KeyCode::Char(']') => {
+                                                cycle_secondary_remote_endpoint(&mut app, true)
+                                                    .await;
+                                            }
+                                            KeyCode::Char('[') => {
+                                                cycle_secondary_remote_endpoint(&mut app, false)
+                                                    .await;
+                                            }
                                             KeyCode::Esc | KeyCode::Char('q') => {
                                                 app.input_mode = InputMode::Normal;
                                                 app.status_message = "Ready".to_string();
@@ -1335,6 +1445,16 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                 "Upload queueing is disabled in this transfer mode.",
                                                             );
                                                             } else {
+                                                                if app
+                                                                    .transfer_destination_endpoint_id
+                                                                    .is_none()
+                                                                {
+                                                                    app.set_status(
+                                                                        "No S3 destination endpoint selected."
+                                                                            .to_string(),
+                                                                    );
+                                                                    continue;
+                                                                }
                                                                 // Only queue files on Enter or 'l', not Right arrow
                                                                 let conn_clone = conn_mutex.clone();
                                                                 let tx = app.async_tx.clone();
@@ -1342,6 +1462,18 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                     .path
                                                                     .to_string_lossy()
                                                                     .to_string();
+                                                                let transfer_metadata = {
+                                                                    if let Ok(conn) =
+                                                                        lock_mutex(&conn_mutex)
+                                                                    {
+                                                                        local_to_s3_metadata(
+                                                                            &conn,
+                                                                            app.transfer_destination_endpoint_id,
+                                                                        )
+                                                                    } else {
+                                                                        None
+                                                                    }
+                                                                };
 
                                                                 tokio::spawn(async move {
                                                                     let session_id =
@@ -1351,6 +1483,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                     &path,
                                                                     &session_id,
                                                                     None,
+                                                                    transfer_metadata,
                                                                 )
                                                                 .await
                                                                     && let Err(send_err) = tx.send(
@@ -1417,10 +1550,9 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         .collect();
                                                     if !paths.is_empty() {
                                                         // Check if S3 is configured
-                                                        let s3_configured = {
-                                                            let cfg = app.config.lock().await;
-                                                            s3_ready(&cfg)
-                                                        };
+                                                        let s3_configured = app
+                                                            .transfer_destination_endpoint_id
+                                                            .is_some();
 
                                                         if s3_configured {
                                                             // S3 configured, ingest with current remote path
@@ -1438,6 +1570,18 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                             let paths_count = paths.len();
                                                             let conn_clone = conn_mutex.clone();
                                                             let dest_clone = destination.clone();
+                                                            let transfer_metadata = {
+                                                                if let Ok(conn) =
+                                                                    lock_mutex(&conn_mutex)
+                                                                {
+                                                                    local_to_s3_metadata(
+                                                                        &conn,
+                                                                        app.transfer_destination_endpoint_id,
+                                                                    )
+                                                                } else {
+                                                                    None
+                                                                }
+                                                            };
 
                                                             let pending_paths: Vec<String> = paths
                                                                 .iter()
@@ -1456,6 +1600,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                         &path,
                                                                         &session_id,
                                                                         dest_clone.as_deref(),
+                                                                        transfer_metadata.clone(),
                                                                     )
                                                                     .await
                                                                     {
@@ -1492,6 +1637,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                         conn_clone.clone(),
                                                                         &path.to_string_lossy(),
                                                                         &session_id,
+                                                                        None,
                                                                         None,
                                                                     )
                                                                     .await
@@ -1654,6 +1800,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     let job = &app.jobs[idx];
                                                     let id = job.id;
                                                     let is_active = job.status == "uploading"
+                                                        || job.status == "transferring"
                                                         || job.status == "scanning"
                                                         || job.status == "pending"
                                                         || job.status == "queued";
@@ -1946,6 +2093,12 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                             AppFocus::Remote => {
                                 match app.input_mode {
                                     InputMode::Normal => match key.code {
+                                        KeyCode::Char(']') => {
+                                            cycle_primary_remote_endpoint(&mut app, true).await;
+                                        }
+                                        KeyCode::Char('[') => {
+                                            cycle_primary_remote_endpoint(&mut app, false).await;
+                                        }
                                         KeyCode::Up | KeyCode::Char('k') => {
                                             if app.selected_remote > 0 {
                                                 app.selected_remote -= 1;
@@ -2063,6 +2216,13 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     },
                                     InputMode::RemoteBrowsing => {
                                         match key.code {
+                                            KeyCode::Char(']') => {
+                                                cycle_primary_remote_endpoint(&mut app, true).await;
+                                            }
+                                            KeyCode::Char('[') => {
+                                                cycle_primary_remote_endpoint(&mut app, false)
+                                                    .await;
+                                            }
                                             KeyCode::Esc | KeyCode::Char('q') => {
                                                 app.input_mode = InputMode::Normal;
                                                 app.status_message = "Ready".to_string();
@@ -2263,6 +2423,70 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     KeyCode::Right | KeyCode::Enter => {
                                         app.focus = AppFocus::SettingsFields;
                                     }
+                                    KeyCode::Char(']')
+                                        if app.settings.active_category == SettingsCategory::S3 =>
+                                    {
+                                        app.settings.cycle_s3_profile_selection();
+                                        app.set_status(format!(
+                                            "S3 profile: {}",
+                                            app.settings.selected_s3_profile_label()
+                                        ));
+                                    }
+                                    KeyCode::Char('[')
+                                        if app.settings.active_category == SettingsCategory::S3 =>
+                                    {
+                                        app.settings.cycle_s3_profile_selection_prev();
+                                        app.set_status(format!(
+                                            "S3 profile: {}",
+                                            app.settings.selected_s3_profile_label()
+                                        ));
+                                    }
+                                    KeyCode::Char('n')
+                                        if app.settings.active_category == SettingsCategory::S3 =>
+                                    {
+                                        let res = {
+                                            let conn = lock_mutex(&conn_mutex)?;
+                                            app.settings.create_s3_profile(&conn)?;
+                                            app.refresh_s3_profiles(&conn)
+                                        };
+                                        match res {
+                                            Ok(_) => {
+                                                app.set_status(format!(
+                                                    "Created profile '{}'",
+                                                    app.settings.selected_s3_profile_label()
+                                                ));
+                                            }
+                                            Err(e) => app.set_status(format!(
+                                                "Failed to create profile: {}",
+                                                e
+                                            )),
+                                        }
+                                    }
+                                    KeyCode::Char('x')
+                                        if app.settings.active_category == SettingsCategory::S3 =>
+                                    {
+                                        let res = {
+                                            let conn = lock_mutex(&conn_mutex)?;
+                                            let deleted =
+                                                app.settings.delete_current_s3_profile(&conn)?;
+                                            let _ = app.refresh_s3_profiles(&conn);
+                                            Ok::<bool, anyhow::Error>(deleted)
+                                        };
+                                        match res {
+                                            Ok(true) => {
+                                                app.set_status("Deleted S3 profile".to_string());
+                                            }
+                                            Ok(false) => {
+                                                app.set_status(
+                                                    "No S3 profile selected to delete.".to_string(),
+                                                );
+                                            }
+                                            Err(e) => app.set_status(format!(
+                                                "Failed to delete profile: {}",
+                                                e
+                                            )),
+                                        }
+                                    }
                                     KeyCode::Char('s') => {
                                         let res = {
                                             let mut cfg = app.config.lock().await;
@@ -2274,7 +2498,10 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             // Save entire config to database
                                             let conn = lock_mutex(&conn_mutex)?;
                                             crate::core::config::save_config_to_db(&conn, &cfg)?;
-                                            app.settings.save_secondary_profile_to_db(&conn)
+                                            app.settings.save_secondary_profile_to_db(&conn)?;
+                                            app.settings.load_secondary_profile_from_db(&conn)?;
+                                            drop(cfg);
+                                            app.refresh_s3_profiles(&conn)
                                         };
 
                                         if let Err(e) = res {
@@ -2295,17 +2522,18 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     KeyCode::Enter => {
                                         // Special handling for Boolean Toggles
                                         let is_toggle = (app.settings.active_category
-                                            == SettingsCategory::S3
-                                            && app.settings.selected_field == 0)
-                                            || (app.settings.active_category
-                                                == SettingsCategory::Scanner
-                                                && app.settings.selected_field == 3)
+                                            == SettingsCategory::Scanner
+                                            && app.settings.selected_field == 3)
                                             || (app.settings.active_category
                                                 == SettingsCategory::Performance
-                                                && app.settings.selected_field >= 5);
+                                                && app.settings.selected_field >= 5)
+                                            || (app.settings.active_category
+                                                == SettingsCategory::S3
+                                                && app.settings.selected_field == 0);
 
                                         if is_toggle {
                                             // Handle toggle based on category and field
+                                            let mut should_auto_save = true;
                                             match (
                                                 app.settings.active_category,
                                                 app.settings.selected_field,
@@ -2316,6 +2544,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         "S3 profile: {}",
                                                         app.settings.selected_s3_profile_label()
                                                     );
+                                                    should_auto_save = false;
                                                 }
                                                 (SettingsCategory::Scanner, 3) => {
                                                     app.settings.scanner_enabled =
@@ -2357,18 +2586,25 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             }
 
                                             // Trigger Auto-Save logic immediately
-                                            let res = {
-                                                let mut cfg = app.config.lock().await;
-                                                app.settings.apply_to_config(&mut cfg);
-                                                let conn = lock_mutex(&conn_mutex)?;
-                                                crate::core::config::save_config_to_db(
-                                                    &conn, &cfg,
-                                                )?;
-                                                app.settings.save_secondary_profile_to_db(&conn)
-                                            };
+                                            if should_auto_save {
+                                                let res = {
+                                                    let mut cfg = app.config.lock().await;
+                                                    app.settings.apply_to_config(&mut cfg);
+                                                    let conn = lock_mutex(&conn_mutex)?;
+                                                    crate::core::config::save_config_to_db(
+                                                        &conn, &cfg,
+                                                    )?;
+                                                    app.settings
+                                                        .save_secondary_profile_to_db(&conn)?;
+                                                    app.settings
+                                                        .load_secondary_profile_from_db(&conn)?;
+                                                    drop(cfg);
+                                                    app.refresh_s3_profiles(&conn)
+                                                };
 
-                                            if let Err(e) = res {
-                                                app.set_status(format!("Save error: {}", e));
+                                                if let Err(e) = res {
+                                                    app.set_status(format!("Save error: {}", e));
+                                                }
                                             }
                                         } else {
                                             app.settings.editing = !app.settings.editing;
@@ -2402,12 +2638,13 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     SettingsCategory::S3 => {
                                                         match app.settings.selected_field {
                                                             0 => "S3 Profile",
-                                                            1 => "S3 Endpoint",
-                                                            2 => "S3 Bucket",
-                                                            3 => "S3 Region",
-                                                            4 => "Prefix",
-                                                            5 => "Access Key",
-                                                            6 => "Secret Key",
+                                                            1 => "S3 Profile Name",
+                                                            2 => "S3 Endpoint",
+                                                            3 => "S3 Bucket",
+                                                            4 => "S3 Region",
+                                                            5 => "Prefix",
+                                                            6 => "Access Key",
+                                                            7 => "Secret Key",
                                                             _ => "Settings",
                                                         }
                                                     }
@@ -2427,13 +2664,30 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 // Save entire config to database
                                                 let conn = lock_mutex(&conn_mutex)?;
                                                 (
-                                                    crate::core::config::save_config_to_db(
-                                                        &conn, &cfg,
-                                                    )
-                                                    .and_then(|_| {
-                                                        app.settings
-                                                            .save_secondary_profile_to_db(&conn)
-                                                    }),
+                                                    {
+                                                        let mut save_res =
+                                                            crate::core::config::save_config_to_db(
+                                                                &conn, &cfg,
+                                                            )
+                                                            .and_then(|_| {
+                                                                app.settings
+                                                                    .save_secondary_profile_to_db(
+                                                                        &conn,
+                                                                    )
+                                                            })
+                                                            .and_then(|_| {
+                                                                app.settings
+                                                                    .load_secondary_profile_from_db(
+                                                                        &conn,
+                                                                    )
+                                                            });
+                                                        drop(cfg);
+                                                        if save_res.is_ok() {
+                                                            save_res =
+                                                                app.refresh_s3_profiles(&conn);
+                                                        }
+                                                        save_res
+                                                    },
                                                     field_name,
                                                 )
                                             };
@@ -2530,21 +2784,24 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 }
                                             }
                                             (SettingsCategory::S3, 1) => {
-                                                app.settings.selected_s3_endpoint_mut().push(c)
+                                                app.settings.selected_s3_profile_name_mut().push(c)
                                             }
                                             (SettingsCategory::S3, 2) => {
-                                                app.settings.selected_s3_bucket_mut().push(c)
+                                                app.settings.selected_s3_endpoint_mut().push(c)
                                             }
                                             (SettingsCategory::S3, 3) => {
-                                                app.settings.selected_s3_region_mut().push(c)
+                                                app.settings.selected_s3_bucket_mut().push(c)
                                             }
                                             (SettingsCategory::S3, 4) => {
-                                                app.settings.selected_s3_prefix_mut().push(c)
+                                                app.settings.selected_s3_region_mut().push(c)
                                             }
                                             (SettingsCategory::S3, 5) => {
-                                                app.settings.selected_s3_access_key_mut().push(c)
+                                                app.settings.selected_s3_prefix_mut().push(c)
                                             }
                                             (SettingsCategory::S3, 6) => {
+                                                app.settings.selected_s3_access_key_mut().push(c)
+                                            }
+                                            (SettingsCategory::S3, 7) => {
                                                 app.settings.selected_s3_secret_key_mut().push(c)
                                             }
                                             (SettingsCategory::Scanner, 0) => {
@@ -2580,21 +2837,24 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             app.settings.selected_field,
                                         ) {
                                             (SettingsCategory::S3, 1) => {
-                                                app.settings.selected_s3_endpoint_mut().pop();
+                                                app.settings.selected_s3_profile_name_mut().pop();
                                             }
                                             (SettingsCategory::S3, 2) => {
-                                                app.settings.selected_s3_bucket_mut().pop();
+                                                app.settings.selected_s3_endpoint_mut().pop();
                                             }
                                             (SettingsCategory::S3, 3) => {
-                                                app.settings.selected_s3_region_mut().pop();
+                                                app.settings.selected_s3_bucket_mut().pop();
                                             }
                                             (SettingsCategory::S3, 4) => {
-                                                app.settings.selected_s3_prefix_mut().pop();
+                                                app.settings.selected_s3_region_mut().pop();
                                             }
                                             (SettingsCategory::S3, 5) => {
-                                                app.settings.selected_s3_access_key_mut().pop();
+                                                app.settings.selected_s3_prefix_mut().pop();
                                             }
                                             (SettingsCategory::S3, 6) => {
+                                                app.settings.selected_s3_access_key_mut().pop();
+                                            }
+                                            (SettingsCategory::S3, 7) => {
                                                 app.settings.selected_s3_secret_key_mut().pop();
                                             }
                                             (SettingsCategory::Scanner, 0) => {
@@ -2661,11 +2921,27 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             // Save entire config to database
                                             let conn = lock_mutex(&conn_mutex)?;
                                             (
-                                                crate::core::config::save_config_to_db(&conn, &cfg)
-                                                    .and_then(|_| {
-                                                        app.settings
-                                                            .save_secondary_profile_to_db(&conn)
-                                                    }),
+                                                {
+                                                    let mut save_res =
+                                                        crate::core::config::save_config_to_db(
+                                                            &conn, &cfg,
+                                                        )
+                                                        .and_then(|_| {
+                                                            app.settings
+                                                                .save_secondary_profile_to_db(&conn)
+                                                        })
+                                                        .and_then(|_| {
+                                                            app.settings
+                                                                .load_secondary_profile_from_db(
+                                                                    &conn,
+                                                                )
+                                                        });
+                                                    drop(cfg);
+                                                    if save_res.is_ok() {
+                                                        save_res = app.refresh_s3_profiles(&conn);
+                                                    }
+                                                    save_res
+                                                },
                                                 bucket_name,
                                             )
                                         };
@@ -2678,6 +2954,74 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 bucket_name.as_deref().unwrap_or("None")
                                             ));
                                         }
+                                    }
+                                    KeyCode::Char('n')
+                                        if !app.settings.editing
+                                            && app.settings.active_category
+                                                == SettingsCategory::S3 =>
+                                    {
+                                        let res = {
+                                            let conn = lock_mutex(&conn_mutex)?;
+                                            app.settings.create_s3_profile(&conn)?;
+                                            app.refresh_s3_profiles(&conn)
+                                        };
+                                        match res {
+                                            Ok(_) => app.set_status(format!(
+                                                "Created profile '{}'",
+                                                app.settings.selected_s3_profile_label()
+                                            )),
+                                            Err(e) => app.set_status(format!(
+                                                "Failed to create profile: {}",
+                                                e
+                                            )),
+                                        }
+                                    }
+                                    KeyCode::Char('x')
+                                        if !app.settings.editing
+                                            && app.settings.active_category
+                                                == SettingsCategory::S3 =>
+                                    {
+                                        let res = {
+                                            let conn = lock_mutex(&conn_mutex)?;
+                                            let deleted =
+                                                app.settings.delete_current_s3_profile(&conn)?;
+                                            let _ = app.refresh_s3_profiles(&conn);
+                                            Ok::<bool, anyhow::Error>(deleted)
+                                        };
+                                        match res {
+                                            Ok(true) => {
+                                                app.set_status("Deleted S3 profile".to_string())
+                                            }
+                                            Ok(false) => app.set_status(
+                                                "No S3 profile selected to delete.".to_string(),
+                                            ),
+                                            Err(e) => app.set_status(format!(
+                                                "Failed to delete profile: {}",
+                                                e
+                                            )),
+                                        }
+                                    }
+                                    KeyCode::Char(']')
+                                        if !app.settings.editing
+                                            && app.settings.active_category
+                                                == SettingsCategory::S3 =>
+                                    {
+                                        app.settings.cycle_s3_profile_selection();
+                                        app.set_status(format!(
+                                            "S3 profile: {}",
+                                            app.settings.selected_s3_profile_label()
+                                        ));
+                                    }
+                                    KeyCode::Char('[')
+                                        if !app.settings.editing
+                                            && app.settings.active_category
+                                                == SettingsCategory::S3 =>
+                                    {
+                                        app.settings.cycle_s3_profile_selection_prev();
+                                        app.set_status(format!(
+                                            "S3 profile: {}",
+                                            app.settings.selected_s3_profile_label()
+                                        ));
                                     }
                                     KeyCode::Char('w') if !app.settings.editing => {
                                         // Launch setup wizard
@@ -3174,6 +3518,16 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                                 "Upload queueing is disabled in this transfer mode.",
                                                                             );
                                                                         } else {
+                                                                            if app
+                                                                                .transfer_destination_endpoint_id
+                                                                                .is_none()
+                                                                            {
+                                                                                app.set_status(
+                                                                                    "No S3 destination endpoint selected."
+                                                                                        .to_string(),
+                                                                                );
+                                                                                continue;
+                                                                            }
                                                                             let conn_clone =
                                                                                 conn_mutex.clone();
                                                                             let tx = app
@@ -3183,6 +3537,20 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                                 .path
                                                                                 .to_string_lossy()
                                                                                 .to_string();
+                                                                            let transfer_metadata = {
+                                                                                if let Ok(conn) =
+                                                                                    lock_mutex(
+                                                                                        &conn_mutex,
+                                                                                    )
+                                                                                {
+                                                                                    local_to_s3_metadata(
+                                                                                        &conn,
+                                                                                        app.transfer_destination_endpoint_id,
+                                                                                    )
+                                                                                } else {
+                                                                                    None
+                                                                                }
+                                                                            };
                                                                             tokio::spawn(async move {
                                                                                 let session_id =
                                                                                     Uuid::new_v4()
@@ -3192,6 +3560,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                                     &path,
                                                                                     &session_id,
                                                                                     None,
+                                                                                    transfer_metadata,
                                                                                 )
                                                                                 .await
                                                                                     && let Err(send_err) = tx.send(
@@ -3455,17 +3824,31 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                         .apply_to_config(&mut cfg);
                                                                     let conn =
                                                                         lock_mutex(&conn_mutex)?;
-                                                                    if let Err(e) = crate::core::config::save_config_to_db(&conn, &cfg)
+                                                                    let mut save_res = crate::core::config::save_config_to_db(&conn, &cfg)
                                                                         .and_then(|_| {
                                                                             app.settings
                                                                                 .save_secondary_profile_to_db(&conn)
                                                                         })
-                                                                    {
-                                                                        app.status_message =
-                                                                            format!("Failed to save theme: {}", e);
+                                                                        .and_then(|_| {
+                                                                            app.settings
+                                                                                .load_secondary_profile_from_db(&conn)
+                                                                        });
+                                                                    drop(cfg);
+                                                                    if save_res.is_ok() {
+                                                                        save_res = app
+                                                                            .refresh_s3_profiles(
+                                                                                &conn,
+                                                                            );
+                                                                    }
+                                                                    if let Err(e) = save_res {
+                                                                        app.status_message = format!(
+                                                                            "Failed to save theme: {}",
+                                                                            e
+                                                                        );
                                                                     } else {
                                                                         app.status_message =
-                                                                            "Theme saved".to_string();
+                                                                            "Theme saved"
+                                                                                .to_string();
                                                                     }
                                                                     app.last_click_time = None;
                                                                 } else {
@@ -3534,6 +3917,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                             && target_idx >= 5);
 
                                                     if is_toggle {
+                                                        let mut should_auto_save = true;
                                                         match (
                                                             app.settings.active_category,
                                                             target_idx,
@@ -3541,6 +3925,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                             (SettingsCategory::S3, 0) => {
                                                                 app.settings
                                                                     .cycle_s3_profile_selection();
+                                                                should_auto_save = false;
                                                             }
                                                             (SettingsCategory::Scanner, 3) => {
                                                                 app.settings.scanner_enabled =
@@ -3559,11 +3944,11 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                             }
                                                             _ => {}
                                                         }
-                                                        let mut cfg = app.config.lock().await;
-                                                        app.settings.apply_to_config(&mut cfg);
-                                                        let conn = lock_mutex(&conn_mutex)?;
-                                                        if let Err(e) =
-                                                            crate::core::config::save_config_to_db(
+                                                        if should_auto_save {
+                                                            let mut cfg = app.config.lock().await;
+                                                            app.settings.apply_to_config(&mut cfg);
+                                                            let conn = lock_mutex(&conn_mutex)?;
+                                                            let mut save_res = crate::core::config::save_config_to_db(
                                                                 &conn, &cfg,
                                                             )
                                                             .and_then(|_| {
@@ -3572,11 +3957,23 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                         &conn,
                                                                     )
                                                             })
-                                                        {
-                                                            app.status_message = format!(
-                                                                "Failed to save settings: {}",
-                                                                e
-                                                            );
+                                                            .and_then(|_| {
+                                                                app.settings
+                                                                    .load_secondary_profile_from_db(
+                                                                        &conn,
+                                                                    )
+                                                            });
+                                                            drop(cfg);
+                                                            if save_res.is_ok() {
+                                                                save_res =
+                                                                    app.refresh_s3_profiles(&conn);
+                                                            }
+                                                            if let Err(e) = save_res {
+                                                                app.status_message = format!(
+                                                                    "Failed to save settings: {}",
+                                                                    e
+                                                                );
+                                                            }
                                                         }
                                                     } else {
                                                         // Double click for other fields
