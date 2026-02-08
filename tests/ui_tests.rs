@@ -522,6 +522,8 @@ fn test_quarantine_view_empty() {
 #[test]
 fn test_quarantine_view_with_threats() {
     let mut threat = create_sample_job(1, "malware.exe", "quarantined", 500_000);
+    // Keep this snapshot stable by bypassing relative-time formatting.
+    threat.created_at = "fixed-time".to_string();
     threat.error = Some("Infected: Win.Trojan.Agent-123456".to_string());
     threat.scan_status = Some(ScanStatus::Infected);
 

@@ -1,15 +1,16 @@
 ---
 source: tests/ui_tests.rs
+assertion_line: 537
 expression: output
 ---
 ╭ Navigation ───╭ Quarantine Zone ─────────────────────────╮ Job #1 Details ───────────────────────────────────────────╮
 │  Transfers    │File                 Threat Status  Time  │SUMMARY                                                    │
-│▌ Quarantine   │malware.exe          -      Detecte 23d ag│Result     : quarantined                                   │
+│▌ Quarantine   │malware.exe          -      Detecte fixed-│Result     : quarantined                                   │
 │  Logs         │                                          │Operation  : Transfer                                      │
 │  Settings     │                                          │Size       : 488.28 KB                                     │
 │               │                                          │Avg Rate   : -                                             │
 │               │                                          │Session    : test-session                                  │
-│               │                                          │Started    : 2026-01-15T10:30:00+00:00                     │
+│               │                                          │Started    : fixed-time                                    │
 │               │                                          │Finished   : -                                             │
 │               │                                          │                                                           │
 │               │                                          │TRANSFER                                                   │
