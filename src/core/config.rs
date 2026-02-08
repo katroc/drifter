@@ -3,6 +3,47 @@ use crate::ui::theme::Theme;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_S3_REGION: &str = "ap-southeast-2";
+pub const KNOWN_S3_REGIONS: [&str; 37] = [
+    "af-south-1",
+    "ap-east-1",
+    "ap-east-2",
+    "ap-northeast-1",
+    "ap-northeast-2",
+    "ap-northeast-3",
+    "ap-south-1",
+    "ap-south-2",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "ap-southeast-3",
+    "ap-southeast-4",
+    "ap-southeast-5",
+    "ap-southeast-7",
+    "ca-central-1",
+    "ca-west-1",
+    "eu-central-1",
+    "eu-central-2",
+    "eu-north-1",
+    "eu-south-1",
+    "eu-south-2",
+    "eu-west-1",
+    "eu-west-2",
+    "eu-west-3",
+    "il-central-1",
+    "me-central-1",
+    "me-south-1",
+    "mx-central-1",
+    "sa-east-1",
+    "us-east-1",
+    "us-east-2",
+    "us-west-1",
+    "us-west-2",
+    "cn-north-1",
+    "cn-northwest-1",
+    "us-gov-east-1",
+    "us-gov-west-1",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanMode {
@@ -106,7 +147,7 @@ impl Default for Config {
             clamd_socket: None,
             s3_bucket: None,
             s3_prefix: None,
-            s3_region: None,
+            s3_region: Some(DEFAULT_S3_REGION.to_string()),
             s3_endpoint: None,
             s3_access_key: None,
             s3_secret_key: None,
@@ -218,7 +259,7 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         clamd_socket: get("clamd_socket"),
         s3_bucket: get("s3_bucket"),
         s3_prefix: get("s3_prefix"),
-        s3_region: get("s3_region"),
+        s3_region: get("s3_region").or_else(|| Some(DEFAULT_S3_REGION.to_string())),
         s3_endpoint: get("s3_endpoint"),
         s3_access_key: get("s3_access_key"),
         s3_secret_key,
@@ -522,6 +563,7 @@ mod tests {
         assert_eq!(config.scan_chunk_size_mb, 24);
         assert_eq!(config.clamd_host, "127.0.0.1");
         assert_eq!(config.clamd_port, 3310);
+        assert_eq!(config.s3_region.as_deref(), Some(DEFAULT_S3_REGION));
         assert_eq!(config.part_size_mb, 128);
         assert_eq!(config.concurrency_upload_global, 1);
         assert_eq!(config.concurrency_scan_global, 2);

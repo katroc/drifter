@@ -261,10 +261,6 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
-    pub fn selection_soft_style(&self) -> Style {
-        Style::default().fg(self.selection_fg).bg(self.selection_bg)
-    }
-
     pub fn header_style(&self) -> Style {
         Style::default()
             .fg(self.table_header_fg)

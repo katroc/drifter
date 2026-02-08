@@ -157,24 +157,24 @@ fn test_job_lifecycle_state_transitions() -> Result<()> {
 
     // Initial state
     let job = db::get_job(&conn, job_id)?.unwrap();
-    assert_eq!(job.status, "ingesting");
+    assert_eq!(job.status, db::JobStatus::Ingesting);
     assert_eq!(job.retry_count, 0);
 
     // Stage -> Queued
-    db::update_job_staged(&conn, job_id, "/data/file.txt", "queued")?;
+    db::update_job_staged(&conn, job_id, "/data/file.txt", db::JobStatus::Queued)?;
     let job = db::get_job(&conn, job_id)?.unwrap();
-    assert_eq!(job.status, "queued");
+    assert_eq!(job.status, db::JobStatus::Queued);
 
     // Scan -> Scanned
-    db::update_scan_status(&conn, job_id, "clean", "scanned")?;
+    db::update_scan_status(&conn, job_id, "clean", db::JobStatus::Scanned)?;
     let job = db::get_job(&conn, job_id)?.unwrap();
-    assert_eq!(job.scan_status, Some("clean".to_string()));
-    assert_eq!(job.status, "scanned");
+    assert_eq!(job.scan_status, Some(db::ScanStatus::Clean));
+    assert_eq!(job.status, db::JobStatus::Scanned);
 
     // Upload -> Complete
-    db::update_upload_status(&conn, job_id, "completed", "complete")?;
+    db::update_upload_status(&conn, job_id, "completed", db::JobStatus::Complete)?;
     let job = db::get_job(&conn, job_id)?.unwrap();
-    assert_eq!(job.status, "complete");
+    assert_eq!(job.status, db::JobStatus::Complete);
 
     Ok(())
 }
@@ -186,7 +186,7 @@ fn test_job_retry_workflow() -> Result<()> {
     let job_id = db::create_job(&conn, "retry-session", "/tmp/file.txt", 1024, None)?;
 
     // Simulate failure
-    db::update_job_error(&conn, job_id, "failed", "Network timeout")?;
+    db::update_job_error(&conn, job_id, db::JobStatus::Failed, "Network timeout")?;
 
     // Schedule retry with backoff
     let retry_count = 1;
@@ -204,7 +204,7 @@ fn test_job_retry_workflow() -> Result<()> {
     )?;
 
     let job = db::get_job(&conn, job_id)?.unwrap();
-    assert_eq!(job.status, "retry_pending");
+    assert_eq!(job.status, db::JobStatus::RetryPending);
     assert_eq!(job.retry_count, 1);
     assert!(job.next_retry_at.is_some());
 
@@ -415,9 +415,9 @@ fn test_report_generation_with_real_data() -> Result<()> {
         1024,
         Some("clean_file.txt"),
     )?;
-    db::update_scan_status(&conn, job1, "clean", "scanned")?;
+    db::update_scan_status(&conn, job1, "clean", db::JobStatus::Scanned)?;
     db::update_job_checksums(&conn, job1, Some("abc123"), Some("abc123"))?;
-    db::update_upload_status(&conn, job1, "completed", "complete")?;
+    db::update_upload_status(&conn, job1, "completed", db::JobStatus::Complete)?;
 
     let job2 = db::create_job(
         &conn,
@@ -426,7 +426,7 @@ fn test_report_generation_with_real_data() -> Result<()> {
         2048,
         Some("virus.exe"),
     )?;
-    db::update_scan_status(&conn, job2, "infected", "quarantined")?;
+    db::update_scan_status(&conn, job2, "infected", db::JobStatus::Quarantined)?;
 
     let job3 = db::create_job(
         &conn,
@@ -435,7 +435,7 @@ fn test_report_generation_with_real_data() -> Result<()> {
         512,
         Some("failed.dat"),
     )?;
-    db::update_job_error(&conn, job3, "failed", "Network timeout")?;
+    db::update_job_error(&conn, job3, db::JobStatus::Failed, "Network timeout")?;
 
     // Generate report
     Reporter::generate_report(&conn, &config, session_id)?;
@@ -492,18 +492,18 @@ fn test_priority_based_job_selection() -> Result<()> {
     // Create jobs with different priorities
     let low = db::create_job(&conn, "session", "/low.txt", 100, None)?;
     db::set_job_priority(&conn, low, 10)?;
-    db::update_job_error(&conn, low, "queued", "")?;
+    db::update_job_error(&conn, low, db::JobStatus::Queued, "")?;
 
     let high = db::create_job(&conn, "session", "/high.txt", 100, None)?;
     db::set_job_priority(&conn, high, 100)?;
-    db::update_job_error(&conn, high, "queued", "")?;
+    db::update_job_error(&conn, high, db::JobStatus::Queued, "")?;
 
     let medium = db::create_job(&conn, "session", "/medium.txt", 100, None)?;
     db::set_job_priority(&conn, medium, 50)?;
-    db::update_job_error(&conn, medium, "queued", "")?;
+    db::update_job_error(&conn, medium, db::JobStatus::Queued, "")?;
 
     // Get next job should return highest priority
-    let next = db::get_next_job(&conn, "queued")?.unwrap();
+    let next = db::get_next_job(&conn, db::JobStatus::Queued)?.unwrap();
     assert_eq!(next.id, high);
     assert_eq!(next.priority, 100);
 
@@ -585,25 +585,25 @@ fn test_complete_job_workflow_simulation() -> Result<()> {
     db::insert_event(&conn, job_id, "ingest", "File ingested")?;
 
     // Step 2: Queue for scan
-    db::update_job_staged(&conn, job_id, source_path, "queued")?;
+    db::update_job_staged(&conn, job_id, source_path, db::JobStatus::Queued)?;
     db::insert_event(&conn, job_id, "stage", "Ready for scan")?;
 
     // Step 3: Scan
-    db::update_scan_status(&conn, job_id, "clean", "scanned")?;
+    db::update_scan_status(&conn, job_id, "clean", db::JobStatus::Scanned)?;
     db::insert_event(&conn, job_id, "scan", "Scan complete - clean")?;
     db::update_scan_duration(&conn, job_id, 1500)?; // 1.5 seconds
 
     // Step 4: Upload with checksum
     let local_checksum = "abcd1234567890";
     db::update_job_checksums(&conn, job_id, Some(local_checksum), Some(local_checksum))?;
-    db::update_upload_status(&conn, job_id, "completed", "complete")?;
+    db::update_upload_status(&conn, job_id, "completed", db::JobStatus::Complete)?;
     db::insert_event(&conn, job_id, "upload", "Upload complete")?;
     db::update_upload_duration(&conn, job_id, 5000)?; // 5 seconds
 
     // Verify final state
     let job = db::get_job(&conn, job_id)?.unwrap();
-    assert_eq!(job.status, "complete");
-    assert_eq!(job.scan_status, Some("clean".to_string()));
+    assert_eq!(job.status, db::JobStatus::Complete);
+    assert_eq!(job.scan_status, Some(db::ScanStatus::Clean));
     assert_eq!(job.checksum, Some(local_checksum.to_string()));
     assert_eq!(job.scan_duration_ms, Some(1500));
     assert_eq!(job.upload_duration_ms, Some(5000));

@@ -19,13 +19,13 @@ pub struct JobRow {
     pub id: i64,
     pub session_id: String,
     pub created_at: String,
-    pub status: String,
+    pub status: JobStatus,
     pub source_path: String,
     pub size_bytes: i64,
     pub staged_path: Option<String>,
     pub error: Option<String>,
-    pub scan_status: Option<String>,
-    pub upload_status: Option<String>,
+    pub scan_status: Option<ScanStatus>,
+    pub upload_status: Option<UploadStatus>,
     pub s3_upload_id: Option<String>,
     pub s3_key: Option<String>,
     pub priority: i64,
@@ -85,6 +85,202 @@ pub struct JobTransferMetadata {
     pub transfer_direction: Option<String>,
     pub conflict_policy: Option<String>,
     pub scan_policy: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WizardStatus {
+    NotComplete,
+    Complete,
+    Skipped,
+}
+
+impl WizardStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotComplete => "not_complete",
+            Self::Complete => "complete",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "not_complete" => Some(Self::NotComplete),
+            "complete" => Some(Self::Complete),
+            "skipped" => Some(Self::Skipped),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JobStatus {
+    Pending,
+    Ingesting,
+    Staged,
+    Ready,
+    Queued,
+    Scanning,
+    Scanned,
+    Uploading,
+    Transferring,
+    RetryPending,
+    Complete,
+    Quarantined,
+    QuarantinedRemoved,
+    Failed,
+    FailedRetryable,
+    Error,
+    Cancelled,
+    Paused,
+}
+
+impl JobStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Ingesting => "ingesting",
+            Self::Staged => "staged",
+            Self::Ready => "ready",
+            Self::Queued => "queued",
+            Self::Scanning => "scanning",
+            Self::Scanned => "scanned",
+            Self::Uploading => "uploading",
+            Self::Transferring => "transferring",
+            Self::RetryPending => "retry_pending",
+            Self::Complete => "complete",
+            Self::Quarantined => "quarantined",
+            Self::QuarantinedRemoved => "quarantined_removed",
+            Self::Failed => "failed",
+            Self::FailedRetryable => "failed_retryable",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+            Self::Paused => "paused",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "ingesting" => Some(Self::Ingesting),
+            "staged" => Some(Self::Staged),
+            "ready" => Some(Self::Ready),
+            "queued" => Some(Self::Queued),
+            "scanning" => Some(Self::Scanning),
+            "scanned" => Some(Self::Scanned),
+            "uploading" => Some(Self::Uploading),
+            "transferring" => Some(Self::Transferring),
+            "retry_pending" => Some(Self::RetryPending),
+            "complete" => Some(Self::Complete),
+            "quarantined" => Some(Self::Quarantined),
+            "quarantined_removed" => Some(Self::QuarantinedRemoved),
+            "failed" => Some(Self::Failed),
+            "failed_retryable" => Some(Self::FailedRetryable),
+            "error" => Some(Self::Error),
+            "cancelled" => Some(Self::Cancelled),
+            "paused" => Some(Self::Paused),
+            _ => None,
+        }
+    }
+
+    pub const fn is_pause_resume_eligible(self) -> bool {
+        matches!(
+            self,
+            Self::Uploading
+                | Self::Transferring
+                | Self::Scanning
+                | Self::Queued
+                | Self::Staged
+                | Self::Ready
+        )
+    }
+
+    pub const fn is_active_queue_job(self) -> bool {
+        matches!(
+            self,
+            Self::Uploading | Self::Transferring | Self::Scanning | Self::Pending | Self::Queued
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanStatus {
+    Clean,
+    Scanned,
+    Infected,
+    Skipped,
+    Scanning,
+    Removed,
+    Completed,
+    Unknown(String),
+}
+
+impl ScanStatus {
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "clean" => Self::Clean,
+            "scanned" => Self::Scanned,
+            "infected" => Self::Infected,
+            "skipped" => Self::Skipped,
+            "scanning" => Self::Scanning,
+            "removed" => Self::Removed,
+            "completed" => Self::Completed,
+            _ => Self::Unknown(value.to_string()),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Clean => "clean",
+            Self::Scanned => "scanned",
+            Self::Infected => "infected",
+            Self::Skipped => "skipped",
+            Self::Scanning => "scanning",
+            Self::Removed => "removed",
+            Self::Completed => "completed",
+            Self::Unknown(value) => value.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UploadStatus {
+    Starting,
+    Uploading,
+    Downloading,
+    Copying,
+    InProgress,
+    Completed,
+    Skipped,
+    Unknown(String),
+}
+
+impl UploadStatus {
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "starting" => Self::Starting,
+            "uploading" => Self::Uploading,
+            "downloading" => Self::Downloading,
+            "copying" => Self::Copying,
+            "in_progress" => Self::InProgress,
+            "completed" => Self::Completed,
+            "skipped" => Self::Skipped,
+            _ => Self::Unknown(value.to_string()),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Starting => "starting",
+            Self::Uploading => "uploading",
+            Self::Downloading => "downloading",
+            Self::Copying => "copying",
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+            Self::Skipped => "skipped",
+            Self::Unknown(value) => value.as_str(),
+        }
+    }
 }
 
 pub fn init_db(state_dir: &str) -> Result<Connection> {
@@ -294,21 +490,58 @@ fn apply_optional_migration(conn: &Connection, sql: &str) -> Result<()> {
 
 pub const JOB_COLUMNS: &str = "id, session_id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, upload_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at, scan_duration_ms, upload_duration_ms";
 
+fn parse_job_status_field(
+    raw: String,
+    column_index: usize,
+    field_name: &'static str,
+) -> rusqlite::Result<JobStatus> {
+    JobStatus::parse(&raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column_index,
+            rusqlite::types::Type::Text,
+            format!("invalid {} '{}'", field_name, raw).into(),
+        )
+    })
+}
+
+fn parse_optional_scan_status_field(
+    raw: Option<String>,
+    _column_index: usize,
+    _field_name: &'static str,
+) -> rusqlite::Result<Option<ScanStatus>> {
+    Ok(raw.map(|value| ScanStatus::parse(&value)))
+}
+
+fn parse_optional_upload_status_field(
+    raw: Option<String>,
+    _column_index: usize,
+    _field_name: &'static str,
+) -> rusqlite::Result<Option<UploadStatus>> {
+    Ok(raw.map(|value| UploadStatus::parse(&value)))
+}
+
 impl<'a> TryFrom<&'a rusqlite::Row<'a>> for JobRow {
     type Error = rusqlite::Error;
 
     fn try_from(row: &'a rusqlite::Row<'a>) -> Result<Self, Self::Error> {
+        let status_raw: String = row.get(3)?;
+        let scan_status_raw: Option<String> = row.get(8)?;
+        let upload_status_raw: Option<String> = row.get(9)?;
         Ok(JobRow {
             id: row.get(0)?,
             session_id: row.get(1)?,
             created_at: row.get(2)?,
-            status: row.get(3)?,
+            status: parse_job_status_field(status_raw, 3, "status")?,
             source_path: row.get(4)?,
             size_bytes: row.get(5)?,
             staged_path: row.get(6)?,
             error: row.get(7)?,
-            scan_status: row.get(8)?,
-            upload_status: row.get(9)?,
+            scan_status: parse_optional_scan_status_field(scan_status_raw, 8, "scan_status")?,
+            upload_status: parse_optional_upload_status_field(
+                upload_status_raw,
+                9,
+                "upload_status",
+            )?,
             s3_upload_id: row.get(10)?,
             s3_key: row.get(11)?,
             priority: row.get(12).unwrap_or(0),
@@ -1020,10 +1253,10 @@ pub fn get_session_jobs(conn: &Connection, session_id: &str) -> Result<Vec<JobRo
     Ok(rows)
 }
 
-pub fn count_jobs_with_status(conn: &Connection, status: &str) -> Result<i64> {
+pub fn count_jobs_with_status(conn: &Connection, status: JobStatus) -> Result<i64> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM jobs WHERE status = ?",
-        params![status],
+        params![status.as_str()],
         |row| row.get(0),
     )?;
     Ok(count)
@@ -1042,19 +1275,32 @@ pub fn update_job_staged(
     conn: &Connection,
     job_id: i64,
     staged_path: &str,
-    status: &str,
+    status: JobStatus,
 ) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET staged_path = ?, status = ?, error = NULL WHERE id = ?",
-        params![staged_path, status, job_id],
+        params![staged_path, status.as_str(), job_id],
     )?;
     Ok(())
 }
 
-pub fn update_job_error(conn: &Connection, job_id: i64, status: &str, error: &str) -> Result<()> {
+pub fn update_job_staged_path(conn: &Connection, job_id: i64, staged_path: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE jobs SET staged_path = ? WHERE id = ?",
+        params![staged_path, job_id],
+    )?;
+    Ok(())
+}
+
+pub fn update_job_error(
+    conn: &Connection,
+    job_id: i64,
+    status: JobStatus,
+    error: &str,
+) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET status = ?, error = ? WHERE id = ?",
-        params![status, error, job_id],
+        params![status.as_str(), error, job_id],
     )?;
     Ok(())
 }
@@ -1266,11 +1512,11 @@ pub fn update_scan_status(
     conn: &Connection,
     job_id: i64,
     status: &str,
-    global_status: &str,
+    global_status: JobStatus,
 ) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET scan_status = ?, status = ? WHERE id = ?",
-        params![status, global_status, job_id],
+        params![status, global_status.as_str(), job_id],
     )?;
     Ok(())
 }
@@ -1279,11 +1525,11 @@ pub fn update_upload_status(
     conn: &Connection,
     job_id: i64,
     status: &str,
-    global_status: &str,
+    global_status: JobStatus,
 ) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET upload_status = ?, status = ? WHERE id = ?",
-        params![status, global_status, job_id],
+        params![status, global_status.as_str(), job_id],
     )?;
     Ok(())
 }
@@ -1317,12 +1563,12 @@ pub fn update_upload_duration(conn: &Connection, job_id: i64, duration_ms: i64) 
     Ok(())
 }
 
-pub fn get_next_job(conn: &Connection, current_status: &str) -> Result<Option<JobRow>> {
+pub fn get_next_job(conn: &Connection, current_status: JobStatus) -> Result<Option<JobRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {} FROM jobs WHERE status = ? ORDER BY priority DESC, id ASC LIMIT 1",
         JOB_COLUMNS
     ))?;
-    let mut rows = stmt.query_map(params![current_status], map_job_row)?;
+    let mut rows = stmt.query_map(params![current_status.as_str()], map_job_row)?;
 
     if let Some(row) = rows.next() {
         Ok(Some(row?))
@@ -1510,6 +1756,33 @@ pub fn has_settings(conn: &Connection) -> Result<bool> {
     Ok(count > 0)
 }
 
+pub fn get_wizard_status(conn: &Connection) -> Result<WizardStatus> {
+    const WIZARD_STATUS_KEY: &str = "wizard_status";
+
+    if let Some(raw) = get_setting(conn, WIZARD_STATUS_KEY)? {
+        if let Some(parsed) = WizardStatus::from_str(raw.trim()) {
+            return Ok(parsed);
+        }
+        warn!(
+            "Unknown wizard_status '{}'; treating wizard as not complete",
+            raw
+        );
+        return Ok(WizardStatus::NotComplete);
+    }
+
+    // Legacy behavior fallback: if any settings exist, assume setup already completed.
+    if has_settings(conn)? {
+        Ok(WizardStatus::Complete)
+    } else {
+        Ok(WizardStatus::NotComplete)
+    }
+}
+
+pub fn set_wizard_status(conn: &Connection, status: WizardStatus) -> Result<()> {
+    const WIZARD_STATUS_KEY: &str = "wizard_status";
+    set_setting(conn, WIZARD_STATUS_KEY, status.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1567,7 +1840,7 @@ mod tests {
         let job = &jobs[0];
 
         assert_eq!(job.session_id, "test-session");
-        assert_eq!(job.status, "pending");
+        assert_eq!(job.status, JobStatus::Pending);
         assert_eq!(job.source_path, "/tmp/test");
         assert_eq!(job.size_bytes, 100);
         assert_eq!(job.priority, 10);
@@ -1681,7 +1954,7 @@ mod tests {
         assert_eq!(job.source_path, "/tmp/file.txt");
         assert_eq!(job.size_bytes, 1024);
         assert_eq!(job.s3_key, Some("s3-key.txt".to_string()));
-        assert_eq!(job.status, "ingesting");
+        assert_eq!(job.status, JobStatus::Ingesting);
         assert_eq!(job.retry_count, 0);
 
         Ok(())
@@ -1728,13 +2001,13 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "complete", "")?;
+        update_job_error(&conn, id1, JobStatus::Complete, "")?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "quarantined", "infected")?;
+        update_job_error(&conn, id2, JobStatus::Quarantined, "infected")?;
 
         let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
-        update_job_error(&conn, id3, "cancelled", "user cancelled")?;
+        update_job_error(&conn, id3, JobStatus::Cancelled, "user cancelled")?;
 
         create_job(&conn, "session1", "/tmp/active.txt", 400, None)?;
 
@@ -1749,14 +2022,14 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "complete", "")?;
+        update_job_error(&conn, id1, JobStatus::Complete, "")?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "quarantined", "infected")?;
+        update_job_error(&conn, id2, JobStatus::Quarantined, "infected")?;
 
         let history = list_history_jobs(&conn, 100, Some("Complete"))?;
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].status, "complete");
+        assert_eq!(history[0].status, JobStatus::Complete);
 
         Ok(())
     }
@@ -1766,13 +2039,18 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "complete", "")?;
+        update_job_error(&conn, id1, JobStatus::Complete, "")?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "quarantined", "infected")?;
+        update_job_error(&conn, id2, JobStatus::Quarantined, "infected")?;
 
         let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
-        update_job_error(&conn, id3, "quarantined_removed", "infected and removed")?;
+        update_job_error(
+            &conn,
+            id3,
+            JobStatus::QuarantinedRemoved,
+            "infected and removed",
+        )?;
 
         let history = list_history_jobs(&conn, 100, Some("Quarantined"))?;
         assert_eq!(history.len(), 2);
@@ -1785,14 +2063,14 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "quarantined", "infected")?;
+        update_job_error(&conn, id1, JobStatus::Quarantined, "infected")?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "complete", "")?;
+        update_job_error(&conn, id2, JobStatus::Complete, "")?;
 
         let quarantined = list_quarantined_jobs(&conn, 100)?;
         assert_eq!(quarantined.len(), 1);
-        assert_eq!(quarantined[0].status, "quarantined");
+        assert_eq!(quarantined[0].status, JobStatus::Quarantined);
 
         Ok(())
     }
@@ -1822,12 +2100,12 @@ mod tests {
         create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
 
         let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
-        update_job_error(&conn, id3, "complete", "")?;
+        update_job_error(&conn, id3, JobStatus::Complete, "")?;
 
-        let count = count_jobs_with_status(&conn, "ingesting")?;
+        let count = count_jobs_with_status(&conn, JobStatus::Ingesting)?;
         assert_eq!(count, 2);
 
-        let count_complete = count_jobs_with_status(&conn, "complete")?;
+        let count_complete = count_jobs_with_status(&conn, JobStatus::Complete)?;
         assert_eq!(count_complete, 1);
 
         Ok(())
@@ -1841,7 +2119,7 @@ mod tests {
         create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
 
         let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
-        update_job_error(&conn, id3, "complete", "")?;
+        update_job_error(&conn, id3, JobStatus::Complete, "")?;
 
         create_job(&conn, "session2", "/tmp/file4.txt", 400, None)?;
 
@@ -1856,11 +2134,11 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_job_staged(&conn, job_id, "/data/file.txt", "queued")?;
+        update_job_staged(&conn, job_id, "/data/file.txt", JobStatus::Queued)?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
         assert_eq!(job.staged_path, Some("/data/file.txt".to_string()));
-        assert_eq!(job.status, "queued");
+        assert_eq!(job.status, JobStatus::Queued);
         assert_eq!(job.error, None);
 
         Ok(())
@@ -1871,10 +2149,10 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_job_error(&conn, job_id, "failed", "Network timeout")?;
+        update_job_error(&conn, job_id, JobStatus::Failed, "Network timeout")?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.status, "failed");
+        assert_eq!(job.status, JobStatus::Failed);
         assert_eq!(job.error, Some("Network timeout".to_string()));
 
         Ok(())
@@ -1898,18 +2176,18 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "queued", "")?;
+        update_job_error(&conn, id1, JobStatus::Queued, "")?;
         set_job_priority(&conn, id1, 10)?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "queued", "")?;
+        update_job_error(&conn, id2, JobStatus::Queued, "")?;
         set_job_priority(&conn, id2, 50)?;
 
         let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
-        update_job_error(&conn, id3, "queued", "")?;
+        update_job_error(&conn, id3, JobStatus::Queued, "")?;
         set_job_priority(&conn, id3, 30)?;
 
-        let next = get_next_job(&conn, "queued")?.expect("Should have next job");
+        let next = get_next_job(&conn, JobStatus::Queued)?.expect("Should have next job");
         assert_eq!(next.id, id2);
         assert_eq!(next.priority, 50);
 
@@ -1924,7 +2202,7 @@ mod tests {
         cancel_job(&conn, job_id)?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.status, "cancelled");
+        assert_eq!(job.status, JobStatus::Cancelled);
         assert_eq!(job.error, Some("Cancelled by user".to_string()));
 
         Ok(())
@@ -1965,7 +2243,7 @@ mod tests {
         let job = get_job(&conn, job_id)?.expect("Job should exist");
         assert_eq!(job.retry_count, 3);
         assert_eq!(job.next_retry_at, Some(next_retry.to_string()));
-        assert_eq!(job.status, "retry_pending");
+        assert_eq!(job.status, JobStatus::RetryPending);
         assert_eq!(job.error, Some("Temporary failure".to_string()));
 
         Ok(())
@@ -2001,13 +2279,13 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_scan_status(&conn, job_id, "completed", "scanned")?;
-        update_job_error(&conn, job_id, "failed", "Upload error")?;
+        update_scan_status(&conn, job_id, "completed", JobStatus::Scanned)?;
+        update_job_error(&conn, job_id, JobStatus::Failed, "Upload error")?;
 
         retry_job(&conn, job_id)?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.status, "scanned");
+        assert_eq!(job.status, JobStatus::Scanned);
         assert_eq!(job.error, None);
 
         Ok(())
@@ -2018,12 +2296,12 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_job_error(&conn, job_id, "failed", "Scan error")?;
+        update_job_error(&conn, job_id, JobStatus::Failed, "Scan error")?;
 
         retry_job(&conn, job_id)?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.status, "queued");
+        assert_eq!(job.status, JobStatus::Queued);
         assert_eq!(job.error, None);
 
         Ok(())
@@ -2034,15 +2312,15 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_scan_status(&conn, job_id, "completed", "scanned")?;
+        update_scan_status(&conn, job_id, "completed", JobStatus::Scanned)?;
 
         pause_job(&conn, job_id)?;
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.status, "paused");
+        assert_eq!(job.status, JobStatus::Paused);
 
         resume_job(&conn, job_id)?;
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.status, "scanned");
+        assert_eq!(job.status, JobStatus::Scanned);
 
         Ok(())
     }
@@ -2161,11 +2439,11 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_scan_status(&conn, job_id, "clean", "scanned")?;
+        update_scan_status(&conn, job_id, "clean", JobStatus::Scanned)?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.scan_status, Some("clean".to_string()));
-        assert_eq!(job.status, "scanned");
+        assert_eq!(job.scan_status, Some(ScanStatus::Clean));
+        assert_eq!(job.status, JobStatus::Scanned);
 
         Ok(())
     }
@@ -2175,10 +2453,10 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_upload_status(&conn, job_id, "in_progress", "uploading")?;
+        update_upload_status(&conn, job_id, "in_progress", JobStatus::Uploading)?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.status, "uploading");
+        assert_eq!(job.status, JobStatus::Uploading);
 
         Ok(())
     }
@@ -2322,6 +2600,36 @@ mod tests {
 
         assert!(has_settings(&conn)?);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_wizard_status_defaults_not_complete_without_settings() -> Result<()> {
+        let conn = setup_test_db()?;
+        assert_eq!(get_wizard_status(&conn)?, WizardStatus::NotComplete);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_wizard_status_defaults_complete_for_legacy_settings() -> Result<()> {
+        let conn = setup_test_db()?;
+        set_setting(&conn, "theme", "nord")?;
+        assert_eq!(get_wizard_status(&conn)?, WizardStatus::Complete);
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_and_get_wizard_status() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        set_wizard_status(&conn, WizardStatus::NotComplete)?;
+        assert_eq!(get_wizard_status(&conn)?, WizardStatus::NotComplete);
+
+        set_wizard_status(&conn, WizardStatus::Skipped)?;
+        assert_eq!(get_wizard_status(&conn)?, WizardStatus::Skipped);
+
+        set_wizard_status(&conn, WizardStatus::Complete)?;
+        assert_eq!(get_wizard_status(&conn)?, WizardStatus::Complete);
         Ok(())
     }
 
@@ -2610,14 +2918,14 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "complete", "")?;
+        update_job_error(&conn, id1, JobStatus::Complete, "")?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "quarantined", "infected")?;
+        update_job_error(&conn, id2, JobStatus::Quarantined, "infected")?;
 
         // Create an active job with "pending" status (which is excluded from clear_history)
         let id3 = create_job(&conn, "session1", "/tmp/active.txt", 300, None)?;
-        update_job_error(&conn, id3, "pending", "")?;
+        update_job_error(&conn, id3, JobStatus::Pending, "")?;
 
         clear_history(&conn, None)?;
 
@@ -2638,10 +2946,10 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "complete", "")?;
+        update_job_error(&conn, id1, JobStatus::Complete, "")?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "quarantined", "infected")?;
+        update_job_error(&conn, id2, JobStatus::Quarantined, "infected")?;
 
         clear_history(&conn, Some("Complete"))?;
 
@@ -2659,10 +2967,10 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "complete", "")?;
+        update_job_error(&conn, id1, JobStatus::Complete, "")?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "quarantined", "infected")?;
+        update_job_error(&conn, id2, JobStatus::Quarantined, "infected")?;
 
         clear_history(&conn, Some("Quarantined"))?;
 

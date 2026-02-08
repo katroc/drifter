@@ -1,7 +1,7 @@
 use crate::app::state::AppEvent;
-use crate::core::config::Config;
+use crate::core::config::{Config, DEFAULT_S3_REGION};
 use crate::core::transfer::EndpointKind;
-use crate::db::{self, JobRow};
+use crate::db::{self, JobRow, JobStatus, ScanStatus};
 use crate::services::scanner::{ScanResult, Scanner};
 use crate::services::uploader::{S3EndpointConfig, Uploader};
 use anyhow::{Context, Result};
@@ -135,9 +135,10 @@ impl Coordinator {
             let conn = lock_mutex(&self.conn)?;
             if let Ok(retry_jobs) = db::list_retryable_jobs(&conn) {
                 for job in retry_jobs {
-                    let next_status = if job.scan_status.as_deref() == Some("clean")
-                        || job.scan_status.as_deref() == Some("scanned")
-                    {
+                    let next_status = if matches!(
+                        job.scan_status,
+                        Some(ScanStatus::Clean | ScanStatus::Scanned)
+                    ) {
                         "scanned"
                     } else {
                         "queued"
@@ -172,7 +173,7 @@ impl Coordinator {
         if scanner_enabled {
             let active_scans = {
                 let conn = lock_mutex(&self.conn)?;
-                db::count_jobs_with_status(&conn, "scanning")?
+                db::count_jobs_with_status(&conn, JobStatus::Scanning)?
             };
 
             let available_scan_slots = scan_limit.saturating_sub(active_scans as usize);
@@ -185,11 +186,11 @@ impl Coordinator {
 
                 let dispatch = {
                     let conn = lock_mutex(&self.conn)?;
-                    if let Some(job) = db::get_next_job(&conn, "queued")? {
+                    if let Some(job) = db::get_next_job(&conn, JobStatus::Queued)? {
                         let scan_policy = db::get_job_transfer_metadata(&conn, job.id)?
                             .and_then(|m| m.scan_policy);
                         if scan_policy.as_deref() == Some("never") {
-                            db::update_scan_status(&conn, job.id, "skipped", "scanned")?;
+                            db::update_scan_status(&conn, job.id, "skipped", JobStatus::Scanned)?;
                             db::insert_event(
                                 &conn,
                                 job.id,
@@ -198,7 +199,7 @@ impl Coordinator {
                             )?;
                             ScanDispatch::Skipped
                         } else {
-                            db::update_scan_status(&conn, job.id, "scanning", "scanning")?;
+                            db::update_scan_status(&conn, job.id, "scanning", JobStatus::Scanning)?;
                             ScanDispatch::Spawn(Box::new(job))
                         }
                     } else {
@@ -227,8 +228,8 @@ impl Coordinator {
             for _ in 0..32 {
                 let skipped_job = {
                     let conn = lock_mutex(&self.conn)?;
-                    if let Some(job) = db::get_next_job(&conn, "queued")? {
-                        db::update_scan_status(&conn, job.id, "skipped", "scanned")?;
+                    if let Some(job) = db::get_next_job(&conn, JobStatus::Queued)? {
+                        db::update_scan_status(&conn, job.id, "skipped", JobStatus::Scanned)?;
                         db::insert_event(&conn, job.id, "scan", "scan skipped by policy")?;
                         Some(job)
                     } else {
@@ -250,8 +251,8 @@ impl Coordinator {
             let conn = lock_mutex(&self.conn)?;
             (
                 cfg.concurrency_upload_global,
-                db::count_jobs_with_status(&conn, "uploading")?
-                    + db::count_jobs_with_status(&conn, "transferring")?,
+                db::count_jobs_with_status(&conn, JobStatus::Uploading)?
+                    + db::count_jobs_with_status(&conn, JobStatus::Transferring)?,
             )
         };
 
@@ -259,7 +260,7 @@ impl Coordinator {
         for _ in 0..available_upload_slots {
             let scanned_job = {
                 let conn = lock_mutex(&self.conn)?;
-                if let Some(job) = db::get_next_job(&conn, "scanned")? {
+                if let Some(job) = db::get_next_job(&conn, JobStatus::Scanned)? {
                     let transfer_direction = match db::get_job_transfer_metadata(&conn, job.id) {
                         Ok(metadata) => metadata.and_then(|value| value.transfer_direction),
                         Err(e)
@@ -272,9 +273,9 @@ impl Coordinator {
                     };
                     let is_s3_to_s3 = transfer_direction.as_deref() == Some("s3_to_s3");
                     let initial_status = if is_s3_to_s3 {
-                        "transferring"
+                        JobStatus::Transferring
                     } else {
-                        "uploading"
+                        JobStatus::Uploading
                     };
                     let initial_phase = if is_s3_to_s3 { "copying" } else { "uploading" };
                     db::update_upload_status(&conn, job.id, initial_phase, initial_status)?;
@@ -305,7 +306,7 @@ impl Coordinator {
             Some(p) => p,
             None => {
                 let conn = lock_mutex(&self.conn)?;
-                db::update_job_error(&conn, job.id, "failed", "no staged path")?;
+                db::update_job_error(&conn, job.id, JobStatus::Failed, "no staged path")?;
                 self.notify_work();
                 return Ok(());
             }
@@ -321,7 +322,7 @@ impl Coordinator {
             Ok(ScanResult::Clean) => {
                 let duration = start_time.elapsed().as_millis() as i64;
                 let conn = lock_mutex(&self.conn)?;
-                db::update_scan_status(&conn, job.id, "clean", "scanned")?;
+                db::update_scan_status(&conn, job.id, "clean", JobStatus::Scanned)?;
                 db::update_scan_duration(&conn, job.id, duration)?;
                 db::insert_event(
                     &conn,
@@ -331,73 +332,84 @@ impl Coordinator {
                 )?;
             }
             Ok(ScanResult::Infected(virus_name)) => {
-                let (quarantine_dir, _delete_source) = {
+                let quarantine_dir = {
                     let cfg = lock_async_mutex(&self.config).await;
-                    (
-                        PathBuf::from(&cfg.quarantine_dir),
-                        cfg.delete_source_after_upload,
-                    )
+                    PathBuf::from(&cfg.quarantine_dir)
                 };
-
-                if !quarantine_dir.exists()
-                    && let Err(e) = std::fs::create_dir_all(&quarantine_dir)
-                {
-                    error!(
-                        "Failed to create quarantine directory {:?}: {}",
-                        quarantine_dir, e
-                    );
-                }
-
-                let file_name = std::path::Path::new(path).file_name();
-                let mut quarantine_path_str = String::new();
-
-                if let Some(fname) = file_name {
-                    let dest = quarantine_dir.join(fname);
-                    if let Err(e) = std::fs::rename(path, &dest) {
-                        error!("Failed to quarantine file: {}", e);
-                    } else {
-                        quarantine_path_str = dest.to_string_lossy().to_string();
-                    }
-                }
+                let quarantine_result = Self::quarantine_file_to_dir(
+                    std::path::Path::new(path),
+                    &quarantine_dir,
+                    job.id,
+                );
 
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_scan_status(&conn, job.id, "infected", "quarantined")?;
-
-                    // Store virus name in error column so it appears in details
-                    db::update_job_error(
-                        &conn,
-                        job.id,
-                        "quarantined",
-                        &format!("Infected: {}", virus_name),
-                    )?;
-
-                    if !quarantine_path_str.is_empty()
-                        && let Err(e) = db::update_job_staged(
-                            &conn,
-                            job.id,
-                            &quarantine_path_str,
-                            "quarantined",
-                        )
-                    {
-                        warn!(
-                            "Failed to update quarantined staged path for job {}: {}",
-                            job.id, e
-                        );
+                    match quarantine_result {
+                        Ok(quarantine_path) => {
+                            db::update_scan_status(
+                                &conn,
+                                job.id,
+                                "infected",
+                                JobStatus::Quarantined,
+                            )?;
+                            db::update_job_staged_path(
+                                &conn,
+                                job.id,
+                                &quarantine_path.to_string_lossy(),
+                            )?;
+                            // Keep virus details visible in UI details panel.
+                            db::update_job_error(
+                                &conn,
+                                job.id,
+                                JobStatus::Quarantined,
+                                &format!("Infected: {}", virus_name),
+                            )?;
+                            db::insert_event(
+                                &conn,
+                                job.id,
+                                "scan",
+                                &format!(
+                                    "scan failed: infected with {} (moved to {})",
+                                    virus_name,
+                                    quarantine_path.to_string_lossy()
+                                ),
+                            )?;
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to quarantine infected file for job {}: {}",
+                                job.id, e
+                            );
+                            db::update_scan_status(&conn, job.id, "infected", JobStatus::Failed)?;
+                            db::update_job_error(
+                                &conn,
+                                job.id,
+                                JobStatus::Failed,
+                                &format!("Infected: {} (quarantine failed: {})", virus_name, e),
+                            )?;
+                            db::insert_event(
+                                &conn,
+                                job.id,
+                                "scan",
+                                &format!(
+                                    "scan failed: infected with {} (quarantine failed: {})",
+                                    virus_name, e
+                                ),
+                            )?;
+                        }
                     }
-                    db::insert_event(
-                        &conn,
-                        job.id,
-                        "scan",
-                        &format!("scan failed: infected with {}", virus_name),
-                    )?;
                 }
                 self.check_and_report(&job.session_id).await?;
             }
             Err(e) => {
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_job_error(&conn, job.id, "failed", &format!("scan error: {}", e))?;
+                    db::update_job_error(
+                        &conn,
+                        job.id,
+                        JobStatus::Failed,
+                        &format!("scan error: {}", e),
+                    )?;
                 }
                 self.check_and_report(&job.session_id).await?;
             }
@@ -429,7 +441,7 @@ impl Coordinator {
                     db::update_job_error(
                         &conn,
                         job.id,
-                        "failed",
+                        JobStatus::Failed,
                         &format!("unknown transfer direction '{}'", other),
                     )?;
                     db::insert_event(
@@ -546,7 +558,7 @@ impl Coordinator {
                     db::update_job_error(
                         &conn,
                         job.id,
-                        "failed",
+                        JobStatus::Failed,
                         &format!("unable to resolve s3 endpoints: {}", e),
                     )?;
                     db::insert_event(
@@ -568,7 +580,7 @@ impl Coordinator {
                 db::update_job_error(
                     &conn,
                     job.id,
-                    "failed",
+                    JobStatus::Failed,
                     "s3_to_s3 requires matching source/destination endpoint URLs for server-side copy",
                 )?;
                 db::insert_event(
@@ -586,13 +598,13 @@ impl Coordinator {
         let source_region = source_endpoint
             .region
             .as_deref()
-            .unwrap_or("us-east-1")
+            .unwrap_or(DEFAULT_S3_REGION)
             .trim()
             .to_ascii_lowercase();
         let destination_region = destination_endpoint
             .region
             .as_deref()
-            .unwrap_or("us-east-1")
+            .unwrap_or(DEFAULT_S3_REGION)
             .trim()
             .to_ascii_lowercase();
         if source_region != destination_region {
@@ -601,7 +613,7 @@ impl Coordinator {
                 db::update_job_error(
                     &conn,
                     job.id,
-                    "failed",
+                    JobStatus::Failed,
                     &format!(
                         "s3_to_s3 requires same region in v1 (source={}, destination={})",
                         source_region, destination_region
@@ -673,7 +685,7 @@ impl Coordinator {
                             db::update_job_error(
                                 &conn,
                                 job.id,
-                                "failed",
+                                JobStatus::Failed,
                                 &format!("Max retries exceeded. Transfer preflight error: {}", e),
                             )?;
                             true
@@ -692,7 +704,7 @@ impl Coordinator {
                 "skip" => {
                     {
                         let conn = lock_mutex(&self.conn)?;
-                        db::update_upload_status(&conn, job.id, "skipped", "complete")?;
+                        db::update_upload_status(&conn, job.id, "skipped", JobStatus::Complete)?;
                         db::insert_event(
                             &conn,
                             job.id,
@@ -713,7 +725,7 @@ impl Coordinator {
                         db::update_job_error(
                             &conn,
                             job.id,
-                            "failed",
+                            JobStatus::Failed,
                             "conflict_policy=prompt is not supported for background transfers",
                         )?;
                         db::insert_event(
@@ -733,7 +745,7 @@ impl Coordinator {
 
         {
             let conn = lock_mutex(&self.conn)?;
-            db::update_upload_status(&conn, job.id, "copying", "transferring")?;
+            db::update_upload_status(&conn, job.id, "copying", JobStatus::Transferring)?;
             db::insert_event(
                 &conn,
                 job.id,
@@ -768,7 +780,7 @@ impl Coordinator {
                 let duration = start_time.elapsed().as_millis() as i64;
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_upload_status(&conn, job.id, "completed", "complete")?;
+                    db::update_upload_status(&conn, job.id, "completed", JobStatus::Complete)?;
                     db::update_upload_duration(&conn, job.id, duration)?;
                     db::insert_event(
                         &conn,
@@ -818,7 +830,7 @@ impl Coordinator {
                         db::update_job_error(
                             &conn,
                             job.id,
-                            "failed",
+                            JobStatus::Failed,
                             &format!("Max retries exceeded. Transfer error: {}", e),
                         )?;
                         true
@@ -863,7 +875,7 @@ impl Coordinator {
                 "skip" => {
                     {
                         let conn = lock_mutex(&self.conn)?;
-                        db::update_upload_status(&conn, job.id, "skipped", "complete")?;
+                        db::update_upload_status(&conn, job.id, "skipped", JobStatus::Complete)?;
                         db::insert_event(
                             &conn,
                             job.id,
@@ -884,7 +896,7 @@ impl Coordinator {
                         db::update_job_error(
                             &conn,
                             job.id,
-                            "failed",
+                            JobStatus::Failed,
                             "conflict_policy=prompt is not supported for background transfers",
                         )?;
                         db::insert_event(
@@ -915,7 +927,7 @@ impl Coordinator {
                 db::update_job_error(
                     &conn,
                     job.id,
-                    "failed",
+                    JobStatus::Failed,
                     &format!(
                         "failed to create local destination directory '{}': {}",
                         parent.to_string_lossy(),
@@ -940,7 +952,7 @@ impl Coordinator {
 
         {
             let conn = lock_mutex(&self.conn)?;
-            db::update_upload_status(&conn, job.id, "downloading", "uploading")?;
+            db::update_upload_status(&conn, job.id, "downloading", JobStatus::Uploading)?;
             db::insert_event(
                 &conn,
                 job.id,
@@ -959,7 +971,7 @@ impl Coordinator {
                 let duration = start_time.elapsed().as_millis() as i64;
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_upload_status(&conn, job.id, "completed", "complete")?;
+                    db::update_upload_status(&conn, job.id, "completed", JobStatus::Complete)?;
                     db::update_upload_duration(&conn, job.id, duration)?;
                     db::insert_event(
                         &conn,
@@ -1009,7 +1021,7 @@ impl Coordinator {
                         db::update_job_error(
                             &conn,
                             job.id,
-                            "failed",
+                            JobStatus::Failed,
                             &format!("Max retries exceeded. Transfer error: {}", e),
                         )?;
                         true
@@ -1054,7 +1066,7 @@ impl Coordinator {
                     db::update_job_error(
                         &conn,
                         job.id,
-                        "failed",
+                        JobStatus::Failed,
                         &format!("unable to resolve upload destination endpoint: {}", e),
                     )?;
                     db::insert_event(
@@ -1074,7 +1086,7 @@ impl Coordinator {
         // Set status to "uploading" BEFORE starting upload
         {
             let conn = lock_mutex(&self.conn)?;
-            db::update_upload_status(&conn, job.id, "starting", "uploading")?;
+            db::update_upload_status(&conn, job.id, "starting", JobStatus::Uploading)?;
         }
 
         let cancel_token = Arc::new(AtomicBool::new(false));
@@ -1109,7 +1121,7 @@ impl Coordinator {
                 {
                     let duration = start_time.elapsed().as_millis() as i64;
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_upload_status(&conn, job.id, "completed", "complete")?;
+                    db::update_upload_status(&conn, job.id, "completed", JobStatus::Complete)?;
                     db::update_upload_duration(&conn, job.id, duration)?;
                     db::insert_event(
                         &conn,
@@ -1142,9 +1154,9 @@ impl Coordinator {
                     let conn = lock_mutex(&self.conn)?;
                     let current_status = db::get_job(&conn, job.id)?
                         .map(|j| j.status)
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .unwrap_or(JobStatus::Error);
 
-                    if current_status == "paused" {
+                    if current_status == JobStatus::Paused {
                         db::insert_event(&conn, job.id, "upload", "upload paused")?;
                     } else {
                         db::insert_event(&conn, job.id, "upload", "upload cancelled")?;
@@ -1192,7 +1204,7 @@ impl Coordinator {
                         db::update_job_error(
                             &conn,
                             job.id,
-                            "failed",
+                            JobStatus::Failed,
                             &format!("Max retries exceeded. Error: {}", e),
                         )?;
                         true
@@ -1211,6 +1223,108 @@ impl Coordinator {
 
         self.notify_work();
         Ok(())
+    }
+
+    fn quarantine_destination_path(
+        quarantine_dir: &std::path::Path,
+        source_path: &std::path::Path,
+        job_id: i64,
+    ) -> PathBuf {
+        let base_name = source_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("unknown.bin");
+
+        for attempt in 0..10_000usize {
+            let candidate = if attempt == 0 {
+                format!("job_{}_{}", job_id, base_name)
+            } else {
+                format!("job_{}_{}_{}", job_id, attempt, base_name)
+            };
+            let candidate_path = quarantine_dir.join(candidate);
+            if !candidate_path.exists() {
+                return candidate_path;
+            }
+        }
+
+        let fallback = format!(
+            "job_{}_{}_{}",
+            job_id,
+            chrono::Utc::now().timestamp(),
+            base_name
+        );
+        quarantine_dir.join(fallback)
+    }
+
+    fn quarantine_file_to_dir(
+        source_path: &std::path::Path,
+        quarantine_dir: &std::path::Path,
+        job_id: i64,
+    ) -> Result<PathBuf> {
+        if !source_path.exists() {
+            anyhow::bail!(
+                "source file does not exist: {}",
+                source_path.to_string_lossy()
+            );
+        }
+
+        std::fs::create_dir_all(quarantine_dir).with_context(|| {
+            format!(
+                "failed to create quarantine directory '{}'",
+                quarantine_dir.to_string_lossy()
+            )
+        })?;
+
+        let destination_path =
+            Self::quarantine_destination_path(quarantine_dir, source_path, job_id);
+        match std::fs::rename(source_path, &destination_path) {
+            Ok(()) => Ok(destination_path),
+            Err(rename_err) => {
+                warn!(
+                    "Rename into quarantine failed for '{}': {}. Trying copy+remove fallback.",
+                    source_path.to_string_lossy(),
+                    rename_err
+                );
+
+                std::fs::copy(source_path, &destination_path).with_context(|| {
+                    format!(
+                        "failed to copy '{}' to '{}'",
+                        source_path.to_string_lossy(),
+                        destination_path.to_string_lossy()
+                    )
+                })?;
+
+                {
+                    let file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&destination_path)
+                        .with_context(|| {
+                            format!(
+                                "failed to open copied quarantine file '{}'",
+                                destination_path.to_string_lossy()
+                            )
+                        })?;
+                    file.sync_all().with_context(|| {
+                        format!(
+                            "failed to fsync copied quarantine file '{}'",
+                            destination_path.to_string_lossy()
+                        )
+                    })?;
+                }
+
+                if let Err(remove_err) = std::fs::remove_file(source_path) {
+                    let _ = std::fs::remove_file(&destination_path);
+                    return Err(anyhow::anyhow!(
+                        "failed to remove original '{}' after copy fallback: {}",
+                        source_path.to_string_lossy(),
+                        remove_err
+                    ));
+                }
+
+                Ok(destination_path)
+            }
+        }
     }
 
     /// Calculate exponential backoff delay in seconds
@@ -1430,7 +1544,7 @@ mod tests {
         let job_id = {
             let c = lock_mutex(&conn)?;
             let id = db::create_job(&c, "session1", "/tmp/file.txt", 100, None)?;
-            db::update_job_staged(&c, id, "/tmp/staged.txt", "queued")?;
+            db::update_job_staged(&c, id, "/tmp/staged.txt", JobStatus::Queued)?;
             id
         };
 
@@ -1442,8 +1556,8 @@ mod tests {
         let job = db::get_job(&c, job_id)?.expect("Job not found");
 
         // It goes queued -> scanned (skipped) -> uploading
-        assert_eq!(job.status, "uploading");
-        assert_eq!(job.scan_status, Some("skipped".to_string()));
+        assert_eq!(job.status, JobStatus::Uploading);
+        assert_eq!(job.scan_status, Some(ScanStatus::Skipped));
 
         Ok(())
     }
@@ -1456,8 +1570,8 @@ mod tests {
         let job_id = {
             let c = lock_mutex(&conn)?;
             let id = db::create_job(&c, "session1", "/tmp/file.txt", 100, None)?;
-            db::update_job_staged(&c, id, "/tmp/staged.txt", "queued")?;
-            db::update_scan_status(&c, id, "clean", "scanned")?;
+            db::update_job_staged(&c, id, "/tmp/staged.txt", JobStatus::Queued)?;
+            db::update_scan_status(&c, id, "clean", JobStatus::Scanned)?;
             id
         };
 
@@ -1470,8 +1584,8 @@ mod tests {
         let c = lock_mutex(&conn)?;
         let job = db::get_job(&c, job_id)?.expect("Job not found");
 
-        assert_eq!(job.status, "uploading");
-        assert_eq!(job.upload_status, Some("uploading".to_string()));
+        assert_eq!(job.status, JobStatus::Uploading);
+        assert_eq!(job.upload_status, Some(db::UploadStatus::Uploading));
 
         Ok(())
     }

@@ -208,9 +208,11 @@ pub(crate) async fn request_remote_list(app: &mut App, force_refresh: bool) -> b
                 }
             }
             Err(e) => {
-                if let Err(send_err) =
-                    tx.send(AppEvent::Notification(format!("List Failed: {}", e)))
-                {
+                if let Err(send_err) = tx.send(AppEvent::RemoteFileListError(
+                    endpoint_id,
+                    path_for_request,
+                    e.to_string(),
+                )) {
                     warn!(
                         "Failed to send remote list failure notification: {}",
                         send_err
@@ -304,10 +306,11 @@ pub(crate) async fn request_secondary_remote_list(app: &mut App, force_refresh: 
                 }
             }
             Err(e) => {
-                if let Err(send_err) = tx.send(AppEvent::Notification(format!(
-                    "Secondary list failed: {}",
-                    e
-                ))) {
+                if let Err(send_err) = tx.send(AppEvent::RemoteFileListSecondaryError(
+                    endpoint_id,
+                    path_for_request,
+                    e.to_string(),
+                )) {
                     warn!(
                         "Failed to send secondary remote list failure notification: {}",
                         send_err
@@ -515,7 +518,7 @@ pub(crate) async fn queue_remote_download_batch(
                         let _ = db::update_job_error(
                             &conn,
                             job_id,
-                            "failed",
+                            db::JobStatus::Failed,
                             &format!("failed to set transfer metadata: {}", e),
                         );
                         failed += 1;
@@ -525,13 +528,13 @@ pub(crate) async fn queue_remote_download_batch(
                         &conn,
                         job_id,
                         &destination.to_string_lossy(),
-                        "queued",
+                        db::JobStatus::Queued,
                     ) {
                         warn!("Failed to stage transfer job {}: {}", job_id, e);
                         let _ = db::update_job_error(
                             &conn,
                             job_id,
-                            "failed",
+                            db::JobStatus::Failed,
                             &format!("failed to set destination path: {}", e),
                         );
                         failed += 1;
@@ -698,19 +701,23 @@ pub(crate) async fn queue_remote_s3_copy_batch(app: &mut App, objects: Vec<S3Obj
                         let _ = db::update_job_error(
                             &conn,
                             job_id,
-                            "failed",
+                            db::JobStatus::Failed,
                             &format!("failed to set transfer metadata: {}", e),
                         );
                         failed += 1;
                         continue;
                     }
-                    if let Err(e) = db::update_job_staged(&conn, job_id, &destination_key, "queued")
-                    {
+                    if let Err(e) = db::update_job_staged(
+                        &conn,
+                        job_id,
+                        &destination_key,
+                        db::JobStatus::Queued,
+                    ) {
                         warn!("Failed to stage transfer job {}: {}", job_id, e);
                         let _ = db::update_job_error(
                             &conn,
                             job_id,
-                            "failed",
+                            db::JobStatus::Failed,
                             &format!("failed to set destination key: {}", e),
                         );
                         failed += 1;

@@ -1,3 +1,4 @@
+use crate::db::JobStatus;
 use crate::ui::theme::StatusKind;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use std::time::SystemTime;
@@ -57,6 +58,25 @@ pub fn calculate_list_offset(selected: usize, total: usize, display_height: usiz
         offset = total.saturating_sub(display_height);
     }
     offset
+}
+
+pub fn centered_window_bounds(selected: usize, total: usize, max_visible: usize) -> (usize, usize) {
+    if total == 0 {
+        return (0, 0);
+    }
+    if max_visible == 0 {
+        return (0, total);
+    }
+
+    let mut start = 0usize;
+    if total > max_visible {
+        start = selected.saturating_sub(max_visible / 2);
+        if start + max_visible > total {
+            start = total.saturating_sub(max_visible);
+        }
+    }
+    let end = (start + max_visible).min(total);
+    (start, end)
 }
 
 pub fn format_bytes_rate(bytes: u64) -> String {
@@ -162,11 +182,13 @@ pub fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
 }
 
 pub fn status_kind(status: &str) -> StatusKind {
-    match status {
-        "complete" => StatusKind::Success,
-        "quarantined" | "failed" => StatusKind::Error,
-        "quarantined_removed" => StatusKind::Info,
-        "uploading" | "transferring" | "scanning" => StatusKind::Info,
+    match JobStatus::parse(status) {
+        Some(JobStatus::Complete) => StatusKind::Success,
+        Some(JobStatus::Quarantined | JobStatus::Failed) => StatusKind::Error,
+        Some(JobStatus::QuarantinedRemoved) => StatusKind::Info,
+        Some(JobStatus::Uploading | JobStatus::Transferring | JobStatus::Scanning) => {
+            StatusKind::Info
+        }
         _ => StatusKind::Warning,
     }
 }

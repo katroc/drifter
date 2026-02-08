@@ -18,6 +18,62 @@ fn text(action: &'static str) -> KeyHint {
     KeyHint { key: None, action }
 }
 
+fn settings_category_hints(category: SettingsCategory) -> Vec<KeyHint> {
+    match category {
+        SettingsCategory::S3 => vec![
+            key_action("Tab/→", "Fields"),
+            key_action("←", "Rail"),
+            key_action("↑/↓", "Category"),
+            key_action("[]", "Cycle S3"),
+            key_action("n/x", "New/Del S3"),
+            key_action("s", "Save"),
+            key_action("t", "Test"),
+        ],
+        SettingsCategory::Scanner => vec![
+            key_action("Tab/→", "Fields"),
+            key_action("←", "Rail"),
+            key_action("↑/↓", "Category"),
+            key_action("s", "Save"),
+            key_action("t", "Test"),
+        ],
+        SettingsCategory::Performance | SettingsCategory::General => vec![
+            key_action("Tab/→", "Fields"),
+            key_action("←", "Rail"),
+            key_action("↑/↓", "Category"),
+            key_action("s", "Save"),
+        ],
+    }
+}
+
+fn settings_field_hints(category: SettingsCategory) -> Vec<KeyHint> {
+    match category {
+        SettingsCategory::S3 => vec![
+            key_action("←", "Category"),
+            key_action("Enter", "Edit"),
+            key_action("[]", "Cycle S3"),
+            key_action("n/x", "New/Del S3"),
+            key_action("s", "Save"),
+            key_action("t", "Test"),
+        ],
+        SettingsCategory::Scanner => vec![
+            key_action("←", "Category"),
+            key_action("Enter", "Edit"),
+            key_action("s", "Save"),
+            key_action("t", "Test"),
+        ],
+        SettingsCategory::Performance => vec![
+            key_action("←", "Category"),
+            key_action("Enter", "Edit"),
+            key_action("s", "Save"),
+        ],
+        SettingsCategory::General => vec![
+            key_action("←", "Category"),
+            key_action("Enter", "Edit/Open"),
+            key_action("s", "Save"),
+        ],
+    }
+}
+
 pub fn footer_hints(app: &App) -> Vec<KeyHint> {
     match app.input_mode {
         InputMode::LogSearch => vec![key_action("Enter", "Search"), key_action("Esc", "Cancel")],
@@ -54,7 +110,7 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
             let mut hints = vec![
                 key_action("←/→", "Navigate"),
                 key_action("↑/↓", "Select"),
-                key_action("[]", "Endpoint"),
+                key_action("e", "Select Ep"),
                 key_action("r", "Refresh"),
                 key_action("d", "Download"),
                 key_action("x", "Delete"),
@@ -84,6 +140,11 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
         InputMode::RemoteFolderCreate => {
             vec![key_action("Enter", "Create"), key_action("Esc", "Cancel")]
         }
+        InputMode::EndpointSelect => vec![
+            key_action("↑/↓", "Select"),
+            key_action("Enter", "Apply"),
+            key_action("Esc", "Cancel"),
+        ],
         InputMode::Confirmation => vec![
             key_action("Enter/y", "Confirm"),
             key_action("Esc/n", "Cancel"),
@@ -108,7 +169,7 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
                         crate::core::transfer::TransferDirection::S3ToS3
                     ) {
                         vec![
-                            key_action("[]", "Endpoint"),
+                            key_action("e", "Select Ep"),
                             key_action("a", "Browse"),
                             key_action("r", "Refresh"),
                             key_action("x", "Delete"),
@@ -134,7 +195,7 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
                 AppFocus::History => vec![key_action("←", "Queue")],
                 AppFocus::Remote => {
                     let mut hints = vec![
-                        key_action("[]", "Endpoint"),
+                        key_action("e", "Select Ep"),
                         key_action("a", "Browse"),
                         key_action("r", "Refresh"),
                         key_action("d", "Download"),
@@ -164,51 +225,14 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
                     key_action("d", "Clear"),
                     key_action("R", "Refresh"),
                 ],
-                AppFocus::SettingsCategory => match app.settings.active_category {
-                    SettingsCategory::S3 => vec![
-                        key_action("Tab/→", "Fields"),
-                        key_action("←", "Rail"),
-                        key_action("↑/↓", "Category"),
-                        key_action("[]", "Cycle S3"),
-                        key_action("n/x", "New/Del S3"),
-                        key_action("s", "Save"),
-                        key_action("t", "Test"),
-                    ],
-                    SettingsCategory::Scanner => vec![
-                        key_action("Tab/→", "Fields"),
-                        key_action("←", "Rail"),
-                        key_action("↑/↓", "Category"),
-                        key_action("s", "Save"),
-                        key_action("t", "Test"),
-                    ],
-                    _ => vec![
-                        key_action("Tab/→", "Fields"),
-                        key_action("←", "Rail"),
-                        key_action("↑/↓", "Category"),
-                        key_action("s", "Save"),
-                    ],
-                },
-                AppFocus::SettingsFields => match app.settings.active_category {
-                    SettingsCategory::S3 => vec![
-                        key_action("←", "Category"),
-                        key_action("Enter", "Edit"),
-                        key_action("[]", "Cycle S3"),
-                        key_action("n/x", "New/Del S3"),
-                        key_action("s", "Save"),
-                        key_action("t", "Test"),
-                    ],
-                    SettingsCategory::Scanner => vec![
-                        key_action("←", "Category"),
-                        key_action("Enter", "Edit"),
-                        key_action("s", "Save"),
-                        key_action("t", "Test"),
-                    ],
-                    _ => vec![
-                        key_action("←", "Category"),
-                        key_action("Enter", "Edit"),
-                        key_action("s", "Save"),
-                    ],
-                },
+                AppFocus::SettingsCategory => {
+                    let category = app.settings.active_category;
+                    settings_category_hints(category)
+                }
+                AppFocus::SettingsFields => {
+                    let category = app.settings.active_category;
+                    settings_field_hints(category)
+                }
             };
 
             hints.push(key_action("Tab", "Navigate"));
