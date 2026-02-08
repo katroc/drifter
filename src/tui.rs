@@ -939,12 +939,10 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                         app.show_wizard = false;
                                         app.wizard_from_settings = false;
                                         app.status_message = "Setup complete!".to_string();
-                                    } else {
-                                        if app.wizard.editing {
-                                            app.wizard.editing = false;
-                                        } else if !app.wizard.toggle_current_field() {
-                                            app.wizard.editing = true;
-                                        }
+                                    } else if app.wizard.editing {
+                                        app.wizard.editing = false;
+                                    } else if !app.wizard.toggle_current_field() {
+                                        app.wizard.editing = true;
                                     }
                                 }
                                 KeyCode::Tab if !app.wizard.editing => {
@@ -4303,12 +4301,11 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         }
 
                                                         // Auto-expand selector fields
-                                                        if (app.settings.active_category
-                                                            == SettingsCategory::General
-                                                            && target_idx == 0)
-                                                            || (app.settings.active_category
-                                                                == SettingsCategory::S3
-                                                                && target_idx == 0)
+                                                        if target_idx == 0
+                                                            && (app.settings.active_category
+                                                                == SettingsCategory::General
+                                                                || app.settings.active_category
+                                                                    == SettingsCategory::S3)
                                                         {
                                                             app.settings.editing = true;
                                                             if app.settings.active_category

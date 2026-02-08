@@ -1835,9 +1835,10 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
             app.theme.text_style()
         };
 
-        let display_value = if app.settings.active_category == SettingsCategory::S3 && i == 0 {
-            format!("▼ {}", value)
-        } else if app.settings.active_category == SettingsCategory::General && i == 0 {
+        let display_value = if i == 0
+            && (app.settings.active_category == SettingsCategory::S3
+                || app.settings.active_category == SettingsCategory::General)
+        {
             format!("▼ {}", value)
         } else {
             (*value).to_string()
