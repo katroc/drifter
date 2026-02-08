@@ -1972,7 +1972,10 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         f.render_stateful_widget(list, profile_area, &mut list_state);
     }
 
-    if app.settings.editing && selected_field_id == Some(SettingsFieldId::S3Region) {
+    if app.settings.editing
+        && selected_field_id == Some(SettingsFieldId::S3Region)
+        && !app.settings.is_s3_region_other_selected()
+    {
         let max_width = fields_area.width.saturating_sub(2);
         let max_height = fields_area.height.saturating_sub(2);
         if max_width < 26 || max_height < 6 {
@@ -1993,35 +1996,48 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         let list_block = Block::default()
             .borders(Borders::ALL)
             .border_type(app.theme.border_type)
-            .title(" Select S3 Region (Type custom) ")
+            .title(
+                if app.settings.s3_region_filter().trim().is_empty()
+                    || app.settings.is_s3_region_other_selected()
+                {
+                    " Select S3 Region (Type to filter) ".to_string()
+                } else {
+                    format!(
+                        " Select S3 Region (filter: {}) ",
+                        app.settings.s3_region_filter().trim()
+                    )
+                },
+            )
             .border_style(app.theme.border_active_style())
             .style(app.theme.panel_style());
 
         let regions = SettingsState::known_s3_regions();
-        let selected = app.settings.selected_s3_region_selector_index();
-        let total = app.settings.s3_region_selector_len();
+        let selector_indices = app.settings.filtered_s3_region_selector_indices();
+        let total = selector_indices.len();
+        let selected_selector = app.settings.selected_s3_region_selector_index();
+        let selected = selector_indices
+            .iter()
+            .position(|idx| *idx == selected_selector)
+            .unwrap_or(0);
         let max_visible = region_area.height.saturating_sub(2) as usize;
         let (start, end) = centered_window_bounds(selected, total, max_visible);
 
-        let selector_items: Vec<String> = regions
-            .iter()
-            .map(|region| region.to_string())
-            .chain(std::iter::once(
-                SettingsState::S3_REGION_OTHER_LABEL.to_string(),
-            ))
-            .collect();
-
-        let visible_items: Vec<ListItem> = selector_items
+        let visible_items: Vec<ListItem> = selector_indices
             .iter()
             .skip(start)
             .take(end.saturating_sub(start))
             .enumerate()
-            .map(|(idx, label)| {
+            .map(|(idx, selector_idx)| {
                 let absolute = start + idx;
                 let style = if absolute == selected {
                     app.theme.selection_style()
                 } else {
                     app.theme.text_style()
+                };
+                let label = if *selector_idx < regions.len() {
+                    regions[*selector_idx].to_string()
+                } else {
+                    SettingsState::S3_REGION_OTHER_LABEL.to_string()
                 };
                 ListItem::new(format!(" {} ", label)).style(style)
             })
@@ -2413,7 +2429,7 @@ fn draw_wizard(f: &mut Frame, app: &App) {
                     required: true,
                     secret: false,
                     toggle: false,
-                    help: "Choose a known region, or select Other to type a custom region.",
+                    help: "Type to filter known regions, or select Custom for a custom region.",
                 },
                 WizardFieldSpec {
                     label: "Endpoint",
@@ -2633,7 +2649,11 @@ fn draw_wizard(f: &mut Frame, app: &App) {
             }
         }
 
-        if app.wizard.editing && app.wizard.step == WizardStep::S3 && app.wizard.field == 2 {
+        if app.wizard.editing
+            && app.wizard.step == WizardStep::S3
+            && app.wizard.field == 2
+            && !app.wizard.is_s3_region_other_selected()
+        {
             let max_width = fields_area.width.saturating_sub(2);
             let max_height = fields_area.height.saturating_sub(2);
             if max_width >= 26 && max_height >= 6 {
@@ -2651,34 +2671,48 @@ fn draw_wizard(f: &mut Frame, app: &App) {
                 let list_block = Block::default()
                     .borders(Borders::ALL)
                     .border_type(app.theme.border_type)
-                    .title(" Select Region (Other for custom) ")
+                    .title(
+                        if app.wizard.s3_region_filter().trim().is_empty()
+                            || app.wizard.is_s3_region_other_selected()
+                        {
+                            " Select Region (Type to filter) ".to_string()
+                        } else {
+                            format!(
+                                " Select Region (filter: {}) ",
+                                app.wizard.s3_region_filter().trim()
+                            )
+                        },
+                    )
                     .border_style(app.theme.border_active_style())
                     .style(app.theme.panel_style());
 
-                let selector_items: Vec<String> = WizardState::known_s3_regions()
+                let selector_indices = app.wizard.filtered_s3_region_selector_indices();
+                let total = selector_indices.len();
+                let selected_selector = app.wizard.selected_s3_region_selector_index();
+                let selected = selector_indices
                     .iter()
-                    .map(|region| region.to_string())
-                    .chain(std::iter::once(
-                        WizardState::S3_REGION_OTHER_LABEL.to_string(),
-                    ))
-                    .collect();
-
-                let total = app.wizard.s3_region_selector_len();
-                let selected = app.wizard.selected_s3_region_selector_index();
+                    .position(|idx| *idx == selected_selector)
+                    .unwrap_or(0);
                 let max_visible = region_area.height.saturating_sub(2) as usize;
                 let (start, end) = centered_window_bounds(selected, total, max_visible);
 
-                let visible_items: Vec<ListItem> = selector_items
+                let known_regions = WizardState::known_s3_regions();
+                let visible_items: Vec<ListItem> = selector_indices
                     .iter()
                     .skip(start)
                     .take(end.saturating_sub(start))
                     .enumerate()
-                    .map(|(idx, label)| {
+                    .map(|(idx, selector_idx)| {
                         let absolute = start + idx;
                         let style = if absolute == selected {
                             app.theme.selection_style()
                         } else {
                             app.theme.text_style()
+                        };
+                        let label = if *selector_idx < known_regions.len() {
+                            known_regions[*selector_idx].to_string()
+                        } else {
+                            WizardState::S3_REGION_OTHER_LABEL.to_string()
                         };
                         ListItem::new(format!(" {} ", label)).style(style)
                     })
@@ -2699,8 +2733,14 @@ fn draw_wizard(f: &mut Frame, app: &App) {
 
     let nav_text = if app.wizard.step == WizardStep::Done {
         "Enter Save & Continue  │  Shift+Tab Back  │  q Quit"
+    } else if app.wizard.editing
+        && app.wizard.step == WizardStep::S3
+        && app.wizard.field == 2
+        && app.wizard.is_s3_region_other_selected()
+    {
+        "Type custom region  │  ↑/↓ or [] Select Region  │  Enter Save Field  │  Esc Cancel Edit"
     } else if app.wizard.editing && app.wizard.step == WizardStep::S3 && app.wizard.field == 2 {
-        "↑/↓ or [] Select Region  │  Other = Type custom  │  Enter Save Field  │  Esc Cancel Edit"
+        "Type to filter  │  ↑/↓ or [] Select Region  │  Custom = Type custom  │  Enter Save Field  │  Esc Cancel Edit"
     } else if app.wizard.editing {
         "Type value  │  Enter Save Field  │  Esc Cancel Edit"
     } else {

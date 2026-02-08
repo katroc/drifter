@@ -268,6 +268,8 @@ pub struct SettingsState {
     pub endpoint: String,
     pub bucket: String,
     pub region: String,
+    pub s3_region_custom: bool,
+    pub s3_region_filter: String,
     pub prefix: String,
     pub access_key: String,
     pub secret_key: String,
@@ -296,14 +298,19 @@ pub struct SettingsState {
 }
 
 impl SettingsState {
-    pub const S3_REGION_OTHER_LABEL: &'static str = "Other (custom)";
+    pub const S3_REGION_OTHER_LABEL: &'static str = "Custom";
 
     pub fn known_s3_regions() -> &'static [&'static str] {
         &KNOWN_S3_REGIONS
     }
 
-    pub fn s3_region_selector_len(&self) -> usize {
-        KNOWN_S3_REGIONS.len() + 1
+    fn is_known_s3_region(value: &str) -> bool {
+        let trimmed = value.trim();
+        !trimmed.is_empty() && KNOWN_S3_REGIONS.contains(&trimmed)
+    }
+
+    fn s3_region_custom_for_value(value: &str) -> bool {
+        !Self::is_known_s3_region(value)
     }
 
     pub fn s3_region_other_index(&self) -> usize {
@@ -313,6 +320,59 @@ impl SettingsState {
     pub fn selected_s3_region_selector_index(&self) -> usize {
         self.selected_s3_region_known_index()
             .unwrap_or(self.s3_region_other_index())
+    }
+
+    pub fn clear_s3_region_filter(&mut self) {
+        self.s3_region_filter.clear();
+    }
+
+    pub fn s3_region_filter(&self) -> &str {
+        self.s3_region_filter.as_str()
+    }
+
+    pub fn filtered_s3_region_selector_indices(&self) -> Vec<usize> {
+        let filter = self.s3_region_filter.trim().to_ascii_lowercase();
+        let mut indices: Vec<usize> = KNOWN_S3_REGIONS
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, region)| {
+                if filter.is_empty() || region.to_ascii_lowercase().contains(&filter) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        indices.push(self.s3_region_other_index());
+        indices
+    }
+
+    fn sync_s3_region_selection_to_filter(&mut self) {
+        if self.s3_region_custom {
+            return;
+        }
+        let filter = self.s3_region_filter.trim().to_ascii_lowercase();
+        if filter.is_empty() {
+            return;
+        }
+        if let Some((idx, _)) = KNOWN_S3_REGIONS
+            .iter()
+            .enumerate()
+            .find(|(_, region)| region.to_ascii_lowercase().contains(&filter))
+        {
+            self.region = KNOWN_S3_REGIONS[idx].to_string();
+        }
+    }
+
+    pub fn push_char_to_s3_region_filter(&mut self, c: char) {
+        self.s3_region_filter.push(c);
+        self.sync_s3_region_selection_to_filter();
+    }
+
+    pub fn pop_char_from_s3_region_filter(&mut self) {
+        self.s3_region_filter.pop();
+        self.sync_s3_region_selection_to_filter();
     }
 
     pub fn field_defs(category: SettingsCategory) -> &'static [SettingsFieldDef] {
@@ -498,13 +558,16 @@ impl SettingsState {
     }
 
     pub fn from_config(cfg: &Config) -> Self {
+        let region = cfg
+            .s3_region
+            .clone()
+            .unwrap_or_else(|| DEFAULT_S3_REGION.to_string());
         Self {
             endpoint: cfg.s3_endpoint.clone().unwrap_or_default(),
             bucket: cfg.s3_bucket.clone().unwrap_or_default(),
-            region: cfg
-                .s3_region
-                .clone()
-                .unwrap_or_else(|| DEFAULT_S3_REGION.to_string()),
+            s3_region_custom: Self::s3_region_custom_for_value(&region),
+            s3_region_filter: String::new(),
+            region,
             prefix: cfg.s3_prefix.clone().unwrap_or_default(),
             access_key: cfg.s3_access_key.clone().unwrap_or_default(),
             secret_key: cfg.s3_secret_key.clone().unwrap_or_default(),
@@ -648,6 +711,8 @@ impl SettingsState {
             self.endpoint.clear();
             self.bucket.clear();
             self.region = DEFAULT_S3_REGION.to_string();
+            self.s3_region_custom = false;
+            self.s3_region_filter.clear();
             self.prefix.clear();
             self.access_key.clear();
             self.secret_key.clear();
@@ -667,6 +732,8 @@ impl SettingsState {
         } else {
             profile.region
         };
+        self.s3_region_custom = Self::s3_region_custom_for_value(&self.region);
+        self.s3_region_filter.clear();
         self.prefix = profile.prefix;
         self.access_key = profile.access_key;
         self.secret_key = profile.secret_key;
@@ -722,6 +789,9 @@ impl SettingsState {
     }
 
     pub fn selected_s3_region_known_index(&self) -> Option<usize> {
+        if self.s3_region_custom {
+            return None;
+        }
         let region = self.region.trim();
         if region.is_empty() {
             return None;
@@ -730,33 +800,52 @@ impl SettingsState {
     }
 
     pub fn is_s3_region_other_selected(&self) -> bool {
-        self.selected_s3_region_known_index().is_none()
+        self.s3_region_custom
     }
 
     pub fn set_s3_region_selector_index(&mut self, index: usize) {
         if index < KNOWN_S3_REGIONS.len() {
             self.region = KNOWN_S3_REGIONS[index].to_string();
-        } else if self.selected_s3_region_known_index().is_some() {
-            self.region.clear();
+            self.s3_region_custom = false;
+        } else {
+            if !self.s3_region_custom {
+                self.region.clear();
+            }
+            self.s3_region_custom = true;
+            self.s3_region_filter.clear();
         }
     }
 
     pub fn cycle_s3_region_selection(&mut self) {
-        let next = match self.selected_s3_region_known_index() {
-            Some(idx) if idx + 1 < KNOWN_S3_REGIONS.len() => idx + 1,
-            Some(_) => self.s3_region_other_index(),
-            None => 0,
+        let selector_indices = self.filtered_s3_region_selector_indices();
+        if selector_indices.is_empty() {
+            return;
+        }
+        let selected_idx = self.selected_s3_region_selector_index();
+        let next_pos = if let Some(current_pos) =
+            selector_indices.iter().position(|idx| *idx == selected_idx)
+        {
+            (current_pos + 1) % selector_indices.len()
+        } else {
+            0
         };
-        self.set_s3_region_selector_index(next);
+        self.set_s3_region_selector_index(selector_indices[next_pos]);
     }
 
     pub fn cycle_s3_region_selection_prev(&mut self) {
-        let prev = match self.selected_s3_region_known_index() {
-            Some(0) => self.s3_region_other_index(),
-            Some(idx) => idx - 1,
-            None => KNOWN_S3_REGIONS.len() - 1,
+        let selector_indices = self.filtered_s3_region_selector_indices();
+        if selector_indices.is_empty() {
+            return;
+        }
+        let selected_idx = self.selected_s3_region_selector_index();
+        let prev_pos = if let Some(current_pos) =
+            selector_indices.iter().position(|idx| *idx == selected_idx)
+        {
+            (current_pos + selector_indices.len().saturating_sub(1)) % selector_indices.len()
+        } else {
+            selector_indices.len().saturating_sub(1)
         };
-        self.set_s3_region_selector_index(prev);
+        self.set_s3_region_selector_index(selector_indices[prev_pos]);
     }
 
     pub fn selected_s3_prefix_mut(&mut self) -> &mut String {
@@ -955,5 +1044,81 @@ impl SettingsState {
         )?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_region_uses_selector_mode() {
+        let cfg = Config {
+            s3_region: Some("us-west-2".to_string()),
+            ..Config::default()
+        };
+
+        let state = SettingsState::from_config(&cfg);
+
+        assert_eq!(state.selected_s3_region(), "us-west-2");
+        assert!(!state.is_s3_region_other_selected());
+        assert!(state.selected_s3_region_known_index().is_some());
+    }
+
+    #[test]
+    fn unknown_region_uses_custom_mode() {
+        let cfg = Config {
+            s3_region: Some("vendor-special-1".to_string()),
+            ..Config::default()
+        };
+
+        let state = SettingsState::from_config(&cfg);
+
+        assert_eq!(state.selected_s3_region(), "vendor-special-1");
+        assert!(state.is_s3_region_other_selected());
+        assert_eq!(
+            state.selected_s3_region_selector_index(),
+            state.s3_region_other_index()
+        );
+    }
+
+    #[test]
+    fn filtered_cycle_selects_first_match_then_custom() {
+        let cfg = Config {
+            s3_region: Some("ap-southeast-2".to_string()),
+            ..Config::default()
+        };
+        let mut state = SettingsState::from_config(&cfg);
+        state.set_s3_region_selector_index(state.s3_region_other_index());
+
+        for c in "us-west-2".chars() {
+            state.push_char_to_s3_region_filter(c);
+        }
+
+        state.cycle_s3_region_selection();
+        assert_eq!(state.selected_s3_region(), "us-west-2");
+        assert!(!state.is_s3_region_other_selected());
+
+        state.cycle_s3_region_selection();
+        assert!(state.is_s3_region_other_selected());
+        assert_eq!(
+            state.selected_s3_region_selector_index(),
+            state.s3_region_other_index()
+        );
+    }
+
+    #[test]
+    fn selecting_custom_allows_manual_region_input() {
+        let mut state = SettingsState::from_config(&Config::default());
+        state.set_s3_region_selector_index(state.s3_region_other_index());
+
+        assert!(state.is_s3_region_other_selected());
+        assert!(state.region.is_empty());
+
+        for c in "my-region-1".chars() {
+            let _ = state.push_char_to_field(SettingsFieldId::S3Region, c);
+        }
+        assert_eq!(state.selected_s3_region(), "my-region-1");
+        assert!(state.is_s3_region_other_selected());
     }
 }

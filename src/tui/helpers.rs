@@ -208,9 +208,11 @@ pub(crate) async fn request_remote_list(app: &mut App, force_refresh: bool) -> b
                 }
             }
             Err(e) => {
-                if let Err(send_err) =
-                    tx.send(AppEvent::Notification(format!("List Failed: {}", e)))
-                {
+                if let Err(send_err) = tx.send(AppEvent::RemoteFileListError(
+                    endpoint_id,
+                    path_for_request,
+                    e.to_string(),
+                )) {
                     warn!(
                         "Failed to send remote list failure notification: {}",
                         send_err
@@ -304,10 +306,11 @@ pub(crate) async fn request_secondary_remote_list(app: &mut App, force_refresh: 
                 }
             }
             Err(e) => {
-                if let Err(send_err) = tx.send(AppEvent::Notification(format!(
-                    "Secondary list failed: {}",
-                    e
-                ))) {
+                if let Err(send_err) = tx.send(AppEvent::RemoteFileListSecondaryError(
+                    endpoint_id,
+                    path_for_request,
+                    e.to_string(),
+                )) {
                     warn!(
                         "Failed to send secondary remote list failure notification: {}",
                         send_err

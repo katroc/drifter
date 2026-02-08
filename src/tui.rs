@@ -456,11 +456,24 @@ async fn handle_settings_field_enter_key(app: &mut App, conn_mutex: &Arc<Mutex<C
         skip_save_on_exit = true;
     } else if active_field.id == SettingsFieldId::S3Region {
         if app.settings.editing {
+            if !app.settings.is_s3_region_other_selected()
+                && !app.settings.s3_region_filter().trim().is_empty()
+                && let Some(first_index) = app
+                    .settings
+                    .filtered_s3_region_selector_indices()
+                    .first()
+                    .copied()
+            {
+                app.settings.set_s3_region_selector_index(first_index);
+            }
             app.settings.editing = false;
+            app.settings.clear_s3_region_filter();
         } else {
             app.settings.editing = true;
+            app.settings.clear_s3_region_filter();
             app.set_status(
-                "Select region with arrows or type custom region (Enter to apply)".to_string(),
+                "Type to filter regions, or select Custom for custom region (Enter to apply)"
+                    .to_string(),
             );
             return;
         }
@@ -521,6 +534,8 @@ fn handle_settings_field_edit_char(app: &mut App, c: char) {
                     app.settings.cycle_s3_region_selection_prev();
                 } else if app.settings.is_s3_region_other_selected() {
                     let _ = app.settings.push_char_to_field(field_id, c);
+                } else {
+                    app.settings.push_char_to_s3_region_filter(c);
                 }
             }
             _ => {
@@ -543,6 +558,9 @@ async fn handle_settings_field_key(
         }
         KeyCode::Esc => {
             app.settings.editing = false;
+            if active_settings_field_id(app) == Some(SettingsFieldId::S3Region) {
+                app.settings.clear_s3_region_filter();
+            }
             if active_settings_field_id(app) == Some(SettingsFieldId::Theme) {
                 if let Some(orig) = &app.settings.original_theme {
                     app.settings.theme = orig.clone();
@@ -591,11 +609,16 @@ async fn handle_settings_field_key(
             handle_settings_field_edit_char(app, c);
         }
         KeyCode::Backspace if app.settings.editing => {
-            if let Some(field_id) = active_settings_field_id(app)
-                && (field_id != SettingsFieldId::S3Region
-                    || app.settings.is_s3_region_other_selected())
-            {
-                let _ = app.settings.pop_char_from_field(field_id);
+            if let Some(field_id) = active_settings_field_id(app) {
+                if field_id == SettingsFieldId::S3Region {
+                    if app.settings.is_s3_region_other_selected() {
+                        let _ = app.settings.pop_char_from_field(field_id);
+                    } else {
+                        app.settings.pop_char_from_s3_region_filter();
+                    }
+                } else {
+                    let _ = app.settings.pop_char_from_field(field_id);
+                }
             }
         }
         KeyCode::Up | KeyCode::Char('k') if !app.settings.editing => {
@@ -655,6 +678,10 @@ async fn handle_settings_center_click(
 ) {
     let sidebar_width = 16;
     if x < center_layout.x + sidebar_width {
+        if app.settings.editing && active_settings_field_id(app) == Some(SettingsFieldId::S3Region)
+        {
+            app.settings.clear_s3_region_filter();
+        }
         app.focus = AppFocus::SettingsCategory;
         let rel_y = y.saturating_sub(center_layout.y + 1);
         if rel_y < 4 {
@@ -792,10 +819,15 @@ async fn handle_settings_center_click(
 
         if rel_x < list_width && rel_y < list_height {
             let display_height = list_height.saturating_sub(2) as usize;
-            let total = app.settings.s3_region_selector_len();
+            let selector_indices = app.settings.filtered_s3_region_selector_indices();
+            let total = selector_indices.len();
             if rel_y >= 1 && (rel_y as usize) < display_height + 1 {
                 let inner_rel_y = (rel_y - 1) as usize;
-                let selected = app.settings.selected_s3_region_selector_index();
+                let selected_selector = app.settings.selected_s3_region_selector_index();
+                let selected = selector_indices
+                    .iter()
+                    .position(|idx| *idx == selected_selector)
+                    .unwrap_or(0);
                 let (offset, _) = centered_window_bounds(selected, total, display_height);
 
                 let target_idx = offset + inner_rel_y;
@@ -810,13 +842,27 @@ async fn handle_settings_center_click(
                         false
                     };
 
-                    app.settings.set_s3_region_selector_index(target_idx);
+                    let selected_index = selector_indices[target_idx];
+                    let is_other_choice = selected_index == app.settings.s3_region_other_index();
+                    if is_other_choice && !is_double_click {
+                        app.last_click_time = Some(now);
+                        app.last_click_pos = Some((x, y));
+                        app.status_message =
+                            "Select Custom with double-click to enable custom region input."
+                                .to_string();
+                        return;
+                    }
+
+                    app.settings.set_s3_region_selector_index(selected_index);
                     if is_double_click {
                         if app.settings.is_s3_region_other_selected() {
-                            app.last_click_time = Some(now);
-                            app.last_click_pos = Some((x, y));
+                            app.last_click_time = None;
+                            app.status_message =
+                                "Custom region mode enabled. Type in the S3 Region field."
+                                    .to_string();
                         } else {
                             app.settings.editing = false;
+                            app.settings.clear_s3_region_filter();
                             app.last_click_time = None;
                             if let Err(e) = persist_settings_state(app, conn_mutex).await {
                                 app.status_message = format!("Failed to save region: {}", e);
@@ -833,6 +879,7 @@ async fn handle_settings_center_click(
             }
         } else {
             app.settings.editing = false;
+            app.settings.clear_s3_region_filter();
         }
         return;
     }
@@ -892,6 +939,8 @@ async fn handle_settings_center_click(
         app.settings.editing = true;
         if target_field.map(|field| field.id) == Some(SettingsFieldId::Theme) {
             app.settings.original_theme = Some(app.settings.theme.clone());
+        } else if target_field.map(|field| field.id) == Some(SettingsFieldId::S3Region) {
+            app.settings.clear_s3_region_filter();
         }
     }
 }
@@ -905,6 +954,10 @@ fn handle_settings_center_scroll(
 ) {
     let sidebar_width = 16;
     if x < center_layout.x + sidebar_width {
+        if app.settings.editing && active_settings_field_id(app) == Some(SettingsFieldId::S3Region)
+        {
+            app.settings.clear_s3_region_filter();
+        }
         if is_down {
             app.settings.active_category = app.settings.active_category.next();
         } else {
@@ -935,6 +988,14 @@ fn handle_settings_center_scroll(
             app.settings.cycle_s3_profile_selection();
         } else {
             app.settings.cycle_s3_profile_selection_prev();
+        }
+    } else if app.settings.editing
+        && active_settings_field_id(app) == Some(SettingsFieldId::S3Region)
+    {
+        if is_down {
+            app.settings.cycle_s3_region_selection();
+        } else {
+            app.settings.cycle_s3_region_selection_prev();
         }
     } else {
         let count = app.settings.active_category.field_count();
@@ -1109,6 +1170,17 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                         app.set_status(msg);
                     }
                 }
+                AppEvent::RemoteFileListError(endpoint_id, path, error) => {
+                    let request_key = match endpoint_id {
+                        Some(id) => format!("{id}::{path}"),
+                        None => format!("none::{path}"),
+                    };
+                    if app.remote_request_pending.as_ref() == Some(&request_key) {
+                        app.remote_loading = false;
+                        app.remote_request_pending = None;
+                    }
+                    app.set_status(format!("List Failed: {}", error));
+                }
                 AppEvent::RemoteFileListSecondary(endpoint_id, path, files) => {
                     let request_key = match endpoint_id {
                         Some(id) => format!("{id}::{path}"),
@@ -1147,6 +1219,17 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                         );
                         app.set_status(msg);
                     }
+                }
+                AppEvent::RemoteFileListSecondaryError(endpoint_id, path, error) => {
+                    let request_key = match endpoint_id {
+                        Some(id) => format!("{id}::{path}"),
+                        None => format!("none::{path}"),
+                    };
+                    if app.remote_secondary_request_pending.as_ref() == Some(&request_key) {
+                        app.remote_secondary_loading = false;
+                        app.remote_secondary_request_pending = None;
+                    }
+                    app.set_status(format!("Secondary list failed: {}", error));
                 }
                 AppEvent::LogLine(line) => {
                     app.logs.push_back(line);
@@ -1513,6 +1596,9 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                 }
                                 KeyCode::Esc if app.wizard.editing => {
                                     app.wizard.editing = false;
+                                    if app.wizard.step == WizardStep::S3 && app.wizard.field == 2 {
+                                        app.wizard.clear_s3_region_filter();
+                                    }
                                 }
                                 KeyCode::Enter => {
                                     if app.wizard.step == WizardStep::Done {
@@ -1659,9 +1745,31 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                         app.wizard_from_settings = false;
                                         app.status_message = "Setup complete!".to_string();
                                     } else if app.wizard.editing {
+                                        if app.wizard.step == WizardStep::S3
+                                            && app.wizard.field == 2
+                                            && !app.wizard.is_s3_region_other_selected()
+                                            && !app.wizard.s3_region_filter().trim().is_empty()
+                                            && let Some(first_index) = app
+                                                .wizard
+                                                .filtered_s3_region_selector_indices()
+                                                .first()
+                                                .copied()
+                                        {
+                                            app.wizard.set_s3_region_selector_index(first_index);
+                                        }
                                         app.wizard.editing = false;
+                                        if app.wizard.step == WizardStep::S3
+                                            && app.wizard.field == 2
+                                        {
+                                            app.wizard.clear_s3_region_filter();
+                                        }
                                     } else if !app.wizard.toggle_current_field() {
                                         app.wizard.editing = true;
+                                        if app.wizard.step == WizardStep::S3
+                                            && app.wizard.field == 2
+                                        {
+                                            app.wizard.clear_s3_region_filter();
+                                        }
                                     }
                                 }
                                 KeyCode::Tab if !app.wizard.editing => {
@@ -1710,6 +1818,8 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             app.wizard.cycle_s3_region_selection_prev();
                                         } else if app.wizard.is_s3_region_other_selected() {
                                             app.wizard.region.push(c);
+                                        } else {
+                                            app.wizard.push_char_to_s3_region_filter(c);
                                         }
                                     } else if let Some(field) = app.wizard.get_field_mut() {
                                         field.push(c);
@@ -1719,6 +1829,8 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     if app.wizard.step == WizardStep::S3 && app.wizard.field == 2 {
                                         if app.wizard.is_s3_region_other_selected() {
                                             app.wizard.region.pop();
+                                        } else {
+                                            app.wizard.pop_char_from_s3_region_filter();
                                         }
                                     } else if let Some(field) = app.wizard.get_field_mut() {
                                         field.pop();

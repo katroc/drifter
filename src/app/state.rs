@@ -96,7 +96,9 @@ pub enum InputMode {
 pub enum AppEvent {
     Notification(String),
     RemoteFileList(Option<i64>, String, Vec<S3Object>), // (endpoint_id, path, objects)
+    RemoteFileListError(Option<i64>, String, String),   // (endpoint_id, path, error)
     RemoteFileListSecondary(Option<i64>, String, Vec<S3Object>), // (endpoint_id, path, objects)
+    RemoteFileListSecondaryError(Option<i64>, String, String), // (endpoint_id, path, error)
     LogLine(String),
     RefreshRemote,
 }
