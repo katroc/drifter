@@ -1,5 +1,5 @@
 use crate::core::config::Config;
-use crate::db;
+use crate::db::{self, JobStatus};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -54,7 +54,10 @@ impl Reporter {
                 "clean" | "scanned" => summary.clean_files += 1,
                 "infected" => summary.infected_files += 1,
                 _ => {
-                    if job.status == "failed" || job.status == "error" {
+                    if matches!(
+                        JobStatus::parse(&job.status),
+                        Some(JobStatus::Failed | JobStatus::Error)
+                    ) {
                         summary.failed_files += 1;
                     } else {
                         summary.skipped_files += 1;
