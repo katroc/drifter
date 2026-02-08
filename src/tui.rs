@@ -282,6 +282,114 @@ async fn persist_settings_state(
     Ok(bucket_name)
 }
 
+fn cycle_settings_s3_profile(app: &mut App, forward: bool) {
+    if forward {
+        app.settings.cycle_s3_profile_selection();
+    } else {
+        app.settings.cycle_s3_profile_selection_prev();
+    }
+    app.set_status(format!(
+        "S3 profile: {}",
+        app.settings.selected_s3_profile_label()
+    ));
+}
+
+async fn create_settings_s3_profile(app: &mut App, conn_mutex: &Arc<Mutex<Connection>>) {
+    let res = {
+        let conn = lock_mutex(conn_mutex);
+        match conn {
+            Ok(conn) => {
+                let created = app.settings.create_s3_profile(&conn);
+                match created {
+                    Ok(()) => app.refresh_s3_profiles(&conn),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    };
+    match res {
+        Ok(()) => app.set_status(format!(
+            "Created profile '{}'",
+            app.settings.selected_s3_profile_label()
+        )),
+        Err(e) => app.set_status(format!("Failed to create profile: {}", e)),
+    }
+}
+
+async fn delete_settings_s3_profile(app: &mut App, conn_mutex: &Arc<Mutex<Connection>>) {
+    let res = {
+        let conn = lock_mutex(conn_mutex);
+        match conn {
+            Ok(conn) => {
+                let deleted = app.settings.delete_current_s3_profile(&conn);
+                match deleted {
+                    Ok(deleted) => {
+                        let refresh = app.refresh_s3_profiles(&conn);
+                        match refresh {
+                            Ok(()) => Ok(deleted),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    };
+    match res {
+        Ok(true) => app.set_status("Deleted S3 profile".to_string()),
+        Ok(false) => app.set_status("No S3 profile selected to delete.".to_string()),
+        Err(e) => app.set_status(format!("Failed to delete profile: {}", e)),
+    }
+}
+
+async fn save_settings_with_status(app: &mut App, conn_mutex: &Arc<Mutex<Connection>>) {
+    match persist_settings_state(app, conn_mutex).await {
+        Ok(bucket_name) => app.set_status(format!(
+            "Configuration saved. Bucket: {}",
+            bucket_name.as_deref().unwrap_or("None")
+        )),
+        Err(e) => app.set_status(format!("Save error: {}", e)),
+    }
+}
+
+async fn launch_settings_connection_test(app: &mut App) {
+    let cat = app.settings.active_category;
+    if cat != SettingsCategory::S3 && cat != SettingsCategory::Scanner {
+        return;
+    }
+
+    app.set_status("Testing connection...");
+    let tx = app.async_tx.clone();
+    let mut config_clone = app.config.lock().await.clone();
+    if cat == SettingsCategory::S3 {
+        app.settings
+            .apply_selected_s3_profile_to_config(&mut config_clone);
+    }
+
+    tokio::spawn(async move {
+        let res = if cat == SettingsCategory::S3 {
+            crate::services::uploader::Uploader::check_connection(&config_clone).await
+        } else {
+            crate::services::scanner::Scanner::new(&config_clone)
+                .check_connection()
+                .await
+        };
+
+        let msg = match res {
+            Ok(s) => s,
+            Err(e) => format!("Connection Failed: {}", e),
+        };
+        if let Err(send_err) = tx.send(AppEvent::Notification(msg)) {
+            warn!(
+                "Failed to send scanner connection notification: {}",
+                send_err
+            );
+        }
+    });
+}
+
 fn resolve_local_source_endpoint_id(conn: &Connection) -> Option<i64> {
     if let Ok(Some(profile)) = crate::db::get_default_source_endpoint_profile(conn)
         && profile.kind == EndpointKind::Local
@@ -2620,111 +2728,48 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                 }
                             }
 
-                            AppFocus::SettingsCategory => {
-                                match key.code {
-                                    KeyCode::Up | KeyCode::Char('k') => {
-                                        app.settings.active_category =
-                                            app.settings.active_category.prev();
-                                        app.settings.selected_field = 0;
-                                    }
-                                    KeyCode::Down | KeyCode::Char('j') => {
-                                        app.settings.active_category =
-                                            app.settings.active_category.next();
-                                        app.settings.selected_field = 0;
-                                    }
-                                    KeyCode::Right | KeyCode::Enter => {
-                                        app.focus = AppFocus::SettingsFields;
-                                    }
-                                    KeyCode::Char(']')
-                                        if app.settings.active_category == SettingsCategory::S3 =>
-                                    {
-                                        app.settings.cycle_s3_profile_selection();
-                                        app.set_status(format!(
-                                            "S3 profile: {}",
-                                            app.settings.selected_s3_profile_label()
-                                        ));
-                                    }
-                                    KeyCode::Char('[')
-                                        if app.settings.active_category == SettingsCategory::S3 =>
-                                    {
-                                        app.settings.cycle_s3_profile_selection_prev();
-                                        app.set_status(format!(
-                                            "S3 profile: {}",
-                                            app.settings.selected_s3_profile_label()
-                                        ));
-                                    }
-                                    KeyCode::Char('n')
-                                        if app.settings.active_category == SettingsCategory::S3 =>
-                                    {
-                                        let res = {
-                                            let conn = lock_mutex(&conn_mutex)?;
-                                            app.settings.create_s3_profile(&conn)?;
-                                            app.refresh_s3_profiles(&conn)
-                                        };
-                                        match res {
-                                            Ok(_) => {
-                                                app.set_status(format!(
-                                                    "Created profile '{}'",
-                                                    app.settings.selected_s3_profile_label()
-                                                ));
-                                            }
-                                            Err(e) => app.set_status(format!(
-                                                "Failed to create profile: {}",
-                                                e
-                                            )),
-                                        }
-                                    }
-                                    KeyCode::Char('x')
-                                        if app.settings.active_category == SettingsCategory::S3 =>
-                                    {
-                                        let res = {
-                                            let conn = lock_mutex(&conn_mutex)?;
-                                            let deleted =
-                                                app.settings.delete_current_s3_profile(&conn)?;
-                                            let _ = app.refresh_s3_profiles(&conn);
-                                            Ok::<bool, anyhow::Error>(deleted)
-                                        };
-                                        match res {
-                                            Ok(true) => {
-                                                app.set_status("Deleted S3 profile".to_string());
-                                            }
-                                            Ok(false) => {
-                                                app.set_status(
-                                                    "No S3 profile selected to delete.".to_string(),
-                                                );
-                                            }
-                                            Err(e) => app.set_status(format!(
-                                                "Failed to delete profile: {}",
-                                                e
-                                            )),
-                                        }
-                                    }
-                                    KeyCode::Char('s') => {
-                                        let res = {
-                                            let mut cfg = app.config.lock().await;
-                                            app.settings.apply_to_config(&mut cfg);
-
-                                            // Apply theme immediately
-                                            app.theme = Theme::from_name(&cfg.theme);
-
-                                            // Save entire config to database
-                                            let conn = lock_mutex(&conn_mutex)?;
-                                            crate::core::config::save_config_to_db(&conn, &cfg)?;
-                                            app.settings.save_secondary_profile_to_db(&conn)?;
-                                            app.settings.load_secondary_profile_from_db(&conn)?;
-                                            drop(cfg);
-                                            app.refresh_s3_profiles(&conn)
-                                        };
-
-                                        if let Err(e) = res {
-                                            app.set_status(format!("Save error: {}", e));
-                                        } else {
-                                            app.set_status("Configuration saved");
-                                        }
-                                    }
-                                    _ => {}
+                            AppFocus::SettingsCategory => match key.code {
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    app.settings.active_category =
+                                        app.settings.active_category.prev();
+                                    app.settings.selected_field = 0;
                                 }
-                            }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    app.settings.active_category =
+                                        app.settings.active_category.next();
+                                    app.settings.selected_field = 0;
+                                }
+                                KeyCode::Right | KeyCode::Enter => {
+                                    app.focus = AppFocus::SettingsFields;
+                                }
+                                KeyCode::Char(']')
+                                    if app.settings.active_category == SettingsCategory::S3 =>
+                                {
+                                    cycle_settings_s3_profile(&mut app, true);
+                                }
+                                KeyCode::Char('[')
+                                    if app.settings.active_category == SettingsCategory::S3 =>
+                                {
+                                    cycle_settings_s3_profile(&mut app, false);
+                                }
+                                KeyCode::Char('n')
+                                    if app.settings.active_category == SettingsCategory::S3 =>
+                                {
+                                    create_settings_s3_profile(&mut app, &conn_mutex).await;
+                                }
+                                KeyCode::Char('x')
+                                    if app.settings.active_category == SettingsCategory::S3 =>
+                                {
+                                    delete_settings_s3_profile(&mut app, &conn_mutex).await;
+                                }
+                                KeyCode::Char('s') => {
+                                    save_settings_with_status(&mut app, &conn_mutex).await;
+                                }
+                                KeyCode::Char('t') => {
+                                    launch_settings_connection_test(&mut app).await;
+                                }
+                                _ => {}
+                            },
                             AppFocus::SettingsFields => {
                                 let field_count = app.settings.active_category.field_count();
                                 // Focus-specific rendering logic for fields is handled in render.rs,
@@ -2896,126 +2941,38 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             app.settings.editing = false;
                                             app.settings.original_theme = None;
                                         }
-                                        match persist_settings_state(&mut app, &conn_mutex).await {
-                                            Ok(bucket_name) => {
-                                                app.set_status(format!(
-                                                    "Configuration saved. Bucket: {}",
-                                                    bucket_name.as_deref().unwrap_or("None")
-                                                ));
-                                            }
-                                            Err(e) => app.set_status(format!("Save error: {}", e)),
-                                        }
+                                        save_settings_with_status(&mut app, &conn_mutex).await;
                                     }
                                     KeyCode::Char('n')
                                         if !app.settings.editing
                                             && app.settings.active_category
                                                 == SettingsCategory::S3 =>
                                     {
-                                        let res = {
-                                            let conn = lock_mutex(&conn_mutex)?;
-                                            app.settings.create_s3_profile(&conn)?;
-                                            app.refresh_s3_profiles(&conn)
-                                        };
-                                        match res {
-                                            Ok(_) => app.set_status(format!(
-                                                "Created profile '{}'",
-                                                app.settings.selected_s3_profile_label()
-                                            )),
-                                            Err(e) => app.set_status(format!(
-                                                "Failed to create profile: {}",
-                                                e
-                                            )),
-                                        }
+                                        create_settings_s3_profile(&mut app, &conn_mutex).await;
                                     }
                                     KeyCode::Char('x')
                                         if !app.settings.editing
                                             && app.settings.active_category
                                                 == SettingsCategory::S3 =>
                                     {
-                                        let res = {
-                                            let conn = lock_mutex(&conn_mutex)?;
-                                            let deleted =
-                                                app.settings.delete_current_s3_profile(&conn)?;
-                                            let _ = app.refresh_s3_profiles(&conn);
-                                            Ok::<bool, anyhow::Error>(deleted)
-                                        };
-                                        match res {
-                                            Ok(true) => {
-                                                app.set_status("Deleted S3 profile".to_string())
-                                            }
-                                            Ok(false) => app.set_status(
-                                                "No S3 profile selected to delete.".to_string(),
-                                            ),
-                                            Err(e) => app.set_status(format!(
-                                                "Failed to delete profile: {}",
-                                                e
-                                            )),
-                                        }
+                                        delete_settings_s3_profile(&mut app, &conn_mutex).await;
                                     }
                                     KeyCode::Char(']')
                                         if !app.settings.editing
                                             && app.settings.active_category
                                                 == SettingsCategory::S3 =>
                                     {
-                                        app.settings.cycle_s3_profile_selection();
-                                        app.set_status(format!(
-                                            "S3 profile: {}",
-                                            app.settings.selected_s3_profile_label()
-                                        ));
+                                        cycle_settings_s3_profile(&mut app, true);
                                     }
                                     KeyCode::Char('[')
                                         if !app.settings.editing
                                             && app.settings.active_category
                                                 == SettingsCategory::S3 =>
                                     {
-                                        app.settings.cycle_s3_profile_selection_prev();
-                                        app.set_status(format!(
-                                            "S3 profile: {}",
-                                            app.settings.selected_s3_profile_label()
-                                        ));
+                                        cycle_settings_s3_profile(&mut app, false);
                                     }
                                     KeyCode::Char('t') if !app.settings.editing => {
-                                        let cat = app.settings.active_category;
-                                        if cat == SettingsCategory::S3
-                                            || cat == SettingsCategory::Scanner
-                                        {
-                                            app.set_status("Testing connection...");
-                                            let tx = app.async_tx.clone();
-                                            let mut config_clone = app.config.lock().await.clone();
-                                            if cat == SettingsCategory::S3 {
-                                                app.settings.apply_selected_s3_profile_to_config(
-                                                    &mut config_clone,
-                                                );
-                                            }
-
-                                            tokio::spawn(async move {
-                                                let res = if cat == SettingsCategory::S3 {
-                                                    crate::services::uploader::Uploader::check_connection(
-                                                    &config_clone,
-                                                )
-                                                .await
-                                                } else {
-                                                    crate::services::scanner::Scanner::new(
-                                                        &config_clone,
-                                                    )
-                                                    .check_connection()
-                                                    .await
-                                                };
-
-                                                let msg = match res {
-                                                    Ok(s) => s,
-                                                    Err(e) => format!("Connection Failed: {}", e),
-                                                };
-                                                if let Err(send_err) =
-                                                    tx.send(AppEvent::Notification(msg))
-                                                {
-                                                    warn!(
-                                                        "Failed to send scanner connection notification: {}",
-                                                        send_err
-                                                    );
-                                                }
-                                            });
-                                        }
+                                        launch_settings_connection_test(&mut app).await;
                                     }
                                     _ => {}
                                 }
