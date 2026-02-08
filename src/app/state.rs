@@ -14,9 +14,10 @@ use crate::core::metrics::{HostMetricsSnapshot, MetricsCollector};
 use crate::core::transfer::EndpointKind;
 use crate::core::transfer::TransferDirection;
 use crate::db::{
-    EndpointProfileRow, JobRow, JobTransferMetadata, get_default_destination_endpoint_profile,
-    get_default_source_endpoint_profile, get_job_transfer_metadata, list_active_jobs,
-    list_endpoint_profiles, list_history_jobs, list_quarantined_jobs,
+    EndpointProfileRow, JobRow, JobStatus, JobTransferMetadata,
+    get_default_destination_endpoint_profile, get_default_source_endpoint_profile,
+    get_job_transfer_metadata, list_active_jobs, list_endpoint_profiles, list_history_jobs,
+    list_quarantined_jobs,
 };
 use crate::services::uploader::S3Object;
 use crate::utils::lock_mutex;
@@ -1087,7 +1088,9 @@ impl App {
             }
         };
 
-        if status == "paused" {
+        let parsed_status = JobStatus::parse(&status);
+
+        if parsed_status == Some(JobStatus::Paused) {
             let conn = if let Ok(c) = self.conn.lock() {
                 c
             } else {
@@ -1098,12 +1101,9 @@ impl App {
             } else {
                 self.status_message = format!("Resumed job {}", job_id);
             }
-        } else if status == "uploading"
-            || status == "transferring"
-            || status == "scanning"
-            || status == "queued"
-            || status == "staged"
-            || status == "ready"
+        } else if parsed_status
+            .map(JobStatus::is_pause_resume_eligible)
+            .unwrap_or(false)
         {
             let res = {
                 let conn = if let Ok(c) = self.conn.lock() {

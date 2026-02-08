@@ -115,30 +115,91 @@ impl WizardStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JobStatus {
+    Pending,
+    Ingesting,
+    Staged,
+    Ready,
     Queued,
     Scanning,
     Scanned,
     Uploading,
     Transferring,
+    RetryPending,
     Complete,
     Quarantined,
     QuarantinedRemoved,
     Failed,
+    FailedRetryable,
+    Error,
+    Cancelled,
+    Paused,
 }
 
 impl JobStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Pending => "pending",
+            Self::Ingesting => "ingesting",
+            Self::Staged => "staged",
+            Self::Ready => "ready",
             Self::Queued => "queued",
             Self::Scanning => "scanning",
             Self::Scanned => "scanned",
             Self::Uploading => "uploading",
             Self::Transferring => "transferring",
+            Self::RetryPending => "retry_pending",
             Self::Complete => "complete",
             Self::Quarantined => "quarantined",
             Self::QuarantinedRemoved => "quarantined_removed",
             Self::Failed => "failed",
+            Self::FailedRetryable => "failed_retryable",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+            Self::Paused => "paused",
         }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "ingesting" => Some(Self::Ingesting),
+            "staged" => Some(Self::Staged),
+            "ready" => Some(Self::Ready),
+            "queued" => Some(Self::Queued),
+            "scanning" => Some(Self::Scanning),
+            "scanned" => Some(Self::Scanned),
+            "uploading" => Some(Self::Uploading),
+            "transferring" => Some(Self::Transferring),
+            "retry_pending" => Some(Self::RetryPending),
+            "complete" => Some(Self::Complete),
+            "quarantined" => Some(Self::Quarantined),
+            "quarantined_removed" => Some(Self::QuarantinedRemoved),
+            "failed" => Some(Self::Failed),
+            "failed_retryable" => Some(Self::FailedRetryable),
+            "error" => Some(Self::Error),
+            "cancelled" => Some(Self::Cancelled),
+            "paused" => Some(Self::Paused),
+            _ => None,
+        }
+    }
+
+    pub const fn is_pause_resume_eligible(self) -> bool {
+        matches!(
+            self,
+            Self::Uploading
+                | Self::Transferring
+                | Self::Scanning
+                | Self::Queued
+                | Self::Staged
+                | Self::Ready
+        )
+    }
+
+    pub const fn is_active_queue_job(self) -> bool {
+        matches!(
+            self,
+            Self::Uploading | Self::Transferring | Self::Scanning | Self::Pending | Self::Queued
+        )
     }
 }
 

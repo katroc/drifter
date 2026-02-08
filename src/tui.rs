@@ -45,6 +45,7 @@ use crate::app::state::{
 };
 use crate::components::file_picker::PickerView;
 use crate::components::wizard::{WizardState, WizardStep};
+use crate::db::JobStatus;
 use crate::ui::util::{calculate_list_offset, centered_window_bounds, fuzzy_match};
 use crate::utils::lock_mutex;
 
@@ -2612,11 +2613,9 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 {
                                                     let job = &app.jobs[idx];
                                                     let id = job.id;
-                                                    let is_active = job.status == "uploading"
-                                                        || job.status == "transferring"
-                                                        || job.status == "scanning"
-                                                        || job.status == "pending"
-                                                        || job.status == "queued";
+                                                    let is_active = JobStatus::parse(&job.status)
+                                                        .map(JobStatus::is_active_queue_job)
+                                                        .unwrap_or(false);
 
                                                     if is_active {
                                                         // Require confirmation
@@ -2658,7 +2657,10 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 let ids_to_delete: Vec<i64> = app
                                                     .jobs
                                                     .iter()
-                                                    .filter(|j| j.status == "complete")
+                                                    .filter(|j| {
+                                                        JobStatus::parse(&j.status)
+                                                            == Some(JobStatus::Complete)
+                                                    })
                                                     .map(|j| j.id)
                                                     .collect();
                                                 let count = ids_to_delete.len();

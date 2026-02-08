@@ -1,3 +1,4 @@
+use crate::db::JobStatus;
 use crate::ui::theme::StatusKind;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use std::time::SystemTime;
@@ -181,11 +182,13 @@ pub fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
 }
 
 pub fn status_kind(status: &str) -> StatusKind {
-    match status {
-        "complete" => StatusKind::Success,
-        "quarantined" | "failed" => StatusKind::Error,
-        "quarantined_removed" => StatusKind::Info,
-        "uploading" | "transferring" | "scanning" => StatusKind::Info,
+    match JobStatus::parse(status) {
+        Some(JobStatus::Complete) => StatusKind::Success,
+        Some(JobStatus::Quarantined | JobStatus::Failed) => StatusKind::Error,
+        Some(JobStatus::QuarantinedRemoved) => StatusKind::Info,
+        Some(JobStatus::Uploading | JobStatus::Transferring | JobStatus::Scanning) => {
+            StatusKind::Info
+        }
         _ => StatusKind::Warning,
     }
 }
