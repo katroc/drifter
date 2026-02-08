@@ -1,6 +1,6 @@
 use crate::db::{
-    JobTransferMetadata, assign_default_transfer_metadata, create_job, insert_event,
-    update_job_staged, update_job_transfer_metadata,
+    JobStatus, JobTransferMetadata, assign_default_transfer_metadata, create_job, insert_event,
+    update_job_staged_with_status, update_job_transfer_metadata,
 };
 use crate::utils::lock_mutex;
 use anyhow::Result;
@@ -102,7 +102,7 @@ pub async fn ingest_path(
             );
         }
         insert_event(&conn, job_id, "ingest", "queued for scan")?;
-        update_job_staged(&conn, job_id, &source_str, "queued")?;
+        update_job_staged_with_status(&conn, job_id, &source_str, JobStatus::Queued)?;
         insert_event(&conn, job_id, "stage", "ready for scan")?;
         count += 1;
         info!("Successfully ingested job {} for {}", job_id, source_str);

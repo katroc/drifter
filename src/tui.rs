@@ -430,6 +430,434 @@ async fn handle_settings_category_key(
     Ok(())
 }
 
+async fn handle_settings_field_enter_key(app: &mut App, conn_mutex: &Arc<Mutex<Connection>>) {
+    let Some(active_field) = active_settings_field_def(app) else {
+        return;
+    };
+
+    if active_field.id == SettingsFieldId::SetupWizardAction {
+        open_wizard_from_settings(app).await;
+        return;
+    }
+
+    let mut skip_save_on_exit = false;
+    if active_field.id == SettingsFieldId::S3Profile {
+        if app.settings.editing {
+            app.settings.editing = false;
+            app.status_message =
+                format!("S3 profile: {}", app.settings.selected_s3_profile_label());
+        } else if app.settings.s3_profile_count() == 0 {
+            app.set_status("No S3 endpoint profiles configured.".to_string());
+        } else {
+            app.settings.editing = true;
+            app.set_status("Select S3 profile (Enter to apply)".to_string());
+        }
+        skip_save_on_exit = true;
+    } else if active_field.kind.is_toggle() {
+        if let Some(message) = app.settings.toggle_field(active_field.id) {
+            app.status_message = message;
+        }
+        if let Err(e) = persist_settings_state(app, conn_mutex).await {
+            app.set_status(format!("Save error: {}", e));
+        }
+        skip_save_on_exit = true;
+    } else {
+        app.settings.editing = !app.settings.editing;
+    }
+
+    if app.settings.editing {
+        if active_field.id == SettingsFieldId::Theme {
+            app.settings.original_theme = Some(app.settings.theme.clone());
+        }
+        return;
+    }
+
+    if skip_save_on_exit {
+        return;
+    }
+
+    if active_field.id == SettingsFieldId::Theme {
+        app.settings.original_theme = None;
+    }
+    if let Err(e) = persist_settings_state(app, conn_mutex).await {
+        app.set_status(format!("Save error: {}", e));
+    } else {
+        app.set_status(format!("Saved: {}", active_field.save_label));
+    }
+}
+
+fn handle_settings_field_edit_char(app: &mut App, c: char) {
+    if let Some(field_id) = active_settings_field_id(app) {
+        match field_id {
+            SettingsFieldId::Theme => {
+                if c == 'j' {
+                    cycle_theme_selection(app, true);
+                } else if c == 'k' {
+                    cycle_theme_selection(app, false);
+                }
+            }
+            SettingsFieldId::S3Profile => {
+                if c == 'j' || c == ']' {
+                    app.settings.cycle_s3_profile_selection();
+                } else if c == 'k' || c == '[' {
+                    app.settings.cycle_s3_profile_selection_prev();
+                }
+            }
+            _ => {
+                let _ = app.settings.push_char_to_field(field_id, c);
+            }
+        }
+    }
+}
+
+async fn handle_settings_field_key(
+    app: &mut App,
+    key: KeyCode,
+    conn_mutex: &Arc<Mutex<Connection>>,
+) {
+    let field_count = app.settings.active_category.field_count();
+
+    match key {
+        KeyCode::Enter => {
+            handle_settings_field_enter_key(app, conn_mutex).await;
+        }
+        KeyCode::Esc => {
+            app.settings.editing = false;
+            if active_settings_field_id(app) == Some(SettingsFieldId::Theme) {
+                if let Some(orig) = &app.settings.original_theme {
+                    app.settings.theme = orig.clone();
+                    app.theme = Theme::from_name(orig);
+                }
+                app.settings.original_theme = None;
+            }
+        }
+        KeyCode::Right | KeyCode::Down
+            if app.settings.editing
+                && active_settings_field_id(app) == Some(SettingsFieldId::Theme) =>
+        {
+            cycle_theme_selection(app, true);
+        }
+        KeyCode::Right | KeyCode::Down
+            if app.settings.editing
+                && active_settings_field_id(app) == Some(SettingsFieldId::S3Profile) =>
+        {
+            app.settings.cycle_s3_profile_selection();
+        }
+        KeyCode::Left | KeyCode::Up
+            if app.settings.editing
+                && active_settings_field_id(app) == Some(SettingsFieldId::Theme) =>
+        {
+            cycle_theme_selection(app, false);
+        }
+        KeyCode::Left | KeyCode::Up
+            if app.settings.editing
+                && active_settings_field_id(app) == Some(SettingsFieldId::S3Profile) =>
+        {
+            app.settings.cycle_s3_profile_selection_prev();
+        }
+        KeyCode::Char(c) if app.settings.editing => {
+            handle_settings_field_edit_char(app, c);
+        }
+        KeyCode::Backspace if app.settings.editing => {
+            if let Some(field_id) = active_settings_field_id(app) {
+                let _ = app.settings.pop_char_from_field(field_id);
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') if !app.settings.editing => {
+            if app.settings.selected_field > 0 {
+                app.settings.selected_field -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') if !app.settings.editing => {
+            if app.settings.selected_field + 1 < field_count {
+                app.settings.selected_field += 1;
+            }
+        }
+        KeyCode::Char('s')
+            if !app.settings.editing
+                || active_settings_field_id(app) == Some(SettingsFieldId::Theme) =>
+        {
+            if app.settings.editing && active_settings_field_id(app) == Some(SettingsFieldId::Theme)
+            {
+                app.settings.editing = false;
+                app.settings.original_theme = None;
+            }
+            save_settings_with_status(app, conn_mutex).await;
+        }
+        KeyCode::Char('n')
+            if !app.settings.editing && app.settings.active_category == SettingsCategory::S3 =>
+        {
+            create_settings_s3_profile(app, conn_mutex).await;
+        }
+        KeyCode::Char('x')
+            if !app.settings.editing && app.settings.active_category == SettingsCategory::S3 =>
+        {
+            delete_settings_s3_profile(app, conn_mutex).await;
+        }
+        KeyCode::Char(']')
+            if !app.settings.editing && app.settings.active_category == SettingsCategory::S3 =>
+        {
+            cycle_settings_s3_profile(app, true);
+        }
+        KeyCode::Char('[')
+            if !app.settings.editing && app.settings.active_category == SettingsCategory::S3 =>
+        {
+            cycle_settings_s3_profile(app, false);
+        }
+        KeyCode::Char('t') if !app.settings.editing => {
+            launch_settings_connection_test(app).await;
+        }
+        _ => {}
+    }
+}
+
+async fn handle_settings_center_click(
+    app: &mut App,
+    center_layout: Rect,
+    x: u16,
+    y: u16,
+    conn_mutex: &Arc<Mutex<Connection>>,
+) {
+    let sidebar_width = 16;
+    if x < center_layout.x + sidebar_width {
+        app.focus = AppFocus::SettingsCategory;
+        let rel_y = y.saturating_sub(center_layout.y + 1);
+        if rel_y < 4 {
+            let new_cat = SettingsCategory::from_sidebar_index(rel_y as usize);
+            if app.settings.active_category != new_cat {
+                app.settings.active_category = new_cat;
+                app.settings.selected_field = 0;
+                app.settings.editing = false;
+            }
+        }
+        return;
+    }
+
+    app.focus = AppFocus::SettingsFields;
+    let fields_area_x = center_layout.x + sidebar_width;
+
+    if app.settings.editing && active_settings_field_id(app) == Some(SettingsFieldId::Theme) {
+        let rel_x = x.saturating_sub(fields_area_x + 1);
+        let rel_y = y.saturating_sub(center_layout.y + 2);
+
+        let max_width = center_layout.width.saturating_sub(sidebar_width + 2);
+        let max_height = center_layout.height.saturating_sub(2);
+        let theme_list_width = max_width.min(62);
+        let theme_list_height = max_height.clamp(8, 14);
+
+        if rel_x < theme_list_width && rel_y < theme_list_height {
+            let display_height = theme_list_height.saturating_sub(2) as usize;
+            if rel_y >= 1 && (rel_y as usize) < display_height + 1 {
+                let inner_rel_y = (rel_y - 1) as usize;
+                let total = app.theme_names.len();
+                let current_theme = app.settings.theme.as_str();
+
+                let mut offset = 0;
+                if let Some(idx) = app.theme_names.iter().position(|&n| n == current_theme) {
+                    let (start, _) = centered_window_bounds(idx, total, display_height);
+                    offset = start;
+                }
+
+                let target_idx = offset + inner_rel_y;
+                if target_idx < total {
+                    let now = Instant::now();
+                    let is_double_click = if let (Some(last_time), Some(last_pos)) =
+                        (app.last_click_time, app.last_click_pos)
+                    {
+                        now.duration_since(last_time) < Duration::from_millis(500)
+                            && last_pos == (x, y)
+                    } else {
+                        false
+                    };
+
+                    app.settings.theme = app.theme_names[target_idx].to_string();
+                    app.theme = Theme::from_name(&app.settings.theme);
+
+                    if is_double_click {
+                        app.settings.editing = false;
+                        app.settings.original_theme = None;
+                        if let Err(e) = persist_settings_state(app, conn_mutex).await {
+                            app.status_message = format!("Failed to save theme: {}", e);
+                        } else {
+                            app.status_message = "Theme saved".to_string();
+                        }
+                        app.last_click_time = None;
+                    } else {
+                        app.last_click_time = Some(now);
+                        app.last_click_pos = Some((x, y));
+                    }
+                }
+            }
+        } else {
+            app.settings.editing = false;
+            if let Some(orig) = app.settings.original_theme.take() {
+                app.settings.theme = orig;
+                app.theme = Theme::from_name(&app.settings.theme);
+            }
+        }
+        return;
+    }
+
+    if app.settings.editing && active_settings_field_id(app) == Some(SettingsFieldId::S3Profile) {
+        let rel_x = x.saturating_sub(fields_area_x + 1);
+        let rel_y = y.saturating_sub(center_layout.y + 2);
+        let max_width = center_layout.width.saturating_sub(sidebar_width + 2);
+        let max_height = center_layout.height.saturating_sub(2);
+        let list_width = max_width.min(42);
+        let list_height = max_height.clamp(6, 14);
+
+        if rel_x < list_width && rel_y < list_height {
+            let display_height = list_height.saturating_sub(2) as usize;
+            let total = app.settings.s3_profile_count();
+            if total == 0 {
+                return;
+            }
+            if rel_y >= 1 && (rel_y as usize) < display_height + 1 {
+                let inner_rel_y = (rel_y - 1) as usize;
+                let selected = app.settings.s3_profile_index;
+                let (offset, _) = centered_window_bounds(selected, total, display_height);
+
+                let target_idx = offset + inner_rel_y;
+                if target_idx < total {
+                    let now = Instant::now();
+                    let is_double_click = if let (Some(last_time), Some(last_pos)) =
+                        (app.last_click_time, app.last_click_pos)
+                    {
+                        now.duration_since(last_time) < Duration::from_millis(500)
+                            && last_pos == (x, y)
+                    } else {
+                        false
+                    };
+
+                    app.settings.set_s3_profile_selection_index(target_idx);
+                    if is_double_click {
+                        app.settings.editing = false;
+                        app.last_click_time = None;
+                        app.status_message =
+                            format!("S3 profile: {}", app.settings.selected_s3_profile_label());
+                    } else {
+                        app.last_click_time = Some(now);
+                        app.last_click_pos = Some((x, y));
+                    }
+                }
+            }
+        } else {
+            app.settings.editing = false;
+        }
+        return;
+    }
+
+    let rel_y = y.saturating_sub(center_layout.y + 1);
+    let clicked_idx = rel_y / 3;
+    let count = app.settings.active_category.field_count();
+
+    let display_height = center_layout.height.saturating_sub(2) as usize;
+    let fields_per_view = display_height / 3;
+    let (offset, _) = centered_window_bounds(app.settings.selected_field, count, fields_per_view);
+
+    let target_idx = offset + clicked_idx as usize;
+    if target_idx >= count {
+        return;
+    }
+
+    app.settings.selected_field = target_idx;
+    let target_field = settings_field_def_at(app, target_idx).copied();
+
+    if target_field.map(|field| field.id) == Some(SettingsFieldId::SetupWizardAction) {
+        open_wizard_from_settings(app).await;
+        return;
+    }
+
+    if target_field
+        .map(|field| field.kind.is_toggle())
+        .unwrap_or(false)
+    {
+        if let Some(field) = target_field {
+            let _ = app.settings.toggle_field(field.id);
+        }
+        if let Err(e) = persist_settings_state(app, conn_mutex).await {
+            app.status_message = format!("Failed to save settings: {}", e);
+        }
+        return;
+    }
+
+    let now = Instant::now();
+    if let (Some(last_time), Some(last_pos)) = (app.last_click_time, app.last_click_pos) {
+        if now.duration_since(last_time) < Duration::from_millis(500) && last_pos == (x, y) {
+            app.settings.editing = true;
+            app.last_click_time = None;
+        } else {
+            app.last_click_time = Some(now);
+            app.last_click_pos = Some((x, y));
+        }
+    } else {
+        app.last_click_time = Some(now);
+        app.last_click_pos = Some((x, y));
+    }
+
+    if target_field
+        .map(|field| field.kind.is_selector())
+        .unwrap_or(false)
+    {
+        app.settings.editing = true;
+        if target_field.map(|field| field.id) == Some(SettingsFieldId::Theme) {
+            app.settings.original_theme = Some(app.settings.theme.clone());
+        }
+    }
+}
+
+fn handle_settings_center_scroll(
+    app: &mut App,
+    center_layout: Rect,
+    x: u16,
+    y: u16,
+    is_down: bool,
+) {
+    let sidebar_width = 16;
+    if x < center_layout.x + sidebar_width {
+        if is_down {
+            app.settings.active_category = app.settings.active_category.next();
+        } else {
+            app.settings.active_category = app.settings.active_category.prev();
+        }
+        app.settings.selected_field = 0;
+        app.settings.editing = false;
+        return;
+    }
+
+    if app.settings.editing && active_settings_field_id(app) == Some(SettingsFieldId::Theme) {
+        let fields_area_x = center_layout.x + sidebar_width;
+        let rel_x = x.saturating_sub(fields_area_x + 1);
+        let rel_y = y.saturating_sub(center_layout.y + 2);
+
+        let max_width = center_layout.width.saturating_sub(sidebar_width + 2);
+        let max_height = center_layout.height.saturating_sub(2);
+        let theme_list_width = max_width.min(62);
+        let theme_list_height = max_height.clamp(8, 14);
+
+        if rel_x < theme_list_width && rel_y < theme_list_height {
+            cycle_theme_selection(app, is_down);
+        }
+    } else if app.settings.editing
+        && active_settings_field_id(app) == Some(SettingsFieldId::S3Profile)
+    {
+        if is_down {
+            app.settings.cycle_s3_profile_selection();
+        } else {
+            app.settings.cycle_s3_profile_selection_prev();
+        }
+    } else {
+        let count = app.settings.active_category.field_count();
+        if is_down {
+            if app.settings.selected_field + 1 < count {
+                app.settings.selected_field += 1;
+            }
+        } else if app.settings.selected_field > 0 {
+            app.settings.selected_field -= 1;
+        }
+    }
+}
+
 fn resolve_local_source_endpoint_id(conn: &Connection) -> Option<i64> {
     if let Ok(Some(profile)) = crate::db::get_default_source_endpoint_profile(conn)
         && profile.kind == EndpointKind::Local
@@ -2430,12 +2858,14 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                                         let conn = lock_mutex(&conn_mutex)?;
                                         let mut quarantine_removed = true;
-                                        if let Err(e) = crate::db::update_scan_status(
-                                            &conn,
-                                            id,
-                                            "removed",
-                                            "quarantined_removed",
-                                        ) {
+                                        if let Err(e) =
+                                            crate::db::update_scan_status_with_job_status(
+                                                &conn,
+                                                id,
+                                                "removed",
+                                                crate::db::JobStatus::QuarantinedRemoved,
+                                            )
+                                        {
                                             quarantine_removed = false;
                                             app.status_message = format!(
                                                 "Failed to update quarantine status: {}",
@@ -2773,211 +3203,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     .await?;
                             }
                             AppFocus::SettingsFields => {
-                                let field_count = app.settings.active_category.field_count();
-                                // Focus-specific rendering logic for fields is handled in render.rs,
-                                // input handling is primarily navigation here unless specific overrides needed.
-
-                                match key.code {
-                                    KeyCode::Enter => {
-                                        let Some(active_field) = active_settings_field_def(&app)
-                                        else {
-                                            continue;
-                                        };
-
-                                        if active_field.id == SettingsFieldId::SetupWizardAction {
-                                            open_wizard_from_settings(&mut app).await;
-                                            continue;
-                                        }
-
-                                        let mut skip_save_on_exit = false;
-                                        if active_field.id == SettingsFieldId::S3Profile {
-                                            if app.settings.editing {
-                                                app.settings.editing = false;
-                                                app.status_message = format!(
-                                                    "S3 profile: {}",
-                                                    app.settings.selected_s3_profile_label()
-                                                );
-                                            } else if app.settings.s3_profile_count() == 0 {
-                                                app.set_status(
-                                                    "No S3 endpoint profiles configured."
-                                                        .to_string(),
-                                                );
-                                            } else {
-                                                app.settings.editing = true;
-                                                app.set_status(
-                                                    "Select S3 profile (Enter to apply)"
-                                                        .to_string(),
-                                                );
-                                            }
-                                            skip_save_on_exit = true;
-                                        } else if active_field.kind.is_toggle() {
-                                            if let Some(message) =
-                                                app.settings.toggle_field(active_field.id)
-                                            {
-                                                app.status_message = message;
-                                            }
-                                            if let Err(e) =
-                                                persist_settings_state(&mut app, &conn_mutex).await
-                                            {
-                                                app.set_status(format!("Save error: {}", e));
-                                            }
-                                            skip_save_on_exit = true;
-                                        } else {
-                                            app.settings.editing = !app.settings.editing;
-                                        }
-
-                                        if app.settings.editing {
-                                            if active_field.id == SettingsFieldId::Theme {
-                                                app.settings.original_theme =
-                                                    Some(app.settings.theme.clone());
-                                            }
-                                        } else {
-                                            if skip_save_on_exit {
-                                                continue;
-                                            }
-                                            if active_field.id == SettingsFieldId::Theme {
-                                                app.settings.original_theme = None;
-                                            }
-                                            if let Err(e) =
-                                                persist_settings_state(&mut app, &conn_mutex).await
-                                            {
-                                                app.set_status(format!("Save error: {}", e));
-                                            } else {
-                                                app.set_status(format!(
-                                                    "Saved: {}",
-                                                    active_field.save_label
-                                                ));
-                                            }
-                                        }
-                                    }
-                                    KeyCode::Esc => {
-                                        app.settings.editing = false;
-                                        if active_settings_field_id(&app)
-                                            == Some(SettingsFieldId::Theme)
-                                        {
-                                            if let Some(orig) = &app.settings.original_theme {
-                                                app.settings.theme = orig.clone();
-                                                app.theme = Theme::from_name(orig);
-                                            }
-                                            app.settings.original_theme = None;
-                                        }
-                                    }
-                                    KeyCode::Right | KeyCode::Down
-                                        if app.settings.editing
-                                            && active_settings_field_id(&app)
-                                                == Some(SettingsFieldId::Theme) =>
-                                    {
-                                        cycle_theme_selection(&mut app, true);
-                                    }
-                                    KeyCode::Right | KeyCode::Down
-                                        if app.settings.editing
-                                            && active_settings_field_id(&app)
-                                                == Some(SettingsFieldId::S3Profile) =>
-                                    {
-                                        app.settings.cycle_s3_profile_selection();
-                                    }
-                                    KeyCode::Left | KeyCode::Up
-                                        if app.settings.editing
-                                            && active_settings_field_id(&app)
-                                                == Some(SettingsFieldId::Theme) =>
-                                    {
-                                        cycle_theme_selection(&mut app, false);
-                                    }
-                                    KeyCode::Left | KeyCode::Up
-                                        if app.settings.editing
-                                            && active_settings_field_id(&app)
-                                                == Some(SettingsFieldId::S3Profile) =>
-                                    {
-                                        app.settings.cycle_s3_profile_selection_prev();
-                                    }
-                                    KeyCode::Char(c) if app.settings.editing => {
-                                        if let Some(field_id) = active_settings_field_id(&app) {
-                                            match field_id {
-                                                SettingsFieldId::Theme => {
-                                                    if c == 'j' {
-                                                        cycle_theme_selection(&mut app, true);
-                                                    } else if c == 'k' {
-                                                        cycle_theme_selection(&mut app, false);
-                                                    }
-                                                }
-                                                SettingsFieldId::S3Profile => {
-                                                    if c == 'j' || c == ']' {
-                                                        app.settings.cycle_s3_profile_selection();
-                                                    } else if c == 'k' || c == '[' {
-                                                        app.settings
-                                                            .cycle_s3_profile_selection_prev();
-                                                    }
-                                                }
-                                                _ => {
-                                                    let _ = app
-                                                        .settings
-                                                        .push_char_to_field(field_id, c);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    KeyCode::Backspace if app.settings.editing => {
-                                        if let Some(field_id) = active_settings_field_id(&app) {
-                                            let _ = app.settings.pop_char_from_field(field_id);
-                                        }
-                                    }
-                                    KeyCode::Up | KeyCode::Char('k') if !app.settings.editing => {
-                                        if app.settings.selected_field > 0 {
-                                            app.settings.selected_field -= 1;
-                                        }
-                                    }
-                                    KeyCode::Down | KeyCode::Char('j') if !app.settings.editing => {
-                                        if app.settings.selected_field + 1 < field_count {
-                                            app.settings.selected_field += 1;
-                                        }
-                                    }
-                                    KeyCode::Char('s')
-                                        if !app.settings.editing
-                                            || active_settings_field_id(&app)
-                                                == Some(SettingsFieldId::Theme) =>
-                                    {
-                                        if app.settings.editing
-                                            && active_settings_field_id(&app)
-                                                == Some(SettingsFieldId::Theme)
-                                        {
-                                            app.settings.editing = false;
-                                            app.settings.original_theme = None;
-                                        }
-                                        save_settings_with_status(&mut app, &conn_mutex).await;
-                                    }
-                                    KeyCode::Char('n')
-                                        if !app.settings.editing
-                                            && app.settings.active_category
-                                                == SettingsCategory::S3 =>
-                                    {
-                                        create_settings_s3_profile(&mut app, &conn_mutex).await;
-                                    }
-                                    KeyCode::Char('x')
-                                        if !app.settings.editing
-                                            && app.settings.active_category
-                                                == SettingsCategory::S3 =>
-                                    {
-                                        delete_settings_s3_profile(&mut app, &conn_mutex).await;
-                                    }
-                                    KeyCode::Char(']')
-                                        if !app.settings.editing
-                                            && app.settings.active_category
-                                                == SettingsCategory::S3 =>
-                                    {
-                                        cycle_settings_s3_profile(&mut app, true);
-                                    }
-                                    KeyCode::Char('[')
-                                        if !app.settings.editing
-                                            && app.settings.active_category
-                                                == SettingsCategory::S3 =>
-                                    {
-                                        cycle_settings_s3_profile(&mut app, false);
-                                    }
-                                    KeyCode::Char('t') if !app.settings.editing => {
-                                        launch_settings_connection_test(&mut app).await;
-                                    }
-                                    _ => {}
-                                }
+                                handle_settings_field_key(&mut app, key.code, &conn_mutex).await;
                             }
                             AppFocus::Logs => {
                                 match app.input_mode {
@@ -3625,307 +3851,14 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             }
                                         }
                                         AppTab::Settings => {
-                                            let sidebar_width = 16;
-                                            if x < center_layout.x + sidebar_width {
-                                                app.focus = AppFocus::SettingsCategory;
-                                                let rel_y = y.saturating_sub(center_layout.y + 1);
-                                                if rel_y < 4 {
-                                                    let new_cat =
-                                                        SettingsCategory::from_sidebar_index(
-                                                            rel_y as usize,
-                                                        );
-                                                    if app.settings.active_category != new_cat {
-                                                        app.settings.active_category = new_cat;
-                                                        app.settings.selected_field = 0;
-                                                        app.settings.editing = false;
-                                                    }
-                                                }
-                                            } else {
-                                                app.focus = AppFocus::SettingsFields;
-                                                let fields_area_x = center_layout.x + sidebar_width;
-
-                                                // Handle Theme List Click during editing
-                                                if app.settings.editing
-                                                    && active_settings_field_id(&app)
-                                                        == Some(SettingsFieldId::Theme)
-                                                {
-                                                    let rel_x = x.saturating_sub(fields_area_x + 1);
-                                                    let rel_y =
-                                                        y.saturating_sub(center_layout.y + 2);
-
-                                                    let max_width = center_layout
-                                                        .width
-                                                        .saturating_sub(sidebar_width + 2);
-                                                    let max_height =
-                                                        center_layout.height.saturating_sub(2);
-                                                    let theme_list_width = max_width.min(62);
-                                                    let theme_list_height = max_height.clamp(8, 14);
-
-                                                    if rel_x < theme_list_width
-                                                        && rel_y < theme_list_height
-                                                    {
-                                                        // This is a click inside the theme list
-                                                        let display_height = theme_list_height
-                                                            .saturating_sub(2)
-                                                            as usize;
-                                                        if rel_y >= 1
-                                                            && (rel_y as usize) < display_height + 1
-                                                        {
-                                                            let inner_rel_y = (rel_y - 1) as usize;
-                                                            let total = app.theme_names.len();
-                                                            let current_theme =
-                                                                app.settings.theme.as_str();
-
-                                                            let mut offset = 0;
-                                                            if let Some(idx) = app
-                                                                .theme_names
-                                                                .iter()
-                                                                .position(|&n| n == current_theme)
-                                                            {
-                                                                let (start, _) =
-                                                                    centered_window_bounds(
-                                                                        idx,
-                                                                        total,
-                                                                        display_height,
-                                                                    );
-                                                                offset = start;
-                                                            }
-
-                                                            let target_idx = offset + inner_rel_y;
-                                                            if target_idx < total {
-                                                                let now = Instant::now();
-                                                                let is_double_click = if let (
-                                                                    Some(last_time),
-                                                                    Some(last_pos),
-                                                                ) = (
-                                                                    app.last_click_time,
-                                                                    app.last_click_pos,
-                                                                ) {
-                                                                    now.duration_since(last_time)
-                                                                        < Duration::from_millis(500)
-                                                                        && last_pos == (x, y)
-                                                                } else {
-                                                                    false
-                                                                };
-
-                                                                app.settings.theme = app
-                                                                    .theme_names[target_idx]
-                                                                    .to_string();
-                                                                app.theme = Theme::from_name(
-                                                                    &app.settings.theme,
-                                                                );
-
-                                                                if is_double_click {
-                                                                    app.settings.editing = false;
-                                                                    app.settings.original_theme =
-                                                                        None;
-                                                                    if let Err(e) =
-                                                                        persist_settings_state(
-                                                                            &mut app,
-                                                                            &conn_mutex,
-                                                                        )
-                                                                        .await
-                                                                    {
-                                                                        app.status_message = format!(
-                                                                            "Failed to save theme: {}",
-                                                                            e
-                                                                        );
-                                                                    } else {
-                                                                        app.status_message =
-                                                                            "Theme saved"
-                                                                                .to_string();
-                                                                    }
-                                                                    app.last_click_time = None;
-                                                                } else {
-                                                                    app.last_click_time = Some(now);
-                                                                    app.last_click_pos =
-                                                                        Some((x, y));
-                                                                }
-                                                            }
-                                                        }
-                                                        continue;
-                                                    } else {
-                                                        // Clicked outside theme list while editing: cancel
-                                                        app.settings.editing = false;
-                                                        if let Some(orig) =
-                                                            app.settings.original_theme.take()
-                                                        {
-                                                            app.settings.theme = orig;
-                                                            app.theme = Theme::from_name(
-                                                                &app.settings.theme,
-                                                            );
-                                                        }
-                                                        continue;
-                                                    }
-                                                }
-
-                                                if app.settings.editing
-                                                    && active_settings_field_id(&app)
-                                                        == Some(SettingsFieldId::S3Profile)
-                                                {
-                                                    let rel_x = x.saturating_sub(fields_area_x + 1);
-                                                    let rel_y =
-                                                        y.saturating_sub(center_layout.y + 2);
-                                                    let max_width = center_layout
-                                                        .width
-                                                        .saturating_sub(sidebar_width + 2);
-                                                    let max_height =
-                                                        center_layout.height.saturating_sub(2);
-                                                    let list_width = max_width.min(42);
-                                                    let list_height = max_height.clamp(6, 14);
-
-                                                    if rel_x < list_width && rel_y < list_height {
-                                                        let display_height =
-                                                            list_height.saturating_sub(2) as usize;
-                                                        let total = app.settings.s3_profile_count();
-                                                        if total == 0 {
-                                                            continue;
-                                                        }
-                                                        if rel_y >= 1
-                                                            && (rel_y as usize) < display_height + 1
-                                                        {
-                                                            let inner_rel_y = (rel_y - 1) as usize;
-                                                            let selected =
-                                                                app.settings.s3_profile_index;
-                                                            let (offset, _) =
-                                                                centered_window_bounds(
-                                                                    selected,
-                                                                    total,
-                                                                    display_height,
-                                                                );
-
-                                                            let target_idx = offset + inner_rel_y;
-                                                            if target_idx < total {
-                                                                let now = Instant::now();
-                                                                let is_double_click = if let (
-                                                                    Some(last_time),
-                                                                    Some(last_pos),
-                                                                ) = (
-                                                                    app.last_click_time,
-                                                                    app.last_click_pos,
-                                                                ) {
-                                                                    now.duration_since(last_time)
-                                                                        < Duration::from_millis(500)
-                                                                        && last_pos == (x, y)
-                                                                } else {
-                                                                    false
-                                                                };
-
-                                                                app.settings
-                                                                    .set_s3_profile_selection_index(
-                                                                        target_idx,
-                                                                    );
-                                                                if is_double_click {
-                                                                    app.settings.editing = false;
-                                                                    app.last_click_time = None;
-                                                                    app.status_message = format!(
-                                                                        "S3 profile: {}",
-                                                                        app.settings
-                                                                            .selected_s3_profile_label()
-                                                                    );
-                                                                } else {
-                                                                    app.last_click_time = Some(now);
-                                                                    app.last_click_pos =
-                                                                        Some((x, y));
-                                                                }
-                                                            }
-                                                        }
-                                                        continue;
-                                                    } else {
-                                                        app.settings.editing = false;
-                                                        continue;
-                                                    }
-                                                }
-
-                                                // Normal Fields selection
-                                                let rel_y = y.saturating_sub(center_layout.y + 1);
-                                                let clicked_idx = rel_y / 3;
-                                                let count =
-                                                    app.settings.active_category.field_count();
-
-                                                // Offset calculation for field clicks
-                                                let display_height =
-                                                    center_layout.height.saturating_sub(2) as usize;
-                                                let fields_per_view = display_height / 3;
-                                                let (offset, _) = centered_window_bounds(
-                                                    app.settings.selected_field,
-                                                    count,
-                                                    fields_per_view,
-                                                );
-
-                                                let target_idx = offset + clicked_idx as usize;
-
-                                                if target_idx < count {
-                                                    app.settings.selected_field = target_idx;
-                                                    let target_field =
-                                                        settings_field_def_at(&app, target_idx)
-                                                            .copied();
-
-                                                    if target_field.map(|field| field.id)
-                                                        == Some(SettingsFieldId::SetupWizardAction)
-                                                    {
-                                                        open_wizard_from_settings(&mut app).await;
-                                                        continue;
-                                                    }
-
-                                                    if target_field
-                                                        .map(|field| field.kind.is_toggle())
-                                                        .unwrap_or(false)
-                                                    {
-                                                        if let Some(field) = target_field {
-                                                            let _ =
-                                                                app.settings.toggle_field(field.id);
-                                                        }
-                                                        if let Err(e) = persist_settings_state(
-                                                            &mut app,
-                                                            &conn_mutex,
-                                                        )
-                                                        .await
-                                                        {
-                                                            app.status_message = format!(
-                                                                "Failed to save settings: {}",
-                                                                e
-                                                            );
-                                                        }
-                                                    } else {
-                                                        // Double click for other fields
-                                                        let now = Instant::now();
-                                                        if let (Some(last_time), Some(last_pos)) = (
-                                                            app.last_click_time,
-                                                            app.last_click_pos,
-                                                        ) {
-                                                            if now.duration_since(last_time)
-                                                                < Duration::from_millis(500)
-                                                                && last_pos == (x, y)
-                                                            {
-                                                                app.settings.editing = true;
-                                                                app.last_click_time = None;
-                                                            } else {
-                                                                app.last_click_time = Some(now);
-                                                                app.last_click_pos = Some((x, y));
-                                                            }
-                                                        } else {
-                                                            app.last_click_time = Some(now);
-                                                            app.last_click_pos = Some((x, y));
-                                                        }
-
-                                                        // Auto-expand selector fields
-                                                        if target_field
-                                                            .map(|field| field.kind.is_selector())
-                                                            .unwrap_or(false)
-                                                        {
-                                                            app.settings.editing = true;
-                                                            if target_field.map(|field| field.id)
-                                                                == Some(SettingsFieldId::Theme)
-                                                            {
-                                                                app.settings.original_theme = Some(
-                                                                    app.settings.theme.clone(),
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
+                                            handle_settings_center_click(
+                                                &mut app,
+                                                center_layout,
+                                                x,
+                                                y,
+                                                &conn_mutex,
+                                            )
+                                            .await;
                                         }
                                     }
                                 } else if x >= right_layout.x
@@ -4078,67 +4011,13 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             }
                                         }
                                         AppTab::Settings => {
-                                            let sidebar_width = 16;
-                                            if x < center_layout.x + sidebar_width {
-                                                // Scroll Categories
-                                                if is_down {
-                                                    app.settings.active_category =
-                                                        app.settings.active_category.next();
-                                                } else {
-                                                    app.settings.active_category =
-                                                        app.settings.active_category.prev();
-                                                }
-                                                app.settings.selected_field = 0;
-                                                app.settings.editing = false;
-                                            } else {
-                                                // Scroll Fields or selector lists
-                                                if app.settings.editing
-                                                    && active_settings_field_id(&app)
-                                                        == Some(SettingsFieldId::Theme)
-                                                {
-                                                    // Theme Selector Scroll
-                                                    let fields_area_x =
-                                                        center_layout.x + sidebar_width;
-                                                    let rel_x = x.saturating_sub(fields_area_x + 1);
-                                                    let rel_y =
-                                                        y.saturating_sub(center_layout.y + 2);
-
-                                                    let max_width = center_layout
-                                                        .width
-                                                        .saturating_sub(sidebar_width + 2);
-                                                    let max_height =
-                                                        center_layout.height.saturating_sub(2);
-                                                    let theme_list_width = max_width.min(62);
-                                                    let theme_list_height = max_height.clamp(8, 14);
-
-                                                    if rel_x < theme_list_width
-                                                        && rel_y < theme_list_height
-                                                    {
-                                                        cycle_theme_selection(&mut app, is_down);
-                                                    }
-                                                } else if app.settings.editing
-                                                    && active_settings_field_id(&app)
-                                                        == Some(SettingsFieldId::S3Profile)
-                                                {
-                                                    if is_down {
-                                                        app.settings.cycle_s3_profile_selection();
-                                                    } else {
-                                                        app.settings
-                                                            .cycle_s3_profile_selection_prev();
-                                                    }
-                                                } else {
-                                                    // Normal Fields Scroll
-                                                    let count =
-                                                        app.settings.active_category.field_count();
-                                                    if is_down {
-                                                        if app.settings.selected_field + 1 < count {
-                                                            app.settings.selected_field += 1;
-                                                        }
-                                                    } else if app.settings.selected_field > 0 {
-                                                        app.settings.selected_field -= 1;
-                                                    }
-                                                }
-                                            }
+                                            handle_settings_center_scroll(
+                                                &mut app,
+                                                center_layout,
+                                                x,
+                                                y,
+                                                is_down,
+                                            );
                                         }
                                     }
                                 } else if x >= right_layout.x

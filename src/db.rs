@@ -113,6 +113,35 @@ impl WizardStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JobStatus {
+    Queued,
+    Scanning,
+    Scanned,
+    Uploading,
+    Transferring,
+    Complete,
+    Quarantined,
+    QuarantinedRemoved,
+    Failed,
+}
+
+impl JobStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Scanning => "scanning",
+            Self::Scanned => "scanned",
+            Self::Uploading => "uploading",
+            Self::Transferring => "transferring",
+            Self::Complete => "complete",
+            Self::Quarantined => "quarantined",
+            Self::QuarantinedRemoved => "quarantined_removed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 pub fn init_db(state_dir: &str) -> Result<Connection> {
     debug!("Initializing database in: {}", state_dir);
     let configured_state_dir = PathBuf::from(state_dir);
@@ -1055,6 +1084,10 @@ pub fn count_jobs_with_status(conn: &Connection, status: &str) -> Result<i64> {
     Ok(count)
 }
 
+pub fn count_jobs_with_job_status(conn: &Connection, status: JobStatus) -> Result<i64> {
+    count_jobs_with_status(conn, status.as_str())
+}
+
 pub fn count_pending_session_jobs(conn: &Connection, session_id: &str) -> Result<i64> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM jobs WHERE session_id = ? AND status NOT IN ('complete', 'quarantined', 'quarantined_removed', 'cancelled', 'failed', 'failed_retryable')",
@@ -1075,6 +1108,15 @@ pub fn update_job_staged(
         params![staged_path, status, job_id],
     )?;
     Ok(())
+}
+
+pub fn update_job_staged_with_status(
+    conn: &Connection,
+    job_id: i64,
+    staged_path: &str,
+    status: JobStatus,
+) -> Result<()> {
+    update_job_staged(conn, job_id, staged_path, status.as_str())
 }
 
 pub fn update_job_staged_path(conn: &Connection, job_id: i64, staged_path: &str) -> Result<()> {
@@ -1309,6 +1351,15 @@ pub fn update_scan_status(
     Ok(())
 }
 
+pub fn update_scan_status_with_job_status(
+    conn: &Connection,
+    job_id: i64,
+    status: &str,
+    global_status: JobStatus,
+) -> Result<()> {
+    update_scan_status(conn, job_id, status, global_status.as_str())
+}
+
 pub fn update_upload_status(
     conn: &Connection,
     job_id: i64,
@@ -1320,6 +1371,15 @@ pub fn update_upload_status(
         params![status, global_status, job_id],
     )?;
     Ok(())
+}
+
+pub fn update_upload_status_with_job_status(
+    conn: &Connection,
+    job_id: i64,
+    status: &str,
+    global_status: JobStatus,
+) -> Result<()> {
+    update_upload_status(conn, job_id, status, global_status.as_str())
 }
 
 pub fn update_job_checksums(
@@ -1363,6 +1423,13 @@ pub fn get_next_job(conn: &Connection, current_status: &str) -> Result<Option<Jo
     } else {
         Ok(None)
     }
+}
+
+pub fn get_next_job_with_status(
+    conn: &Connection,
+    current_status: JobStatus,
+) -> Result<Option<JobRow>> {
+    get_next_job(conn, current_status.as_str())
 }
 
 pub fn get_job(conn: &Connection, job_id: i64) -> Result<Option<JobRow>> {
