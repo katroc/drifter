@@ -390,6 +390,46 @@ async fn launch_settings_connection_test(app: &mut App) {
     });
 }
 
+async fn handle_settings_category_key(
+    app: &mut App,
+    key: KeyCode,
+    conn_mutex: &Arc<Mutex<Connection>>,
+) -> Result<()> {
+    match key {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.settings.active_category = app.settings.active_category.prev();
+            app.settings.selected_field = 0;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.settings.active_category = app.settings.active_category.next();
+            app.settings.selected_field = 0;
+        }
+        KeyCode::Right | KeyCode::Enter => {
+            app.focus = AppFocus::SettingsFields;
+        }
+        KeyCode::Char(']') if app.settings.active_category == SettingsCategory::S3 => {
+            cycle_settings_s3_profile(app, true);
+        }
+        KeyCode::Char('[') if app.settings.active_category == SettingsCategory::S3 => {
+            cycle_settings_s3_profile(app, false);
+        }
+        KeyCode::Char('n') if app.settings.active_category == SettingsCategory::S3 => {
+            create_settings_s3_profile(app, conn_mutex).await;
+        }
+        KeyCode::Char('x') if app.settings.active_category == SettingsCategory::S3 => {
+            delete_settings_s3_profile(app, conn_mutex).await;
+        }
+        KeyCode::Char('s') => {
+            save_settings_with_status(app, conn_mutex).await;
+        }
+        KeyCode::Char('t') => {
+            launch_settings_connection_test(app).await;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn resolve_local_source_endpoint_id(conn: &Connection) -> Option<i64> {
     if let Ok(Some(profile)) = crate::db::get_default_source_endpoint_profile(conn)
         && profile.kind == EndpointKind::Local
@@ -2728,48 +2768,10 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                 }
                             }
 
-                            AppFocus::SettingsCategory => match key.code {
-                                KeyCode::Up | KeyCode::Char('k') => {
-                                    app.settings.active_category =
-                                        app.settings.active_category.prev();
-                                    app.settings.selected_field = 0;
-                                }
-                                KeyCode::Down | KeyCode::Char('j') => {
-                                    app.settings.active_category =
-                                        app.settings.active_category.next();
-                                    app.settings.selected_field = 0;
-                                }
-                                KeyCode::Right | KeyCode::Enter => {
-                                    app.focus = AppFocus::SettingsFields;
-                                }
-                                KeyCode::Char(']')
-                                    if app.settings.active_category == SettingsCategory::S3 =>
-                                {
-                                    cycle_settings_s3_profile(&mut app, true);
-                                }
-                                KeyCode::Char('[')
-                                    if app.settings.active_category == SettingsCategory::S3 =>
-                                {
-                                    cycle_settings_s3_profile(&mut app, false);
-                                }
-                                KeyCode::Char('n')
-                                    if app.settings.active_category == SettingsCategory::S3 =>
-                                {
-                                    create_settings_s3_profile(&mut app, &conn_mutex).await;
-                                }
-                                KeyCode::Char('x')
-                                    if app.settings.active_category == SettingsCategory::S3 =>
-                                {
-                                    delete_settings_s3_profile(&mut app, &conn_mutex).await;
-                                }
-                                KeyCode::Char('s') => {
-                                    save_settings_with_status(&mut app, &conn_mutex).await;
-                                }
-                                KeyCode::Char('t') => {
-                                    launch_settings_connection_test(&mut app).await;
-                                }
-                                _ => {}
-                            },
+                            AppFocus::SettingsCategory => {
+                                handle_settings_category_key(&mut app, key.code, &conn_mutex)
+                                    .await?;
+                            }
                             AppFocus::SettingsFields => {
                                 let field_count = app.settings.active_category.field_count();
                                 // Focus-specific rendering logic for fields is handled in render.rs,
