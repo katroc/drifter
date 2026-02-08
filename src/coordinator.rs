@@ -1225,7 +1225,7 @@ impl Coordinator {
                         .map(|j| j.status)
                         .unwrap_or_else(|| "unknown".to_string());
 
-                    if current_status == "paused" {
+                    if JobStatus::parse(&current_status) == Some(JobStatus::Paused) {
                         db::insert_event(&conn, job.id, "upload", "upload paused")?;
                     } else {
                         db::insert_event(&conn, job.id, "upload", "upload cancelled")?;
