@@ -19,13 +19,13 @@ pub struct JobRow {
     pub id: i64,
     pub session_id: String,
     pub created_at: String,
-    pub status: String,
+    pub status: JobStatus,
     pub source_path: String,
     pub size_bytes: i64,
     pub staged_path: Option<String>,
     pub error: Option<String>,
-    pub scan_status: Option<String>,
-    pub upload_status: Option<String>,
+    pub scan_status: Option<ScanStatus>,
+    pub upload_status: Option<UploadStatus>,
     pub s3_upload_id: Option<String>,
     pub s3_key: Option<String>,
     pub priority: i64,
@@ -200,6 +200,86 @@ impl JobStatus {
             self,
             Self::Uploading | Self::Transferring | Self::Scanning | Self::Pending | Self::Queued
         )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanStatus {
+    Clean,
+    Scanned,
+    Infected,
+    Skipped,
+    Scanning,
+    Removed,
+    Completed,
+    Unknown(String),
+}
+
+impl ScanStatus {
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "clean" => Self::Clean,
+            "scanned" => Self::Scanned,
+            "infected" => Self::Infected,
+            "skipped" => Self::Skipped,
+            "scanning" => Self::Scanning,
+            "removed" => Self::Removed,
+            "completed" => Self::Completed,
+            _ => Self::Unknown(value.to_string()),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Clean => "clean",
+            Self::Scanned => "scanned",
+            Self::Infected => "infected",
+            Self::Skipped => "skipped",
+            Self::Scanning => "scanning",
+            Self::Removed => "removed",
+            Self::Completed => "completed",
+            Self::Unknown(value) => value.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UploadStatus {
+    Starting,
+    Uploading,
+    Downloading,
+    Copying,
+    InProgress,
+    Completed,
+    Skipped,
+    Unknown(String),
+}
+
+impl UploadStatus {
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "starting" => Self::Starting,
+            "uploading" => Self::Uploading,
+            "downloading" => Self::Downloading,
+            "copying" => Self::Copying,
+            "in_progress" => Self::InProgress,
+            "completed" => Self::Completed,
+            "skipped" => Self::Skipped,
+            _ => Self::Unknown(value.to_string()),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Starting => "starting",
+            Self::Uploading => "uploading",
+            Self::Downloading => "downloading",
+            Self::Copying => "copying",
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+            Self::Skipped => "skipped",
+            Self::Unknown(value) => value.as_str(),
+        }
     }
 }
 
@@ -410,21 +490,58 @@ fn apply_optional_migration(conn: &Connection, sql: &str) -> Result<()> {
 
 pub const JOB_COLUMNS: &str = "id, session_id, created_at, status, source_path, size_bytes, staged_path, error, scan_status, upload_status, s3_upload_id, s3_key, priority, checksum, remote_checksum, retry_count, next_retry_at, scan_duration_ms, upload_duration_ms";
 
+fn parse_job_status_field(
+    raw: String,
+    column_index: usize,
+    field_name: &'static str,
+) -> rusqlite::Result<JobStatus> {
+    JobStatus::parse(&raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column_index,
+            rusqlite::types::Type::Text,
+            format!("invalid {} '{}'", field_name, raw).into(),
+        )
+    })
+}
+
+fn parse_optional_scan_status_field(
+    raw: Option<String>,
+    _column_index: usize,
+    _field_name: &'static str,
+) -> rusqlite::Result<Option<ScanStatus>> {
+    Ok(raw.map(|value| ScanStatus::parse(&value)))
+}
+
+fn parse_optional_upload_status_field(
+    raw: Option<String>,
+    _column_index: usize,
+    _field_name: &'static str,
+) -> rusqlite::Result<Option<UploadStatus>> {
+    Ok(raw.map(|value| UploadStatus::parse(&value)))
+}
+
 impl<'a> TryFrom<&'a rusqlite::Row<'a>> for JobRow {
     type Error = rusqlite::Error;
 
     fn try_from(row: &'a rusqlite::Row<'a>) -> Result<Self, Self::Error> {
+        let status_raw: String = row.get(3)?;
+        let scan_status_raw: Option<String> = row.get(8)?;
+        let upload_status_raw: Option<String> = row.get(9)?;
         Ok(JobRow {
             id: row.get(0)?,
             session_id: row.get(1)?,
             created_at: row.get(2)?,
-            status: row.get(3)?,
+            status: parse_job_status_field(status_raw, 3, "status")?,
             source_path: row.get(4)?,
             size_bytes: row.get(5)?,
             staged_path: row.get(6)?,
             error: row.get(7)?,
-            scan_status: row.get(8)?,
-            upload_status: row.get(9)?,
+            scan_status: parse_optional_scan_status_field(scan_status_raw, 8, "scan_status")?,
+            upload_status: parse_optional_upload_status_field(
+                upload_status_raw,
+                9,
+                "upload_status",
+            )?,
             s3_upload_id: row.get(10)?,
             s3_key: row.get(11)?,
             priority: row.get(12).unwrap_or(0),
@@ -1723,7 +1840,7 @@ mod tests {
         let job = &jobs[0];
 
         assert_eq!(job.session_id, "test-session");
-        assert_eq!(job.status, "pending");
+        assert_eq!(job.status, JobStatus::Pending);
         assert_eq!(job.source_path, "/tmp/test");
         assert_eq!(job.size_bytes, 100);
         assert_eq!(job.priority, 10);
@@ -1837,7 +1954,7 @@ mod tests {
         assert_eq!(job.source_path, "/tmp/file.txt");
         assert_eq!(job.size_bytes, 1024);
         assert_eq!(job.s3_key, Some("s3-key.txt".to_string()));
-        assert_eq!(job.status, "ingesting");
+        assert_eq!(job.status, JobStatus::Ingesting);
         assert_eq!(job.retry_count, 0);
 
         Ok(())
@@ -1912,7 +2029,7 @@ mod tests {
 
         let history = list_history_jobs(&conn, 100, Some("Complete"))?;
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].status, "complete");
+        assert_eq!(history[0].status, JobStatus::Complete);
 
         Ok(())
     }
@@ -1953,7 +2070,7 @@ mod tests {
 
         let quarantined = list_quarantined_jobs(&conn, 100)?;
         assert_eq!(quarantined.len(), 1);
-        assert_eq!(quarantined[0].status, "quarantined");
+        assert_eq!(quarantined[0].status, JobStatus::Quarantined);
 
         Ok(())
     }
@@ -2021,7 +2138,7 @@ mod tests {
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
         assert_eq!(job.staged_path, Some("/data/file.txt".to_string()));
-        assert_eq!(job.status, "queued");
+        assert_eq!(job.status, JobStatus::Queued);
         assert_eq!(job.error, None);
 
         Ok(())
@@ -2035,7 +2152,7 @@ mod tests {
         update_job_error(&conn, job_id, JobStatus::Failed, "Network timeout")?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.status, "failed");
+        assert_eq!(job.status, JobStatus::Failed);
         assert_eq!(job.error, Some("Network timeout".to_string()));
 
         Ok(())
@@ -2085,7 +2202,7 @@ mod tests {
         cancel_job(&conn, job_id)?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.status, "cancelled");
+        assert_eq!(job.status, JobStatus::Cancelled);
         assert_eq!(job.error, Some("Cancelled by user".to_string()));
 
         Ok(())
@@ -2126,7 +2243,7 @@ mod tests {
         let job = get_job(&conn, job_id)?.expect("Job should exist");
         assert_eq!(job.retry_count, 3);
         assert_eq!(job.next_retry_at, Some(next_retry.to_string()));
-        assert_eq!(job.status, "retry_pending");
+        assert_eq!(job.status, JobStatus::RetryPending);
         assert_eq!(job.error, Some("Temporary failure".to_string()));
 
         Ok(())
@@ -2168,7 +2285,7 @@ mod tests {
         retry_job(&conn, job_id)?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.status, "scanned");
+        assert_eq!(job.status, JobStatus::Scanned);
         assert_eq!(job.error, None);
 
         Ok(())
@@ -2184,7 +2301,7 @@ mod tests {
         retry_job(&conn, job_id)?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.status, "queued");
+        assert_eq!(job.status, JobStatus::Queued);
         assert_eq!(job.error, None);
 
         Ok(())
@@ -2199,11 +2316,11 @@ mod tests {
 
         pause_job(&conn, job_id)?;
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.status, "paused");
+        assert_eq!(job.status, JobStatus::Paused);
 
         resume_job(&conn, job_id)?;
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.status, "scanned");
+        assert_eq!(job.status, JobStatus::Scanned);
 
         Ok(())
     }
@@ -2325,8 +2442,8 @@ mod tests {
         update_scan_status(&conn, job_id, "clean", JobStatus::Scanned)?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.scan_status, Some("clean".to_string()));
-        assert_eq!(job.status, "scanned");
+        assert_eq!(job.scan_status, Some(ScanStatus::Clean));
+        assert_eq!(job.status, JobStatus::Scanned);
 
         Ok(())
     }
@@ -2339,7 +2456,7 @@ mod tests {
         update_upload_status(&conn, job_id, "in_progress", JobStatus::Uploading)?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
-        assert_eq!(job.status, "uploading");
+        assert_eq!(job.status, JobStatus::Uploading);
 
         Ok(())
     }

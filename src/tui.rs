@@ -2613,9 +2613,8 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 {
                                                     let job = &app.jobs[idx];
                                                     let id = job.id;
-                                                    let is_active = JobStatus::parse(&job.status)
-                                                        .map(JobStatus::is_active_queue_job)
-                                                        .unwrap_or(false);
+                                                    let is_active =
+                                                        job.status.is_active_queue_job();
 
                                                     if is_active {
                                                         // Require confirmation
@@ -2657,10 +2656,7 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 let ids_to_delete: Vec<i64> = app
                                                     .jobs
                                                     .iter()
-                                                    .filter(|j| {
-                                                        JobStatus::parse(&j.status)
-                                                            == Some(JobStatus::Complete)
-                                                    })
+                                                    .filter(|j| j.status == JobStatus::Complete)
                                                     .map(|j| j.id)
                                                     .collect();
                                                 let count = ids_to_delete.len();

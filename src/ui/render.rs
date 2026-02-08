@@ -12,7 +12,7 @@ use crate::app::settings::SettingsFieldId;
 use crate::app::state::{App, AppFocus, AppTab, InputMode, LayoutTarget, RemoteTarget};
 use crate::components::file_picker::FileEntry;
 use crate::components::wizard::WizardStep;
-use crate::db::JobStatus;
+use crate::db::{JobStatus, ScanStatus, UploadStatus};
 use crate::ui::key_hints::footer_hints;
 use crate::ui::theme::{StatusKind, Theme};
 use crate::utils::lock_mutex;
@@ -67,13 +67,13 @@ fn draw_shadow(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn transfer_phase_label(app: &App, job: &crate::db::JobRow) -> String {
-    let status = JobStatus::parse(&job.status);
-    if matches!(status, Some(JobStatus::Uploading | JobStatus::Transferring)) {
-        return match job.upload_status.as_deref() {
-            Some("copying") => "copying".to_string(),
-            Some("downloading") => "downloading".to_string(),
+    let status = job.status;
+    if matches!(status, JobStatus::Uploading | JobStatus::Transferring) {
+        return match job.upload_status.as_ref() {
+            Some(UploadStatus::Copying) => "copying".to_string(),
+            Some(UploadStatus::Downloading) => "downloading".to_string(),
             _ => {
-                if status == Some(JobStatus::Transferring) {
+                if status == JobStatus::Transferring {
                     "transferring".to_string()
                 } else {
                     "uploading".to_string()
@@ -82,7 +82,7 @@ fn transfer_phase_label(app: &App, job: &crate::db::JobRow) -> String {
         };
     }
 
-    if status == Some(JobStatus::Complete) {
+    if status == JobStatus::Complete {
         return match app.transfer_direction_for_job(job.id) {
             Some("s3_to_s3") => "copied".to_string(),
             Some("s3_to_local") => "downloaded".to_string(),
@@ -91,11 +91,11 @@ fn transfer_phase_label(app: &App, job: &crate::db::JobRow) -> String {
         };
     }
 
-    job.status.clone()
+    job.status.as_str().to_string()
 }
 
 fn queue_status_label(app: &App, job: &crate::db::JobRow) -> String {
-    if JobStatus::parse(&job.status) == Some(JobStatus::RetryPending) {
+    if job.status == JobStatus::RetryPending {
         if let Some(next_retry) = &job.next_retry_at
             && let Ok(target) = chrono::DateTime::parse_from_rfc3339(next_retry)
         {
@@ -111,8 +111,8 @@ fn queue_status_label(app: &App, job: &crate::db::JobRow) -> String {
 }
 
 fn history_status_label(app: &App, job: &crate::db::JobRow) -> String {
-    match JobStatus::parse(&job.status) {
-        Some(JobStatus::Quarantined) => {
+    match job.status {
+        JobStatus::Quarantined => {
             if let Some(err) = &job.error
                 && let Some(name) = err.strip_prefix("Infected: ")
             {
@@ -120,14 +120,14 @@ fn history_status_label(app: &App, job: &crate::db::JobRow) -> String {
             }
             "Threat Detected".to_string()
         }
-        Some(JobStatus::QuarantinedRemoved) => "Threat Removed".to_string(),
-        Some(JobStatus::Complete) => match app.transfer_direction_for_job(job.id) {
+        JobStatus::QuarantinedRemoved => "Threat Removed".to_string(),
+        JobStatus::Complete => match app.transfer_direction_for_job(job.id) {
             Some("s3_to_s3") => "Copied".to_string(),
             Some("s3_to_local") => "Downloaded".to_string(),
             Some("local_to_s3") => "Uploaded".to_string(),
             _ => "Done".to_string(),
         },
-        _ => job.status.clone(),
+        _ => job.status.as_str().to_string(),
     }
 }
 
@@ -244,7 +244,7 @@ fn format_eta_short(total_secs: u64) -> String {
 }
 
 fn queue_avg_eta(app: &App, job: &crate::db::JobRow) -> (String, String) {
-    if JobStatus::parse(&job.status) != Some(JobStatus::Uploading) {
+    if job.status != JobStatus::Uploading {
         return ("-".to_string(), "-".to_string());
     }
     let Some(info) = app.cached_progress.get(&job.id) else {
@@ -999,7 +999,7 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
 
             if let Some(job_idx) = item.index_in_jobs {
                 let job = &app.jobs[job_idx];
-                let job_status = JobStatus::parse(&job.status);
+                let job_status = job.status;
                 let status_label = queue_status_label(app, job);
                 let direction = app.transfer_direction_for_job(job.id);
                 let operation_label = transfer_operation_label(direction);
@@ -1009,10 +1009,7 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
                 let destination_short = truncate_with_ellipsis(&destination_endpoint, 10);
 
                 let p_str = {
-                    if matches!(
-                        job_status,
-                        Some(JobStatus::Uploading | JobStatus::Transferring)
-                    ) {
+                    if matches!(job_status, JobStatus::Uploading | JobStatus::Transferring) {
                         if status_label == "copying" {
                             "SERVER COPY".to_string()
                         } else if status_label == "downloading" {
@@ -1035,14 +1032,14 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
                                 "░░░░░░░░░░   0%".to_string()
                             }
                         }
-                    } else if job_status == Some(JobStatus::Complete) {
+                    } else if job_status == JobStatus::Complete {
                         "██████████ 100%".to_string()
                     } else if matches!(
                         job_status,
-                        Some(JobStatus::Quarantined | JobStatus::QuarantinedRemoved)
+                        JobStatus::Quarantined | JobStatus::QuarantinedRemoved
                     ) {
                         "XXXXXXXXXX ERR".to_string()
-                    } else if matches!(job_status, Some(JobStatus::Error | JobStatus::Failed)) {
+                    } else if matches!(job_status, JobStatus::Error | JobStatus::Failed) {
                         "!! ERROR !!".to_string()
                     } else {
                         "----------".to_string()
@@ -1053,7 +1050,7 @@ fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
                 let status_style = if is_selected {
                     app.theme.selection_style()
                 } else {
-                    app.theme.status_style(status_kind(&job.status))
+                    app.theme.status_style(status_kind(job.status.as_str()))
                 };
                 let progress_style = if is_selected {
                     app.theme.selection_style()
@@ -1210,7 +1207,7 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
 
             if let Some(job_idx) = item.index_in_jobs {
                 let job = &app.history[job_idx];
-                let job_status = JobStatus::parse(&job.status);
+                let job_status = job.status;
                 let status_str = history_status_label(app, job);
                 let direction = app.transfer_direction_for_job(job.id);
                 let route_str = transfer_route_short(direction);
@@ -1224,10 +1221,10 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
                     app.theme.selection_style()
                 } else {
                     match job_status {
-                        Some(JobStatus::Quarantined | JobStatus::QuarantinedRemoved) => {
+                        JobStatus::Quarantined | JobStatus::QuarantinedRemoved => {
                             app.theme.status_style(StatusKind::Error)
                         }
-                        Some(JobStatus::Complete) => app.theme.status_style(StatusKind::Success),
+                        JobStatus::Complete => app.theme.status_style(StatusKind::Success),
                         _ => app.theme.text_style(),
                     }
                 };
@@ -1296,8 +1293,16 @@ fn draw_job_details(
     let scan_policy = metadata
         .and_then(|m| m.scan_policy.as_deref())
         .unwrap_or("-");
-    let scan_status = job.scan_status.as_deref().unwrap_or("none");
-    let transfer_status = job.upload_status.as_deref().unwrap_or("none");
+    let scan_status = job
+        .scan_status
+        .as_ref()
+        .map(ScanStatus::as_str)
+        .unwrap_or("none");
+    let transfer_status = job
+        .upload_status
+        .as_ref()
+        .map(UploadStatus::as_str)
+        .unwrap_or("none");
     let error = job.error.as_deref().unwrap_or("none");
     let phase_label = transfer_phase_label(app, job);
     let operation = transfer_operation_label(transfer_direction);
@@ -1330,16 +1335,14 @@ fn draw_job_details(
         };
         crate::db::list_job_events(&conn, job.id, 6).unwrap_or_default()
     };
-    let job_status = JobStatus::parse(&job.status);
+    let job_status = job.status;
     let finished_at = if matches!(
         job_status,
-        Some(
-            JobStatus::Complete
-                | JobStatus::Failed
-                | JobStatus::Cancelled
-                | JobStatus::Quarantined
-                | JobStatus::QuarantinedRemoved
-        )
+        JobStatus::Complete
+            | JobStatus::Failed
+            | JobStatus::Cancelled
+            | JobStatus::Quarantined
+            | JobStatus::QuarantinedRemoved
     ) {
         recent_events.first().map(|event| event.created_at.as_str())
     } else {
@@ -1348,7 +1351,7 @@ fn draw_job_details(
 
     let local_checksum = job.checksum.as_deref().unwrap_or("Calculating...");
     let remote_checksum = job.remote_checksum.as_deref().unwrap_or("Not uploaded");
-    let remote_style = if job_status == Some(JobStatus::Complete) && job.remote_checksum.is_some() {
+    let remote_style = if job_status == JobStatus::Complete && job.remote_checksum.is_some() {
         app.theme.status_style(StatusKind::Success)
     } else {
         app.theme.text_style()
@@ -1389,7 +1392,7 @@ fn draw_job_details(
     push_field!(
         "Result",
         &phase_label,
-        app.theme.status_style(status_kind(&job.status)),
+        app.theme.status_style(status_kind(job.status.as_str())),
     );
     push_field!("Operation", operation, app.theme.text_style());
     if let Some(route) = transfer_route_label(transfer_direction) {
@@ -1456,7 +1459,7 @@ fn draw_job_details(
         );
     }
 
-    if job_status == Some(JobStatus::Uploading) && phase_label == "uploading" {
+    if job_status == JobStatus::Uploading && phase_label == "uploading" {
         if let Some(info) = app.cached_progress.get(&job.id)
             && info.parts_total > 0
         {
@@ -1475,7 +1478,7 @@ fn draw_job_details(
                 push_field!("Detail", &info.details, app.theme.text_style());
             }
         }
-    } else if job_status == Some(JobStatus::RetryPending) {
+    } else if job_status == JobStatus::RetryPending {
         push_heading!("RETRY");
         if let Some(next_retry) = &job.next_retry_at
             && let Ok(target) = chrono::DateTime::parse_from_rfc3339(next_retry)
@@ -1605,10 +1608,15 @@ fn draw_quarantine(f: &mut Frame, app: &App, area: Rect) {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| job.source_path.clone());
             let display_name = truncate_with_ellipsis(&filename, 25);
-            let job_status = JobStatus::parse(&job.status);
+            let job_status = job.status;
 
-            let threat = extract_threat_name(job.scan_status.as_deref().unwrap_or(""));
-            let status = if job_status == Some(JobStatus::QuarantinedRemoved) {
+            let threat = extract_threat_name(
+                job.scan_status
+                    .as_ref()
+                    .map(ScanStatus::as_str)
+                    .unwrap_or(""),
+            );
+            let status = if job_status == JobStatus::QuarantinedRemoved {
                 "Removed"
             } else {
                 "Detected"
@@ -1617,7 +1625,7 @@ fn draw_quarantine(f: &mut Frame, app: &App, area: Rect) {
 
             let status_style = if is_selected {
                 app.theme.selection_style()
-            } else if job_status == Some(JobStatus::QuarantinedRemoved) {
+            } else if job_status == JobStatus::QuarantinedRemoved {
                 app.theme.status_style(StatusKind::Info)
             } else {
                 app.theme.status_style(StatusKind::Error)

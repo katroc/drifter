@@ -1,5 +1,5 @@
 use crate::core::config::Config;
-use crate::db::{self, JobStatus};
+use crate::db::{self, JobStatus, ScanStatus};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -49,15 +49,16 @@ impl Reporter {
         };
 
         for job in jobs {
-            let scan_status = job.scan_status.as_deref().unwrap_or("unknown");
+            let scan_status = job
+                .scan_status
+                .as_ref()
+                .map(ScanStatus::as_str)
+                .unwrap_or("unknown");
             match scan_status {
                 "clean" | "scanned" => summary.clean_files += 1,
                 "infected" => summary.infected_files += 1,
                 _ => {
-                    if matches!(
-                        JobStatus::parse(&job.status),
-                        Some(JobStatus::Failed | JobStatus::Error)
-                    ) {
+                    if matches!(job.status, JobStatus::Failed | JobStatus::Error) {
                         summary.failed_files += 1;
                     } else {
                         summary.skipped_files += 1;
@@ -67,8 +68,11 @@ impl Reporter {
 
             summary.files.push(FileReport {
                 filename: job.source_path.clone(),
-                status: job.status.clone(),
-                scan_status: job.scan_status.clone(),
+                status: job.status.as_str().to_string(),
+                scan_status: job
+                    .scan_status
+                    .as_ref()
+                    .map(|status| status.as_str().to_string()),
                 checksum: job.checksum.clone(),
                 error: job.error.clone(),
             });

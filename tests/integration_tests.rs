@@ -157,24 +157,24 @@ fn test_job_lifecycle_state_transitions() -> Result<()> {
 
     // Initial state
     let job = db::get_job(&conn, job_id)?.unwrap();
-    assert_eq!(job.status, "ingesting");
+    assert_eq!(job.status, db::JobStatus::Ingesting);
     assert_eq!(job.retry_count, 0);
 
     // Stage -> Queued
     db::update_job_staged(&conn, job_id, "/data/file.txt", db::JobStatus::Queued)?;
     let job = db::get_job(&conn, job_id)?.unwrap();
-    assert_eq!(job.status, "queued");
+    assert_eq!(job.status, db::JobStatus::Queued);
 
     // Scan -> Scanned
     db::update_scan_status(&conn, job_id, "clean", db::JobStatus::Scanned)?;
     let job = db::get_job(&conn, job_id)?.unwrap();
-    assert_eq!(job.scan_status, Some("clean".to_string()));
-    assert_eq!(job.status, "scanned");
+    assert_eq!(job.scan_status, Some(db::ScanStatus::Clean));
+    assert_eq!(job.status, db::JobStatus::Scanned);
 
     // Upload -> Complete
     db::update_upload_status(&conn, job_id, "completed", db::JobStatus::Complete)?;
     let job = db::get_job(&conn, job_id)?.unwrap();
-    assert_eq!(job.status, "complete");
+    assert_eq!(job.status, db::JobStatus::Complete);
 
     Ok(())
 }
@@ -204,7 +204,7 @@ fn test_job_retry_workflow() -> Result<()> {
     )?;
 
     let job = db::get_job(&conn, job_id)?.unwrap();
-    assert_eq!(job.status, "retry_pending");
+    assert_eq!(job.status, db::JobStatus::RetryPending);
     assert_eq!(job.retry_count, 1);
     assert!(job.next_retry_at.is_some());
 
@@ -602,8 +602,8 @@ fn test_complete_job_workflow_simulation() -> Result<()> {
 
     // Verify final state
     let job = db::get_job(&conn, job_id)?.unwrap();
-    assert_eq!(job.status, "complete");
-    assert_eq!(job.scan_status, Some("clean".to_string()));
+    assert_eq!(job.status, db::JobStatus::Complete);
+    assert_eq!(job.scan_status, Some(db::ScanStatus::Clean));
     assert_eq!(job.checksum, Some(local_checksum.to_string()));
     assert_eq!(job.scan_duration_ms, Some(1500));
     assert_eq!(job.upload_duration_ms, Some(5000));

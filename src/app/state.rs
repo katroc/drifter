@@ -1088,7 +1088,7 @@ impl App {
             }
         };
 
-        let parsed_status = JobStatus::parse(&status);
+        let parsed_status = Some(status);
 
         if parsed_status == Some(JobStatus::Paused) {
             let conn = if let Ok(c) = self.conn.lock() {

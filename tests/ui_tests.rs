@@ -24,7 +24,7 @@ use drifter::coordinator::ProgressInfo;
 use drifter::core::config::Config;
 use drifter::core::metrics::{HostMetricsSnapshot, MetricsCollector};
 use drifter::core::transfer::TransferDirection;
-use drifter::db::JobRow;
+use drifter::db::{JobRow, JobStatus, ScanStatus};
 use drifter::services::uploader::S3Object;
 use drifter::services::watch::Watcher;
 use drifter::ui::render::ui;
@@ -409,12 +409,12 @@ fn create_sample_job(id: i64, name: &str, status: &str, size: i64) -> JobRow {
         id,
         session_id: "test-session".to_string(),
         created_at: FIXED_CREATED_AT.to_string(),
-        status: status.to_string(),
+        status: JobStatus::parse(status).expect("invalid test job status"),
         source_path: format!("/uploads/{}", name),
         size_bytes: size,
         staged_path: Some(format!("/uploads/{}", name)),
         error: None,
-        scan_status: Some("clean".to_string()),
+        scan_status: Some(ScanStatus::Clean),
         upload_status: None,
         s3_upload_id: None,
         s3_key: Some(format!("uploads/{}", name)),
@@ -523,7 +523,7 @@ fn test_quarantine_view_empty() {
 fn test_quarantine_view_with_threats() {
     let mut threat = create_sample_job(1, "malware.exe", "quarantined", 500_000);
     threat.error = Some("Infected: Win.Trojan.Agent-123456".to_string());
-    threat.scan_status = Some("infected".to_string());
+    threat.scan_status = Some(ScanStatus::Infected);
 
     let app = TestAppBuilder::new()
         .with_tab(AppTab::Quarantine)

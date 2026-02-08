@@ -1,7 +1,7 @@
 use crate::app::state::AppEvent;
 use crate::core::config::Config;
 use crate::core::transfer::EndpointKind;
-use crate::db::{self, JobRow, JobStatus};
+use crate::db::{self, JobRow, JobStatus, ScanStatus};
 use crate::services::scanner::{ScanResult, Scanner};
 use crate::services::uploader::{S3EndpointConfig, Uploader};
 use anyhow::{Context, Result};
@@ -135,9 +135,10 @@ impl Coordinator {
             let conn = lock_mutex(&self.conn)?;
             if let Ok(retry_jobs) = db::list_retryable_jobs(&conn) {
                 for job in retry_jobs {
-                    let next_status = if job.scan_status.as_deref() == Some("clean")
-                        || job.scan_status.as_deref() == Some("scanned")
-                    {
+                    let next_status = if matches!(
+                        job.scan_status,
+                        Some(ScanStatus::Clean | ScanStatus::Scanned)
+                    ) {
                         "scanned"
                     } else {
                         "queued"
@@ -1153,9 +1154,9 @@ impl Coordinator {
                     let conn = lock_mutex(&self.conn)?;
                     let current_status = db::get_job(&conn, job.id)?
                         .map(|j| j.status)
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .unwrap_or(JobStatus::Error);
 
-                    if JobStatus::parse(&current_status) == Some(JobStatus::Paused) {
+                    if current_status == JobStatus::Paused {
                         db::insert_event(&conn, job.id, "upload", "upload paused")?;
                     } else {
                         db::insert_event(&conn, job.id, "upload", "upload cancelled")?;
@@ -1555,8 +1556,8 @@ mod tests {
         let job = db::get_job(&c, job_id)?.expect("Job not found");
 
         // It goes queued -> scanned (skipped) -> uploading
-        assert_eq!(job.status, "uploading");
-        assert_eq!(job.scan_status, Some("skipped".to_string()));
+        assert_eq!(job.status, JobStatus::Uploading);
+        assert_eq!(job.scan_status, Some(ScanStatus::Skipped));
 
         Ok(())
     }
@@ -1583,8 +1584,8 @@ mod tests {
         let c = lock_mutex(&conn)?;
         let job = db::get_job(&c, job_id)?.expect("Job not found");
 
-        assert_eq!(job.status, "uploading");
-        assert_eq!(job.upload_status, Some("uploading".to_string()));
+        assert_eq!(job.status, JobStatus::Uploading);
+        assert_eq!(job.upload_status, Some(db::UploadStatus::Uploading));
 
         Ok(())
     }
