@@ -8,7 +8,7 @@ use ratatui::{
     },
 };
 
-use crate::app::settings::SettingsCategory;
+use crate::app::settings::SettingsFieldId;
 use crate::app::state::{App, AppFocus, AppTab, InputMode, LayoutTarget, RemoteTarget};
 use crate::components::file_picker::FileEntry;
 use crate::components::wizard::WizardStep;
@@ -1702,78 +1702,7 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
     let display_height = fields_area.height as usize;
     let fields_per_view = display_height / 3;
 
-    let fields = match app.settings.active_category {
-        SettingsCategory::S3 => vec![
-            ("Profile", app.settings.selected_s3_profile_label()),
-            ("Profile Name", app.settings.selected_s3_profile_name()),
-            ("S3 Endpoint", app.settings.selected_s3_endpoint()),
-            ("S3 Bucket", app.settings.selected_s3_bucket()),
-            ("S3 Region", app.settings.selected_s3_region()),
-            ("S3 Prefix", app.settings.selected_s3_prefix()),
-            ("S3 Access Key", app.settings.selected_s3_access_key()),
-            (
-                "S3 Secret Key",
-                app.settings.selected_s3_secret_key_display(
-                    app.settings.editing && app.settings.selected_field == 7,
-                ),
-            ),
-        ],
-        SettingsCategory::Scanner => vec![
-            ("ClamAV Host", app.settings.clamd_host.as_str()),
-            ("ClamAV Port", app.settings.clamd_port.as_str()),
-            (
-                "Scan Chunk Size (MB)",
-                app.settings.scan_chunk_size.as_str(),
-            ),
-            (
-                "Enable Scanner",
-                if app.settings.scanner_enabled {
-                    "[X] Enabled"
-                } else {
-                    "[ ] Disabled"
-                },
-            ),
-        ],
-        SettingsCategory::Performance => vec![
-            ("Part Size (MB)", app.settings.part_size.as_str()),
-            (
-                "Global Upload Concurrency (Files)",
-                app.settings.concurrency_global.as_str(),
-            ),
-            (
-                "Global Scan Concurrency (Files)",
-                app.settings.concurrency_scan_global.as_str(),
-            ),
-            (
-                "Upload Part Concurrency (Streams/File)",
-                app.settings.concurrency_upload_parts.as_str(),
-            ),
-            (
-                "Scanner Concurrency (Chunks/File)",
-                app.settings.concurrency_scan_parts.as_str(),
-            ),
-            (
-                "Delete Source After Upload",
-                if app.settings.delete_source_after_upload {
-                    "[X] Enabled"
-                } else {
-                    "[ ] Disabled"
-                },
-            ),
-            (
-                "Show Metrics",
-                if app.settings.host_metrics_enabled {
-                    "[X] Enabled"
-                } else {
-                    "[ ] Disabled"
-                },
-            ),
-        ],
-        SettingsCategory::General => vec![
-            ("Theme", app.settings.theme.as_str()),
-            ("Setup Wizard", "Run guided setup"),
-        ],
-    };
+    let field_defs = app.settings.active_field_defs();
 
     if fields_per_view == 0 {
         return;
@@ -1792,11 +1721,17 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
             .saturating_sub(fields_per_view / 2);
     }
 
-    if fields.len() > fields_per_view && offset + fields_per_view > fields.len() {
-        offset = fields.len() - fields_per_view;
+    if field_defs.len() > fields_per_view && offset + fields_per_view > field_defs.len() {
+        offset = field_defs.len() - fields_per_view;
     }
+    let selected_field_id = app.settings.active_field_def().map(|def| def.id);
 
-    for (i, (title, value)) in fields.iter().enumerate().skip(offset).take(fields_per_view) {
+    for (i, field_def) in field_defs
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(fields_per_view)
+    {
         let chunk_idx = i - offset;
         if chunk_idx >= field_chunks.len() {
             break;
@@ -1804,12 +1739,7 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
 
         let is_selected =
             (app.settings.selected_field == i) && (app.focus == AppFocus::SettingsFields);
-        let is_text_edit_field = matches!(
-            (app.settings.active_category, i),
-            (SettingsCategory::S3, 1..=7)
-                | (SettingsCategory::Scanner, 0..=2)
-                | (SettingsCategory::Performance, 0..=4)
-        );
+        let is_text_edit_field = field_def.kind.is_text_input();
         let border_style = if is_selected {
             if app.settings.editing {
                 app.theme.input_border_style(true)
@@ -1823,7 +1753,7 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(app.theme.border_type)
-            .title(*title)
+            .title(field_def.title)
             .border_style(border_style)
             .style(app.theme.panel_style());
 
@@ -1835,13 +1765,12 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
             app.theme.text_style()
         };
 
-        let display_value = if i == 0
-            && (app.settings.active_category == SettingsCategory::S3
-                || app.settings.active_category == SettingsCategory::General)
-        {
+        let reveal_secret = app.settings.editing && is_selected;
+        let value = app.settings.field_value(field_def.id, reveal_secret);
+        let display_value = if field_def.kind.is_selector() {
             format!("▼ {}", value)
         } else {
-            (*value).to_string()
+            value
         };
         let p = Paragraph::new(display_value.clone())
             .block(block)
@@ -1856,10 +1785,7 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    if app.settings.editing
-        && app.settings.active_category == SettingsCategory::General
-        && app.settings.selected_field == 0
-    {
+    if app.settings.editing && selected_field_id == Some(SettingsFieldId::Theme) {
         let max_width = fields_area.width.saturating_sub(2);
         let max_height = fields_area.height.saturating_sub(2);
         if max_width < 22 || max_height < 8 {
@@ -1960,10 +1886,7 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    if app.settings.editing
-        && app.settings.active_category == SettingsCategory::S3
-        && app.settings.selected_field == 0
-    {
+    if app.settings.editing && selected_field_id == Some(SettingsFieldId::S3Profile) {
         let max_width = fields_area.width.saturating_sub(2);
         let max_height = fields_area.height.saturating_sub(2);
         if max_width < 22 || max_height < 6 {

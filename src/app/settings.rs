@@ -13,14 +13,212 @@ pub enum SettingsCategory {
     General,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsFieldId {
+    S3Profile,
+    S3ProfileName,
+    S3Endpoint,
+    S3Bucket,
+    S3Region,
+    S3Prefix,
+    S3AccessKey,
+    S3SecretKey,
+    ScannerHost,
+    ScannerPort,
+    ScannerChunkSize,
+    ScannerEnabled,
+    PerformancePartSize,
+    PerformanceUploadConcurrency,
+    PerformanceScanConcurrency,
+    PerformanceUploadPartConcurrency,
+    PerformanceScanPartConcurrency,
+    PerformanceDeleteSource,
+    PerformanceShowMetrics,
+    Theme,
+    SetupWizardAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsFieldKind {
+    Text,
+    SecretText,
+    Toggle,
+    Selector,
+    Action,
+}
+
+impl SettingsFieldKind {
+    pub fn is_text_input(self) -> bool {
+        matches!(self, Self::Text | Self::SecretText)
+    }
+
+    pub fn is_selector(self) -> bool {
+        matches!(self, Self::Selector)
+    }
+
+    pub fn is_toggle(self) -> bool {
+        matches!(self, Self::Toggle)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SettingsFieldDef {
+    pub id: SettingsFieldId,
+    pub title: &'static str,
+    pub kind: SettingsFieldKind,
+    pub save_label: &'static str,
+}
+
+const S3_FIELD_DEFS: [SettingsFieldDef; 8] = [
+    SettingsFieldDef {
+        id: SettingsFieldId::S3Profile,
+        title: "Profile",
+        kind: SettingsFieldKind::Selector,
+        save_label: "S3 Profile",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::S3ProfileName,
+        title: "Profile Name",
+        kind: SettingsFieldKind::Text,
+        save_label: "S3 Profile Name",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::S3Endpoint,
+        title: "S3 Endpoint",
+        kind: SettingsFieldKind::Text,
+        save_label: "S3 Endpoint",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::S3Bucket,
+        title: "S3 Bucket",
+        kind: SettingsFieldKind::Text,
+        save_label: "S3 Bucket",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::S3Region,
+        title: "S3 Region",
+        kind: SettingsFieldKind::Text,
+        save_label: "S3 Region",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::S3Prefix,
+        title: "S3 Prefix",
+        kind: SettingsFieldKind::Text,
+        save_label: "Prefix",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::S3AccessKey,
+        title: "S3 Access Key",
+        kind: SettingsFieldKind::Text,
+        save_label: "Access Key",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::S3SecretKey,
+        title: "S3 Secret Key",
+        kind: SettingsFieldKind::SecretText,
+        save_label: "Secret Key",
+    },
+];
+
+const SCANNER_FIELD_DEFS: [SettingsFieldDef; 4] = [
+    SettingsFieldDef {
+        id: SettingsFieldId::ScannerHost,
+        title: "ClamAV Host",
+        kind: SettingsFieldKind::Text,
+        save_label: "ClamAV Host",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::ScannerPort,
+        title: "ClamAV Port",
+        kind: SettingsFieldKind::Text,
+        save_label: "ClamAV Port",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::ScannerChunkSize,
+        title: "Scan Chunk Size (MB)",
+        kind: SettingsFieldKind::Text,
+        save_label: "Chunk Size",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::ScannerEnabled,
+        title: "Enable Scanner",
+        kind: SettingsFieldKind::Toggle,
+        save_label: "Enable Scanner",
+    },
+];
+
+const PERFORMANCE_FIELD_DEFS: [SettingsFieldDef; 7] = [
+    SettingsFieldDef {
+        id: SettingsFieldId::PerformancePartSize,
+        title: "Part Size (MB)",
+        kind: SettingsFieldKind::Text,
+        save_label: "Part Size",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::PerformanceUploadConcurrency,
+        title: "Global Upload Concurrency (Files)",
+        kind: SettingsFieldKind::Text,
+        save_label: "Global Upload Concurrency",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::PerformanceScanConcurrency,
+        title: "Global Scan Concurrency (Files)",
+        kind: SettingsFieldKind::Text,
+        save_label: "Global Scan Concurrency",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::PerformanceUploadPartConcurrency,
+        title: "Upload Part Concurrency (Streams/File)",
+        kind: SettingsFieldKind::Text,
+        save_label: "Upload Part Concurrency",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::PerformanceScanPartConcurrency,
+        title: "Scanner Concurrency (Chunks/File)",
+        kind: SettingsFieldKind::Text,
+        save_label: "Scanner Concurrency",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::PerformanceDeleteSource,
+        title: "Delete Source After Upload",
+        kind: SettingsFieldKind::Toggle,
+        save_label: "Delete Source",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::PerformanceShowMetrics,
+        title: "Show Metrics",
+        kind: SettingsFieldKind::Toggle,
+        save_label: "Metrics",
+    },
+];
+
+const GENERAL_FIELD_DEFS: [SettingsFieldDef; 2] = [
+    SettingsFieldDef {
+        id: SettingsFieldId::Theme,
+        title: "Theme",
+        kind: SettingsFieldKind::Selector,
+        save_label: "Theme",
+    },
+    SettingsFieldDef {
+        id: SettingsFieldId::SetupWizardAction,
+        title: "Setup Wizard",
+        kind: SettingsFieldKind::Action,
+        save_label: "Setup Wizard",
+    },
+];
+
+fn field_defs_for_category(category: SettingsCategory) -> &'static [SettingsFieldDef] {
+    match category {
+        SettingsCategory::S3 => &S3_FIELD_DEFS,
+        SettingsCategory::Scanner => &SCANNER_FIELD_DEFS,
+        SettingsCategory::Performance => &PERFORMANCE_FIELD_DEFS,
+        SettingsCategory::General => &GENERAL_FIELD_DEFS,
+    }
+}
+
 impl SettingsCategory {
     pub fn field_count(&self) -> usize {
-        match self {
-            SettingsCategory::S3 => 8,
-            SettingsCategory::Scanner => 4,
-            SettingsCategory::Performance => 7,
-            SettingsCategory::General => 2,
-        }
+        field_defs_for_category(*self).len()
     }
 
     pub fn next(self) -> Self {
@@ -98,6 +296,188 @@ pub struct SettingsState {
 }
 
 impl SettingsState {
+    pub fn field_defs(category: SettingsCategory) -> &'static [SettingsFieldDef] {
+        field_defs_for_category(category)
+    }
+
+    pub fn active_field_defs(&self) -> &'static [SettingsFieldDef] {
+        Self::field_defs(self.active_category)
+    }
+
+    pub fn field_def(
+        category: SettingsCategory,
+        index: usize,
+    ) -> Option<&'static SettingsFieldDef> {
+        Self::field_defs(category).get(index)
+    }
+
+    pub fn active_field_def(&self) -> Option<&'static SettingsFieldDef> {
+        Self::field_def(self.active_category, self.selected_field)
+    }
+
+    pub fn field_value(&self, field_id: SettingsFieldId, reveal_secret: bool) -> String {
+        match field_id {
+            SettingsFieldId::S3Profile => self.selected_s3_profile_label().to_string(),
+            SettingsFieldId::S3ProfileName => self.selected_s3_profile_name().to_string(),
+            SettingsFieldId::S3Endpoint => self.selected_s3_endpoint().to_string(),
+            SettingsFieldId::S3Bucket => self.selected_s3_bucket().to_string(),
+            SettingsFieldId::S3Region => self.selected_s3_region().to_string(),
+            SettingsFieldId::S3Prefix => self.selected_s3_prefix().to_string(),
+            SettingsFieldId::S3AccessKey => self.selected_s3_access_key().to_string(),
+            SettingsFieldId::S3SecretKey => self
+                .selected_s3_secret_key_display(reveal_secret)
+                .to_string(),
+            SettingsFieldId::ScannerHost => self.clamd_host.clone(),
+            SettingsFieldId::ScannerPort => self.clamd_port.clone(),
+            SettingsFieldId::ScannerChunkSize => self.scan_chunk_size.clone(),
+            SettingsFieldId::ScannerEnabled => {
+                if self.scanner_enabled {
+                    "[X] Enabled".to_string()
+                } else {
+                    "[ ] Disabled".to_string()
+                }
+            }
+            SettingsFieldId::PerformancePartSize => self.part_size.clone(),
+            SettingsFieldId::PerformanceUploadConcurrency => self.concurrency_global.clone(),
+            SettingsFieldId::PerformanceScanConcurrency => self.concurrency_scan_global.clone(),
+            SettingsFieldId::PerformanceUploadPartConcurrency => {
+                self.concurrency_upload_parts.clone()
+            }
+            SettingsFieldId::PerformanceScanPartConcurrency => self.concurrency_scan_parts.clone(),
+            SettingsFieldId::PerformanceDeleteSource => {
+                if self.delete_source_after_upload {
+                    "[X] Enabled".to_string()
+                } else {
+                    "[ ] Disabled".to_string()
+                }
+            }
+            SettingsFieldId::PerformanceShowMetrics => {
+                if self.host_metrics_enabled {
+                    "[X] Enabled".to_string()
+                } else {
+                    "[ ] Disabled".to_string()
+                }
+            }
+            SettingsFieldId::Theme => self.theme.clone(),
+            SettingsFieldId::SetupWizardAction => "Run guided setup".to_string(),
+        }
+    }
+
+    pub fn push_char_to_field(&mut self, field_id: SettingsFieldId, c: char) -> bool {
+        match field_id {
+            SettingsFieldId::S3ProfileName => self.selected_s3_profile_name_mut().push(c),
+            SettingsFieldId::S3Endpoint => self.selected_s3_endpoint_mut().push(c),
+            SettingsFieldId::S3Bucket => self.selected_s3_bucket_mut().push(c),
+            SettingsFieldId::S3Region => self.selected_s3_region_mut().push(c),
+            SettingsFieldId::S3Prefix => self.selected_s3_prefix_mut().push(c),
+            SettingsFieldId::S3AccessKey => self.selected_s3_access_key_mut().push(c),
+            SettingsFieldId::S3SecretKey => self.selected_s3_secret_key_mut().push(c),
+            SettingsFieldId::ScannerHost => self.clamd_host.push(c),
+            SettingsFieldId::ScannerPort => self.clamd_port.push(c),
+            SettingsFieldId::ScannerChunkSize => self.scan_chunk_size.push(c),
+            SettingsFieldId::PerformancePartSize => self.part_size.push(c),
+            SettingsFieldId::PerformanceUploadConcurrency => self.concurrency_global.push(c),
+            SettingsFieldId::PerformanceScanConcurrency => self.concurrency_scan_global.push(c),
+            SettingsFieldId::PerformanceUploadPartConcurrency => {
+                self.concurrency_upload_parts.push(c)
+            }
+            SettingsFieldId::PerformanceScanPartConcurrency => self.concurrency_scan_parts.push(c),
+            _ => return false,
+        }
+        true
+    }
+
+    pub fn pop_char_from_field(&mut self, field_id: SettingsFieldId) -> bool {
+        match field_id {
+            SettingsFieldId::S3ProfileName => {
+                self.selected_s3_profile_name_mut().pop();
+            }
+            SettingsFieldId::S3Endpoint => {
+                self.selected_s3_endpoint_mut().pop();
+            }
+            SettingsFieldId::S3Bucket => {
+                self.selected_s3_bucket_mut().pop();
+            }
+            SettingsFieldId::S3Region => {
+                self.selected_s3_region_mut().pop();
+            }
+            SettingsFieldId::S3Prefix => {
+                self.selected_s3_prefix_mut().pop();
+            }
+            SettingsFieldId::S3AccessKey => {
+                self.selected_s3_access_key_mut().pop();
+            }
+            SettingsFieldId::S3SecretKey => {
+                self.selected_s3_secret_key_mut().pop();
+            }
+            SettingsFieldId::ScannerHost => {
+                self.clamd_host.pop();
+            }
+            SettingsFieldId::ScannerPort => {
+                self.clamd_port.pop();
+            }
+            SettingsFieldId::ScannerChunkSize => {
+                self.scan_chunk_size.pop();
+            }
+            SettingsFieldId::PerformancePartSize => {
+                self.part_size.pop();
+            }
+            SettingsFieldId::PerformanceUploadConcurrency => {
+                self.concurrency_global.pop();
+            }
+            SettingsFieldId::PerformanceScanConcurrency => {
+                self.concurrency_scan_global.pop();
+            }
+            SettingsFieldId::PerformanceUploadPartConcurrency => {
+                self.concurrency_upload_parts.pop();
+            }
+            SettingsFieldId::PerformanceScanPartConcurrency => {
+                self.concurrency_scan_parts.pop();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    pub fn toggle_field(&mut self, field_id: SettingsFieldId) -> Option<String> {
+        match field_id {
+            SettingsFieldId::ScannerEnabled => {
+                self.scanner_enabled = !self.scanner_enabled;
+                Some(format!(
+                    "Scanner {}",
+                    if self.scanner_enabled {
+                        "Enabled"
+                    } else {
+                        "Disabled"
+                    }
+                ))
+            }
+            SettingsFieldId::PerformanceDeleteSource => {
+                self.delete_source_after_upload = !self.delete_source_after_upload;
+                Some(format!(
+                    "Delete Source: {}",
+                    if self.delete_source_after_upload {
+                        "Enabled"
+                    } else {
+                        "Disabled"
+                    }
+                ))
+            }
+            SettingsFieldId::PerformanceShowMetrics => {
+                self.host_metrics_enabled = !self.host_metrics_enabled;
+                Some(format!(
+                    "Metrics: {}",
+                    if self.host_metrics_enabled {
+                        "Enabled"
+                    } else {
+                        "Disabled"
+                    }
+                ))
+            }
+            _ => None,
+        }
+    }
+
     pub fn from_config(cfg: &Config) -> Self {
         Self {
             endpoint: cfg.s3_endpoint.clone().unwrap_or_default(),

@@ -38,7 +38,7 @@ use self::helpers::{
     reset_layout_dimension, selected_remote_object, selected_secondary_remote_object,
     start_remote_download, update_layout_message,
 };
-use crate::app::settings::{SettingsCategory, SettingsState};
+use crate::app::settings::{SettingsCategory, SettingsFieldDef, SettingsFieldId, SettingsState};
 use crate::app::state::{
     App, AppEvent, AppFocus, AppTab, HistoryFilter, InputMode, LayoutTarget, ModalAction,
     RemoteTarget, ViewMode,
@@ -227,6 +227,59 @@ async fn apply_transfer_endpoint_selector(app: &mut App) {
 
     app.input_mode = InputMode::Normal;
     app.transfer_endpoint_select_target = None;
+}
+
+fn active_settings_field_def(app: &App) -> Option<&'static SettingsFieldDef> {
+    app.settings.active_field_def()
+}
+
+fn settings_field_def_at(app: &App, index: usize) -> Option<&'static SettingsFieldDef> {
+    SettingsState::field_def(app.settings.active_category, index)
+}
+
+fn active_settings_field_id(app: &App) -> Option<SettingsFieldId> {
+    active_settings_field_def(app).map(|field| field.id)
+}
+
+fn cycle_theme_selection(app: &mut App, forward: bool) {
+    let current = app.settings.theme.as_str();
+    if let Some(idx) = app.theme_names.iter().position(|&name| name == current) {
+        let next_idx = if forward {
+            (idx + 1) % app.theme_names.len()
+        } else {
+            (idx + app.theme_names.len() - 1) % app.theme_names.len()
+        };
+        app.settings.theme = app.theme_names[next_idx].to_string();
+        app.theme = Theme::from_name(&app.settings.theme);
+    }
+}
+
+async fn open_wizard_from_settings(app: &mut App) {
+    let cfg = app.config.lock().await.clone();
+    app.wizard = WizardState::from_config(&cfg);
+    app.show_wizard = true;
+    app.wizard_from_settings = true;
+    app.settings.editing = false;
+}
+
+async fn persist_settings_state(
+    app: &mut App,
+    conn_mutex: &Arc<Mutex<Connection>>,
+) -> Result<Option<String>> {
+    let mut cfg = app.config.lock().await;
+    app.settings.apply_to_config(&mut cfg);
+
+    // Apply theme immediately
+    app.theme = Theme::from_name(&cfg.theme);
+    let bucket_name = cfg.s3_bucket.clone();
+
+    let conn = lock_mutex(conn_mutex)?;
+    crate::core::config::save_config_to_db(&conn, &cfg)?;
+    app.settings.save_secondary_profile_to_db(&conn)?;
+    app.settings.load_secondary_profile_from_db(&conn)?;
+    drop(cfg);
+    app.refresh_s3_profiles(&conn)?;
+    Ok(bucket_name)
 }
 
 fn resolve_local_source_endpoint_id(conn: &Connection) -> Option<i64> {
@@ -2679,32 +2732,18 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                                 match key.code {
                                     KeyCode::Enter => {
-                                        let is_general_wizard_action = app.settings.active_category
-                                            == SettingsCategory::General
-                                            && app.settings.selected_field == 1;
+                                        let Some(active_field) = active_settings_field_def(&app)
+                                        else {
+                                            continue;
+                                        };
 
-                                        if is_general_wizard_action {
-                                            let cfg = app.config.lock().await.clone();
-                                            app.wizard = WizardState::from_config(&cfg);
-                                            app.show_wizard = true;
-                                            app.wizard_from_settings = true;
-                                            app.settings.editing = false;
+                                        if active_field.id == SettingsFieldId::SetupWizardAction {
+                                            open_wizard_from_settings(&mut app).await;
                                             continue;
                                         }
 
-                                        // Special handling for Boolean Toggles
-                                        let is_toggle = (app.settings.active_category
-                                            == SettingsCategory::Scanner
-                                            && app.settings.selected_field == 3)
-                                            || (app.settings.active_category
-                                                == SettingsCategory::Performance
-                                                && app.settings.selected_field >= 5);
-                                        let is_s3_profile_selector = app.settings.active_category
-                                            == SettingsCategory::S3
-                                            && app.settings.selected_field == 0;
                                         let mut skip_save_on_exit = false;
-
-                                        if is_s3_profile_selector {
+                                        if active_field.id == SettingsFieldId::S3Profile {
                                             if app.settings.editing {
                                                 app.settings.editing = false;
                                                 app.status_message = format!(
@@ -2724,79 +2763,24 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 );
                                             }
                                             skip_save_on_exit = true;
-                                        } else if is_toggle {
-                                            // Handle toggle based on category and field
-                                            match (
-                                                app.settings.active_category,
-                                                app.settings.selected_field,
-                                            ) {
-                                                (SettingsCategory::Scanner, 3) => {
-                                                    app.settings.scanner_enabled =
-                                                        !app.settings.scanner_enabled;
-                                                    app.status_message = format!(
-                                                        "Scanner {}",
-                                                        if app.settings.scanner_enabled {
-                                                            "Enabled"
-                                                        } else {
-                                                            "Disabled"
-                                                        }
-                                                    );
-                                                }
-                                                (SettingsCategory::Performance, 5) => {
-                                                    app.settings.delete_source_after_upload =
-                                                        !app.settings.delete_source_after_upload;
-                                                    app.status_message = format!(
-                                                        "Delete Source: {}",
-                                                        if app.settings.delete_source_after_upload {
-                                                            "Enabled"
-                                                        } else {
-                                                            "Disabled"
-                                                        }
-                                                    );
-                                                }
-                                                (SettingsCategory::Performance, 6) => {
-                                                    app.settings.host_metrics_enabled =
-                                                        !app.settings.host_metrics_enabled;
-                                                    app.status_message = format!(
-                                                        "Metrics: {}",
-                                                        if app.settings.host_metrics_enabled {
-                                                            "Enabled"
-                                                        } else {
-                                                            "Disabled"
-                                                        }
-                                                    );
-                                                }
-                                                _ => {}
+                                        } else if active_field.kind.is_toggle() {
+                                            if let Some(message) =
+                                                app.settings.toggle_field(active_field.id)
+                                            {
+                                                app.status_message = message;
                                             }
-
-                                            // Trigger Auto-Save logic immediately
-                                            let res = {
-                                                let mut cfg = app.config.lock().await;
-                                                app.settings.apply_to_config(&mut cfg);
-                                                let conn = lock_mutex(&conn_mutex)?;
-                                                crate::core::config::save_config_to_db(
-                                                    &conn, &cfg,
-                                                )?;
-                                                app.settings.save_secondary_profile_to_db(&conn)?;
-                                                app.settings
-                                                    .load_secondary_profile_from_db(&conn)?;
-                                                drop(cfg);
-                                                app.refresh_s3_profiles(&conn)
-                                            };
-
-                                            if let Err(e) = res {
+                                            if let Err(e) =
+                                                persist_settings_state(&mut app, &conn_mutex).await
+                                            {
                                                 app.set_status(format!("Save error: {}", e));
                                             }
+                                            skip_save_on_exit = true;
                                         } else {
                                             app.settings.editing = !app.settings.editing;
                                         }
 
                                         if app.settings.editing {
-                                            // Entering edit mode
-                                            if app.settings.active_category
-                                                == SettingsCategory::General
-                                                && app.settings.selected_field == 0
-                                            {
+                                            if active_field.id == SettingsFieldId::Theme {
                                                 app.settings.original_theme =
                                                     Some(app.settings.theme.clone());
                                             }
@@ -2804,98 +2788,25 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             if skip_save_on_exit {
                                                 continue;
                                             }
-                                            // Exiting edit mode (Confirming) - Trigger Auto-Save
-                                            if app.settings.active_category
-                                                == SettingsCategory::General
-                                                && app.settings.selected_field == 0
-                                            {
+                                            if active_field.id == SettingsFieldId::Theme {
                                                 app.settings.original_theme = None;
                                             }
-
-                                            let (res, field_name) = {
-                                                let mut cfg = app.config.lock().await;
-                                                app.settings.apply_to_config(&mut cfg);
-
-                                                // Apply theme immediately
-                                                app.theme = Theme::from_name(&cfg.theme);
-
-                                                let field_name = match app.settings.active_category
-                                                {
-                                                    SettingsCategory::S3 => {
-                                                        match app.settings.selected_field {
-                                                            0 => "S3 Profile",
-                                                            1 => "S3 Profile Name",
-                                                            2 => "S3 Endpoint",
-                                                            3 => "S3 Bucket",
-                                                            4 => "S3 Region",
-                                                            5 => "Prefix",
-                                                            6 => "Access Key",
-                                                            7 => "Secret Key",
-                                                            _ => "Settings",
-                                                        }
-                                                    }
-                                                    SettingsCategory::Scanner => {
-                                                        match app.settings.selected_field {
-                                                            0 => "ClamAV Host",
-                                                            1 => "ClamAV Port",
-                                                            2 => "Chunk Size",
-                                                            3 => "Enable Scanner",
-                                                            _ => "Scanner",
-                                                        }
-                                                    }
-                                                    SettingsCategory::Performance => "Performance",
-                                                    SettingsCategory::General => {
-                                                        if app.settings.selected_field == 0 {
-                                                            "Theme"
-                                                        } else {
-                                                            "Setup Wizard"
-                                                        }
-                                                    }
-                                                };
-
-                                                // Save entire config to database
-                                                let conn = lock_mutex(&conn_mutex)?;
-                                                (
-                                                    {
-                                                        let mut save_res =
-                                                            crate::core::config::save_config_to_db(
-                                                                &conn, &cfg,
-                                                            )
-                                                            .and_then(|_| {
-                                                                app.settings
-                                                                    .save_secondary_profile_to_db(
-                                                                        &conn,
-                                                                    )
-                                                            })
-                                                            .and_then(|_| {
-                                                                app.settings
-                                                                    .load_secondary_profile_from_db(
-                                                                        &conn,
-                                                                    )
-                                                            });
-                                                        drop(cfg);
-                                                        if save_res.is_ok() {
-                                                            save_res =
-                                                                app.refresh_s3_profiles(&conn);
-                                                        }
-                                                        save_res
-                                                    },
-                                                    field_name,
-                                                )
-                                            };
-
-                                            if let Err(e) = res {
+                                            if let Err(e) =
+                                                persist_settings_state(&mut app, &conn_mutex).await
+                                            {
                                                 app.set_status(format!("Save error: {}", e));
                                             } else {
-                                                app.set_status(format!("Saved: {}", field_name));
+                                                app.set_status(format!(
+                                                    "Saved: {}",
+                                                    active_field.save_label
+                                                ));
                                             }
                                         }
                                     }
                                     KeyCode::Esc => {
                                         app.settings.editing = false;
-                                        // Revert theme if cancelled
-                                        if app.settings.active_category == SettingsCategory::General
-                                            && app.settings.selected_field == 0
+                                        if active_settings_field_id(&app)
+                                            == Some(SettingsFieldId::Theme)
                                         {
                                             if let Some(orig) = &app.settings.original_theme {
                                                 app.settings.theme = orig.clone();
@@ -2904,206 +2815,65 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             app.settings.original_theme = None;
                                         }
                                     }
-                                    // Theme cycle handling (Left/Right OR Up/Down when editing)
                                     KeyCode::Right | KeyCode::Down
                                         if app.settings.editing
-                                            && app.settings.active_category
-                                                == SettingsCategory::General
-                                            && app.settings.selected_field == 0 =>
+                                            && active_settings_field_id(&app)
+                                                == Some(SettingsFieldId::Theme) =>
                                     {
-                                        let current = app.settings.theme.as_str();
-                                        if let Some(idx) =
-                                            app.theme_names.iter().position(|&n| n == current)
-                                        {
-                                            let next_idx = (idx + 1) % app.theme_names.len();
-                                            app.settings.theme =
-                                                app.theme_names[next_idx].to_string();
-                                            // Live preview
-                                            app.theme = Theme::from_name(&app.settings.theme);
-                                        }
+                                        cycle_theme_selection(&mut app, true);
                                     }
                                     KeyCode::Right | KeyCode::Down
                                         if app.settings.editing
-                                            && app.settings.active_category
-                                                == SettingsCategory::S3
-                                            && app.settings.selected_field == 0 =>
+                                            && active_settings_field_id(&app)
+                                                == Some(SettingsFieldId::S3Profile) =>
                                     {
                                         app.settings.cycle_s3_profile_selection();
                                     }
                                     KeyCode::Left | KeyCode::Up
                                         if app.settings.editing
-                                            && app.settings.active_category
-                                                == SettingsCategory::General
-                                            && app.settings.selected_field == 0 =>
+                                            && active_settings_field_id(&app)
+                                                == Some(SettingsFieldId::Theme) =>
                                     {
-                                        let current = app.settings.theme.as_str();
-                                        if let Some(idx) =
-                                            app.theme_names.iter().position(|&n| n == current)
-                                        {
-                                            let prev_idx = (idx + app.theme_names.len() - 1)
-                                                % app.theme_names.len();
-                                            app.settings.theme =
-                                                app.theme_names[prev_idx].to_string();
-                                            // Live preview
-                                            app.theme = Theme::from_name(&app.settings.theme);
-                                        }
+                                        cycle_theme_selection(&mut app, false);
                                     }
                                     KeyCode::Left | KeyCode::Up
                                         if app.settings.editing
-                                            && app.settings.active_category
-                                                == SettingsCategory::S3
-                                            && app.settings.selected_field == 0 =>
+                                            && active_settings_field_id(&app)
+                                                == Some(SettingsFieldId::S3Profile) =>
                                     {
                                         app.settings.cycle_s3_profile_selection_prev();
                                     }
-                                    // When editing, handle ALL characters including j/k/s
                                     KeyCode::Char(c) if app.settings.editing => {
-                                        match (
-                                            app.settings.active_category,
-                                            app.settings.selected_field,
-                                        ) {
-                                            (SettingsCategory::General, 0) => {
-                                                // Specific handling for j/k in theme selection
-                                                if c == 'j' {
-                                                    let current = app.settings.theme.as_str();
-                                                    if let Some(idx) = app
-                                                        .theme_names
-                                                        .iter()
-                                                        .position(|&n| n == current)
-                                                    {
-                                                        let next_idx =
-                                                            (idx + 1) % app.theme_names.len();
-                                                        app.settings.theme =
-                                                            app.theme_names[next_idx].to_string();
-                                                        app.theme =
-                                                            Theme::from_name(&app.settings.theme);
-                                                    }
-                                                } else if c == 'k' {
-                                                    let current = app.settings.theme.as_str();
-                                                    if let Some(idx) = app
-                                                        .theme_names
-                                                        .iter()
-                                                        .position(|&n| n == current)
-                                                    {
-                                                        let prev_idx =
-                                                            (idx + app.theme_names.len() - 1)
-                                                                % app.theme_names.len();
-                                                        app.settings.theme =
-                                                            app.theme_names[prev_idx].to_string();
-                                                        app.theme =
-                                                            Theme::from_name(&app.settings.theme);
+                                        if let Some(field_id) = active_settings_field_id(&app) {
+                                            match field_id {
+                                                SettingsFieldId::Theme => {
+                                                    if c == 'j' {
+                                                        cycle_theme_selection(&mut app, true);
+                                                    } else if c == 'k' {
+                                                        cycle_theme_selection(&mut app, false);
                                                     }
                                                 }
-                                            }
-                                            (SettingsCategory::S3, 0) => {
-                                                if c == 'j' || c == ']' {
-                                                    app.settings.cycle_s3_profile_selection();
-                                                } else if c == 'k' || c == '[' {
-                                                    app.settings.cycle_s3_profile_selection_prev();
+                                                SettingsFieldId::S3Profile => {
+                                                    if c == 'j' || c == ']' {
+                                                        app.settings.cycle_s3_profile_selection();
+                                                    } else if c == 'k' || c == '[' {
+                                                        app.settings
+                                                            .cycle_s3_profile_selection_prev();
+                                                    }
+                                                }
+                                                _ => {
+                                                    let _ = app
+                                                        .settings
+                                                        .push_char_to_field(field_id, c);
                                                 }
                                             }
-                                            (SettingsCategory::S3, 1) => {
-                                                app.settings.selected_s3_profile_name_mut().push(c)
-                                            }
-                                            (SettingsCategory::S3, 2) => {
-                                                app.settings.selected_s3_endpoint_mut().push(c)
-                                            }
-                                            (SettingsCategory::S3, 3) => {
-                                                app.settings.selected_s3_bucket_mut().push(c)
-                                            }
-                                            (SettingsCategory::S3, 4) => {
-                                                app.settings.selected_s3_region_mut().push(c)
-                                            }
-                                            (SettingsCategory::S3, 5) => {
-                                                app.settings.selected_s3_prefix_mut().push(c)
-                                            }
-                                            (SettingsCategory::S3, 6) => {
-                                                app.settings.selected_s3_access_key_mut().push(c)
-                                            }
-                                            (SettingsCategory::S3, 7) => {
-                                                app.settings.selected_s3_secret_key_mut().push(c)
-                                            }
-                                            (SettingsCategory::Scanner, 0) => {
-                                                app.settings.clamd_host.push(c)
-                                            }
-                                            (SettingsCategory::Scanner, 1) => {
-                                                app.settings.clamd_port.push(c)
-                                            }
-                                            (SettingsCategory::Scanner, 2) => {
-                                                app.settings.scan_chunk_size.push(c)
-                                            }
-                                            (SettingsCategory::Performance, 0) => {
-                                                app.settings.part_size.push(c)
-                                            }
-                                            (SettingsCategory::Performance, 1) => {
-                                                app.settings.concurrency_global.push(c)
-                                            }
-                                            (SettingsCategory::Performance, 2) => {
-                                                app.settings.concurrency_scan_global.push(c)
-                                            }
-                                            (SettingsCategory::Performance, 3) => {
-                                                app.settings.concurrency_upload_parts.push(c)
-                                            }
-                                            (SettingsCategory::Performance, 4) => {
-                                                app.settings.concurrency_scan_parts.push(c)
-                                            }
-                                            _ => {}
                                         }
                                     }
                                     KeyCode::Backspace if app.settings.editing => {
-                                        match (
-                                            app.settings.active_category,
-                                            app.settings.selected_field,
-                                        ) {
-                                            (SettingsCategory::S3, 1) => {
-                                                app.settings.selected_s3_profile_name_mut().pop();
-                                            }
-                                            (SettingsCategory::S3, 2) => {
-                                                app.settings.selected_s3_endpoint_mut().pop();
-                                            }
-                                            (SettingsCategory::S3, 3) => {
-                                                app.settings.selected_s3_bucket_mut().pop();
-                                            }
-                                            (SettingsCategory::S3, 4) => {
-                                                app.settings.selected_s3_region_mut().pop();
-                                            }
-                                            (SettingsCategory::S3, 5) => {
-                                                app.settings.selected_s3_prefix_mut().pop();
-                                            }
-                                            (SettingsCategory::S3, 6) => {
-                                                app.settings.selected_s3_access_key_mut().pop();
-                                            }
-                                            (SettingsCategory::S3, 7) => {
-                                                app.settings.selected_s3_secret_key_mut().pop();
-                                            }
-                                            (SettingsCategory::Scanner, 0) => {
-                                                app.settings.clamd_host.pop();
-                                            }
-                                            (SettingsCategory::Scanner, 1) => {
-                                                app.settings.clamd_port.pop();
-                                            }
-                                            (SettingsCategory::Scanner, 2) => {
-                                                app.settings.scan_chunk_size.pop();
-                                            }
-                                            (SettingsCategory::Performance, 0) => {
-                                                app.settings.part_size.pop();
-                                            }
-                                            (SettingsCategory::Performance, 1) => {
-                                                app.settings.concurrency_global.pop();
-                                            }
-                                            (SettingsCategory::Performance, 2) => {
-                                                app.settings.concurrency_scan_global.pop();
-                                            }
-                                            (SettingsCategory::Performance, 3) => {
-                                                app.settings.concurrency_upload_parts.pop();
-                                            }
-                                            (SettingsCategory::Performance, 4) => {
-                                                app.settings.concurrency_scan_parts.pop();
-                                            }
-                                            _ => {}
+                                        if let Some(field_id) = active_settings_field_id(&app) {
+                                            let _ = app.settings.pop_char_from_field(field_id);
                                         }
                                     }
-                                    // Navigation only when NOT editing
                                     KeyCode::Up | KeyCode::Char('k') if !app.settings.editing => {
                                         if app.settings.selected_field > 0 {
                                             app.settings.selected_field -= 1;
@@ -3116,64 +2886,24 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                     }
                                     KeyCode::Char('s')
                                         if !app.settings.editing
-                                            || app.settings.active_category
-                                                == SettingsCategory::General
-                                                && app.settings.selected_field == 0 =>
+                                            || active_settings_field_id(&app)
+                                                == Some(SettingsFieldId::Theme) =>
                                     {
-                                        // If saving while editing theme, exit edit mode and commit
                                         if app.settings.editing
-                                            && app.settings.active_category
-                                                == SettingsCategory::General
-                                            && app.settings.selected_field == 0
+                                            && active_settings_field_id(&app)
+                                                == Some(SettingsFieldId::Theme)
                                         {
                                             app.settings.editing = false;
                                             app.settings.original_theme = None;
                                         }
-
-                                        let (res, bucket_name) = {
-                                            let mut cfg = app.config.lock().await;
-                                            app.settings.apply_to_config(&mut cfg);
-
-                                            // Apply theme immediately
-                                            app.theme = Theme::from_name(&cfg.theme);
-
-                                            let bucket_name = cfg.s3_bucket.clone();
-
-                                            // Save entire config to database
-                                            let conn = lock_mutex(&conn_mutex)?;
-                                            (
-                                                {
-                                                    let mut save_res =
-                                                        crate::core::config::save_config_to_db(
-                                                            &conn, &cfg,
-                                                        )
-                                                        .and_then(|_| {
-                                                            app.settings
-                                                                .save_secondary_profile_to_db(&conn)
-                                                        })
-                                                        .and_then(|_| {
-                                                            app.settings
-                                                                .load_secondary_profile_from_db(
-                                                                    &conn,
-                                                                )
-                                                        });
-                                                    drop(cfg);
-                                                    if save_res.is_ok() {
-                                                        save_res = app.refresh_s3_profiles(&conn);
-                                                    }
-                                                    save_res
-                                                },
-                                                bucket_name,
-                                            )
-                                        };
-
-                                        if let Err(e) = res {
-                                            app.set_status(format!("Save error: {}", e));
-                                        } else {
-                                            app.set_status(format!(
-                                                "Configuration saved. Bucket: {}",
-                                                bucket_name.as_deref().unwrap_or("None")
-                                            ));
+                                        match persist_settings_state(&mut app, &conn_mutex).await {
+                                            Ok(bucket_name) => {
+                                                app.set_status(format!(
+                                                    "Configuration saved. Bucket: {}",
+                                                    bucket_name.as_deref().unwrap_or("None")
+                                                ));
+                                            }
+                                            Err(e) => app.set_status(format!("Save error: {}", e)),
                                         }
                                     }
                                     KeyCode::Char('n')
@@ -3957,9 +3687,8 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                                                 // Handle Theme List Click during editing
                                                 if app.settings.editing
-                                                    && app.settings.active_category
-                                                        == SettingsCategory::General
-                                                    && app.settings.selected_field == 0
+                                                    && active_settings_field_id(&app)
+                                                        == Some(SettingsFieldId::Theme)
                                                 {
                                                     let rel_x = x.saturating_sub(fields_area_x + 1);
                                                     let rel_y =
@@ -4032,29 +3761,15 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                                                                 if is_double_click {
                                                                     app.settings.editing = false;
-                                                                    let mut cfg =
-                                                                        app.config.lock().await;
-                                                                    app.settings
-                                                                        .apply_to_config(&mut cfg);
-                                                                    let conn =
-                                                                        lock_mutex(&conn_mutex)?;
-                                                                    let mut save_res = crate::core::config::save_config_to_db(&conn, &cfg)
-                                                                        .and_then(|_| {
-                                                                            app.settings
-                                                                                .save_secondary_profile_to_db(&conn)
-                                                                        })
-                                                                        .and_then(|_| {
-                                                                            app.settings
-                                                                                .load_secondary_profile_from_db(&conn)
-                                                                        });
-                                                                    drop(cfg);
-                                                                    if save_res.is_ok() {
-                                                                        save_res = app
-                                                                            .refresh_s3_profiles(
-                                                                                &conn,
-                                                                            );
-                                                                    }
-                                                                    if let Err(e) = save_res {
+                                                                    app.settings.original_theme =
+                                                                        None;
+                                                                    if let Err(e) =
+                                                                        persist_settings_state(
+                                                                            &mut app,
+                                                                            &conn_mutex,
+                                                                        )
+                                                                        .await
+                                                                    {
                                                                         app.status_message = format!(
                                                                             "Failed to save theme: {}",
                                                                             e
@@ -4089,9 +3804,8 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 }
 
                                                 if app.settings.editing
-                                                    && app.settings.active_category
-                                                        == SettingsCategory::S3
-                                                    && app.settings.selected_field == 0
+                                                    && active_settings_field_id(&app)
+                                                        == Some(SettingsFieldId::S3Profile)
                                                 {
                                                     let rel_x = x.saturating_sub(fields_area_x + 1);
                                                     let rel_y =
@@ -4205,74 +3919,31 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                                                 if target_idx < count {
                                                     app.settings.selected_field = target_idx;
+                                                    let target_field =
+                                                        settings_field_def_at(&app, target_idx)
+                                                            .copied();
 
-                                                    if app.settings.active_category
-                                                        == SettingsCategory::General
-                                                        && target_idx == 1
+                                                    if target_field.map(|field| field.id)
+                                                        == Some(SettingsFieldId::SetupWizardAction)
                                                     {
-                                                        let cfg = app.config.lock().await.clone();
-                                                        app.wizard = WizardState::from_config(&cfg);
-                                                        app.show_wizard = true;
-                                                        app.wizard_from_settings = true;
-                                                        app.settings.editing = false;
+                                                        open_wizard_from_settings(&mut app).await;
                                                         continue;
                                                     }
 
-                                                    // Handle boolean toggles on click
-                                                    let is_toggle = (app.settings.active_category
-                                                        == SettingsCategory::Scanner
-                                                        && target_idx == 3)
-                                                        || (app.settings.active_category
-                                                            == SettingsCategory::Performance
-                                                            && target_idx >= 5);
-
-                                                    if is_toggle {
-                                                        match (
-                                                            app.settings.active_category,
-                                                            target_idx,
-                                                        ) {
-                                                            (SettingsCategory::Scanner, 3) => {
-                                                                app.settings.scanner_enabled =
-                                                                    !app.settings.scanner_enabled;
-                                                            }
-                                                            (SettingsCategory::Performance, 5) => {
-                                                                app.settings
-                                                                    .delete_source_after_upload =
-                                                                    !app.settings
-                                                                        .delete_source_after_upload;
-                                                            }
-                                                            (SettingsCategory::Performance, 6) => {
-                                                                app.settings.host_metrics_enabled =
-                                                                    !app.settings
-                                                                        .host_metrics_enabled;
-                                                            }
-                                                            _ => {}
+                                                    if target_field
+                                                        .map(|field| field.kind.is_toggle())
+                                                        .unwrap_or(false)
+                                                    {
+                                                        if let Some(field) = target_field {
+                                                            let _ =
+                                                                app.settings.toggle_field(field.id);
                                                         }
-                                                        let mut cfg = app.config.lock().await;
-                                                        app.settings.apply_to_config(&mut cfg);
-                                                        let conn = lock_mutex(&conn_mutex)?;
-                                                        let mut save_res =
-                                                            crate::core::config::save_config_to_db(
-                                                                &conn, &cfg,
-                                                            )
-                                                            .and_then(|_| {
-                                                                app.settings
-                                                                    .save_secondary_profile_to_db(
-                                                                        &conn,
-                                                                    )
-                                                            })
-                                                            .and_then(|_| {
-                                                                app.settings
-                                                                    .load_secondary_profile_from_db(
-                                                                        &conn,
-                                                                    )
-                                                            });
-                                                        drop(cfg);
-                                                        if save_res.is_ok() {
-                                                            save_res =
-                                                                app.refresh_s3_profiles(&conn);
-                                                        }
-                                                        if let Err(e) = save_res {
+                                                        if let Err(e) = persist_settings_state(
+                                                            &mut app,
+                                                            &conn_mutex,
+                                                        )
+                                                        .await
+                                                        {
                                                             app.status_message = format!(
                                                                 "Failed to save settings: {}",
                                                                 e
@@ -4301,16 +3972,13 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                         }
 
                                                         // Auto-expand selector fields
-                                                        if target_idx == 0
-                                                            && (app.settings.active_category
-                                                                == SettingsCategory::General
-                                                                || app.settings.active_category
-                                                                    == SettingsCategory::S3)
+                                                        if target_field
+                                                            .map(|field| field.kind.is_selector())
+                                                            .unwrap_or(false)
                                                         {
                                                             app.settings.editing = true;
-                                                            if app.settings.active_category
-                                                                == SettingsCategory::General
-                                                                && target_idx == 0
+                                                            if target_field.map(|field| field.id)
+                                                                == Some(SettingsFieldId::Theme)
                                                             {
                                                                 app.settings.original_theme = Some(
                                                                     app.settings.theme.clone(),
@@ -4487,9 +4155,8 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                             } else {
                                                 // Scroll Fields or selector lists
                                                 if app.settings.editing
-                                                    && app.settings.active_category
-                                                        == SettingsCategory::General
-                                                    && app.settings.selected_field == 0
+                                                    && active_settings_field_id(&app)
+                                                        == Some(SettingsFieldId::Theme)
                                                 {
                                                     // Theme Selector Scroll
                                                     let fields_area_x =
@@ -4509,36 +4176,11 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                     if rel_x < theme_list_width
                                                         && rel_y < theme_list_height
                                                     {
-                                                        let current_theme =
-                                                            app.settings.theme.as_str();
-                                                        if let Some(pos) = app
-                                                            .theme_names
-                                                            .iter()
-                                                            .position(|&n| n == current_theme)
-                                                        {
-                                                            if is_down {
-                                                                if pos + 1 < app.theme_names.len() {
-                                                                    app.settings.theme = app
-                                                                        .theme_names[pos + 1]
-                                                                        .to_string();
-                                                                    app.theme = Theme::from_name(
-                                                                        &app.settings.theme,
-                                                                    );
-                                                                }
-                                                            } else if pos > 0 {
-                                                                app.settings.theme = app
-                                                                    .theme_names[pos - 1]
-                                                                    .to_string();
-                                                                app.theme = Theme::from_name(
-                                                                    &app.settings.theme,
-                                                                );
-                                                            }
-                                                        }
+                                                        cycle_theme_selection(&mut app, is_down);
                                                     }
                                                 } else if app.settings.editing
-                                                    && app.settings.active_category
-                                                        == SettingsCategory::S3
-                                                    && app.settings.selected_field == 0
+                                                    && active_settings_field_id(&app)
+                                                        == Some(SettingsFieldId::S3Profile)
                                                 {
                                                     if is_down {
                                                         app.settings.cycle_s3_profile_selection();
