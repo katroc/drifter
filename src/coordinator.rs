@@ -325,7 +325,12 @@ impl Coordinator {
             Some(p) => p,
             None => {
                 let conn = lock_mutex(&self.conn)?;
-                db::update_job_error(&conn, job.id, "failed", "no staged path")?;
+                db::update_job_error_with_status(
+                    &conn,
+                    job.id,
+                    JobStatus::Failed,
+                    "no staged path",
+                )?;
                 self.notify_work();
                 return Ok(());
             }
@@ -377,10 +382,10 @@ impl Coordinator {
                                 &quarantine_path.to_string_lossy(),
                             )?;
                             // Keep virus details visible in UI details panel.
-                            db::update_job_error(
+                            db::update_job_error_with_status(
                                 &conn,
                                 job.id,
-                                "quarantined",
+                                JobStatus::Quarantined,
                                 &format!("Infected: {}", virus_name),
                             )?;
                             db::insert_event(
@@ -405,10 +410,10 @@ impl Coordinator {
                                 "infected",
                                 JobStatus::Failed,
                             )?;
-                            db::update_job_error(
+                            db::update_job_error_with_status(
                                 &conn,
                                 job.id,
-                                "failed",
+                                JobStatus::Failed,
                                 &format!("Infected: {} (quarantine failed: {})", virus_name, e),
                             )?;
                             db::insert_event(
@@ -428,7 +433,12 @@ impl Coordinator {
             Err(e) => {
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_job_error(&conn, job.id, "failed", &format!("scan error: {}", e))?;
+                    db::update_job_error_with_status(
+                        &conn,
+                        job.id,
+                        JobStatus::Failed,
+                        &format!("scan error: {}", e),
+                    )?;
                 }
                 self.check_and_report(&job.session_id).await?;
             }
@@ -457,10 +467,10 @@ impl Coordinator {
             other => {
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_job_error(
+                    db::update_job_error_with_status(
                         &conn,
                         job.id,
-                        "failed",
+                        JobStatus::Failed,
                         &format!("unknown transfer direction '{}'", other),
                     )?;
                     db::insert_event(
@@ -574,10 +584,10 @@ impl Coordinator {
             Err(e) => {
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_job_error(
+                    db::update_job_error_with_status(
                         &conn,
                         job.id,
-                        "failed",
+                        JobStatus::Failed,
                         &format!("unable to resolve s3 endpoints: {}", e),
                     )?;
                     db::insert_event(
@@ -596,10 +606,10 @@ impl Coordinator {
         if !Uploader::supports_server_side_copy(&source_endpoint, &destination_endpoint) {
             {
                 let conn = lock_mutex(&self.conn)?;
-                db::update_job_error(
+                db::update_job_error_with_status(
                     &conn,
                     job.id,
-                    "failed",
+                    JobStatus::Failed,
                     "s3_to_s3 requires matching source/destination endpoint URLs for server-side copy",
                 )?;
                 db::insert_event(
@@ -629,10 +639,10 @@ impl Coordinator {
         if source_region != destination_region {
             {
                 let conn = lock_mutex(&self.conn)?;
-                db::update_job_error(
+                db::update_job_error_with_status(
                     &conn,
                     job.id,
-                    "failed",
+                    JobStatus::Failed,
                     &format!(
                         "s3_to_s3 requires same region in v1 (source={}, destination={})",
                         source_region, destination_region
@@ -701,10 +711,10 @@ impl Coordinator {
                             )?;
                             false
                         } else {
-                            db::update_job_error(
+                            db::update_job_error_with_status(
                                 &conn,
                                 job.id,
-                                "failed",
+                                JobStatus::Failed,
                                 &format!("Max retries exceeded. Transfer preflight error: {}", e),
                             )?;
                             true
@@ -746,10 +756,10 @@ impl Coordinator {
                 "prompt" => {
                     {
                         let conn = lock_mutex(&self.conn)?;
-                        db::update_job_error(
+                        db::update_job_error_with_status(
                             &conn,
                             job.id,
-                            "failed",
+                            JobStatus::Failed,
                             "conflict_policy=prompt is not supported for background transfers",
                         )?;
                         db::insert_event(
@@ -861,10 +871,10 @@ impl Coordinator {
                         )?;
                         false
                     } else {
-                        db::update_job_error(
+                        db::update_job_error_with_status(
                             &conn,
                             job.id,
-                            "failed",
+                            JobStatus::Failed,
                             &format!("Max retries exceeded. Transfer error: {}", e),
                         )?;
                         true
@@ -932,10 +942,10 @@ impl Coordinator {
                 "prompt" => {
                     {
                         let conn = lock_mutex(&self.conn)?;
-                        db::update_job_error(
+                        db::update_job_error_with_status(
                             &conn,
                             job.id,
-                            "failed",
+                            JobStatus::Failed,
                             "conflict_policy=prompt is not supported for background transfers",
                         )?;
                         db::insert_event(
@@ -963,10 +973,10 @@ impl Coordinator {
         {
             {
                 let conn = lock_mutex(&self.conn)?;
-                db::update_job_error(
+                db::update_job_error_with_status(
                     &conn,
                     job.id,
-                    "failed",
+                    JobStatus::Failed,
                     &format!(
                         "failed to create local destination directory '{}': {}",
                         parent.to_string_lossy(),
@@ -1067,10 +1077,10 @@ impl Coordinator {
                         )?;
                         false
                     } else {
-                        db::update_job_error(
+                        db::update_job_error_with_status(
                             &conn,
                             job.id,
-                            "failed",
+                            JobStatus::Failed,
                             &format!("Max retries exceeded. Transfer error: {}", e),
                         )?;
                         true
@@ -1112,10 +1122,10 @@ impl Coordinator {
             Err(e) => {
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_job_error(
+                    db::update_job_error_with_status(
                         &conn,
                         job.id,
-                        "failed",
+                        JobStatus::Failed,
                         &format!("unable to resolve upload destination endpoint: {}", e),
                     )?;
                     db::insert_event(
@@ -1260,10 +1270,10 @@ impl Coordinator {
                             "Upload failed for job {} after {} retries: {}",
                             job.id, job.retry_count, e
                         );
-                        db::update_job_error(
+                        db::update_job_error_with_status(
                             &conn,
                             job.id,
-                            "failed",
+                            JobStatus::Failed,
                             &format!("Max retries exceeded. Error: {}", e),
                         )?;
                         true

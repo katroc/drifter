@@ -1135,6 +1135,15 @@ pub fn update_job_error(conn: &Connection, job_id: i64, status: &str, error: &st
     Ok(())
 }
 
+pub fn update_job_error_with_status(
+    conn: &Connection,
+    job_id: i64,
+    status: JobStatus,
+    error: &str,
+) -> Result<()> {
+    update_job_error(conn, job_id, status.as_str(), error)
+}
+
 pub fn retry_job(conn: &Connection, job_id: i64) -> Result<()> {
     info!("Retrying job ID {}", job_id);
     // Check if scan was already completed

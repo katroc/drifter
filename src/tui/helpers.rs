@@ -512,26 +512,26 @@ pub(crate) async fn queue_remote_download_batch(
                         },
                     ) {
                         warn!("Failed to set transfer metadata for job {}: {}", job_id, e);
-                        let _ = db::update_job_error(
+                        let _ = db::update_job_error_with_status(
                             &conn,
                             job_id,
-                            "failed",
+                            db::JobStatus::Failed,
                             &format!("failed to set transfer metadata: {}", e),
                         );
                         failed += 1;
                         continue;
                     }
-                    if let Err(e) = db::update_job_staged(
+                    if let Err(e) = db::update_job_staged_with_status(
                         &conn,
                         job_id,
                         &destination.to_string_lossy(),
-                        "queued",
+                        db::JobStatus::Queued,
                     ) {
                         warn!("Failed to stage transfer job {}: {}", job_id, e);
-                        let _ = db::update_job_error(
+                        let _ = db::update_job_error_with_status(
                             &conn,
                             job_id,
-                            "failed",
+                            db::JobStatus::Failed,
                             &format!("failed to set destination path: {}", e),
                         );
                         failed += 1;
@@ -695,22 +695,26 @@ pub(crate) async fn queue_remote_s3_copy_batch(app: &mut App, objects: Vec<S3Obj
                         },
                     ) {
                         warn!("Failed to set transfer metadata for job {}: {}", job_id, e);
-                        let _ = db::update_job_error(
+                        let _ = db::update_job_error_with_status(
                             &conn,
                             job_id,
-                            "failed",
+                            db::JobStatus::Failed,
                             &format!("failed to set transfer metadata: {}", e),
                         );
                         failed += 1;
                         continue;
                     }
-                    if let Err(e) = db::update_job_staged(&conn, job_id, &destination_key, "queued")
-                    {
+                    if let Err(e) = db::update_job_staged_with_status(
+                        &conn,
+                        job_id,
+                        &destination_key,
+                        db::JobStatus::Queued,
+                    ) {
                         warn!("Failed to stage transfer job {}: {}", job_id, e);
-                        let _ = db::update_job_error(
+                        let _ = db::update_job_error_with_status(
                             &conn,
                             job_id,
-                            "failed",
+                            db::JobStatus::Failed,
                             &format!("failed to set destination key: {}", e),
                         );
                         failed += 1;
