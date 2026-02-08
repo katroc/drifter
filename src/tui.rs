@@ -45,7 +45,7 @@ use crate::app::state::{
 };
 use crate::components::file_picker::PickerView;
 use crate::components::wizard::{WizardState, WizardStep};
-use crate::ui::util::{calculate_list_offset, fuzzy_match};
+use crate::ui::util::{calculate_list_offset, centered_window_bounds, fuzzy_match};
 use crate::utils::lock_mutex;
 
 use tokio::sync::Mutex as AsyncMutex;
@@ -3679,17 +3679,14 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                                 .theme_names
                                                                 .iter()
                                                                 .position(|&n| n == current_theme)
-                                                                && display_height > 0
-                                                                && total > display_height
                                                             {
-                                                                offset = idx.saturating_sub(
-                                                                    display_height / 2,
-                                                                );
-                                                                if offset + display_height > total {
-                                                                    offset = total.saturating_sub(
+                                                                let (start, _) =
+                                                                    centered_window_bounds(
+                                                                        idx,
+                                                                        total,
                                                                         display_height,
                                                                     );
-                                                                }
+                                                                offset = start;
                                                             }
 
                                                             let target_idx = offset + inner_rel_y;
@@ -3788,19 +3785,12 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                             let inner_rel_y = (rel_y - 1) as usize;
                                                             let selected =
                                                                 app.settings.s3_profile_index;
-                                                            let mut offset = 0usize;
-                                                            if display_height > 0
-                                                                && total > display_height
-                                                            {
-                                                                offset = selected.saturating_sub(
-                                                                    display_height / 2,
+                                                            let (offset, _) =
+                                                                centered_window_bounds(
+                                                                    selected,
+                                                                    total,
+                                                                    display_height,
                                                                 );
-                                                                if offset + display_height > total {
-                                                                    offset = total.saturating_sub(
-                                                                        display_height,
-                                                                    );
-                                                                }
-                                                            }
 
                                                             let target_idx = offset + inner_rel_y;
                                                             if target_idx < total {
@@ -3855,22 +3845,11 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                                 let display_height =
                                                     center_layout.height.saturating_sub(2) as usize;
                                                 let fields_per_view = display_height / 3;
-                                                let mut offset = 0;
-                                                if fields_per_view > 0 {
-                                                    if app.settings.selected_field
-                                                        >= fields_per_view
-                                                    {
-                                                        offset = app
-                                                            .settings
-                                                            .selected_field
-                                                            .saturating_sub(fields_per_view / 2);
-                                                    }
-                                                    if count > fields_per_view
-                                                        && offset + fields_per_view > count
-                                                    {
-                                                        offset = count - fields_per_view;
-                                                    }
-                                                }
+                                                let (offset, _) = centered_window_bounds(
+                                                    app.settings.selected_field,
+                                                    count,
+                                                    fields_per_view,
+                                                );
 
                                                 let target_idx = offset + clicked_idx as usize;
 

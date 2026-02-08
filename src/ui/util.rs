@@ -59,6 +59,25 @@ pub fn calculate_list_offset(selected: usize, total: usize, display_height: usiz
     offset
 }
 
+pub fn centered_window_bounds(selected: usize, total: usize, max_visible: usize) -> (usize, usize) {
+    if total == 0 {
+        return (0, 0);
+    }
+    if max_visible == 0 {
+        return (0, total);
+    }
+
+    let mut start = 0usize;
+    if total > max_visible {
+        start = selected.saturating_sub(max_visible / 2);
+        if start + max_visible > total {
+            start = total.saturating_sub(max_visible);
+        }
+    }
+    let end = (start + max_visible).min(total);
+    (start, end)
+}
+
 pub fn format_bytes_rate(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
         format!("{:.2} GB", bytes as f64 / 1_073_741_824.0)

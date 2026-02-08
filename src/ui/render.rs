@@ -17,9 +17,10 @@ use crate::ui::theme::{StatusKind, Theme};
 use crate::utils::lock_mutex;
 
 use crate::ui::util::{
-    calculate_list_offset, centered_fixed_rect, centered_rect, extract_threat_name, format_bytes,
-    format_bytes_rate, format_duration_ms, format_modified, format_relative_time, format_size,
-    fuzzy_match, status_kind, status_kind_for_message, truncate_with_ellipsis,
+    calculate_list_offset, centered_fixed_rect, centered_rect, centered_window_bounds,
+    extract_threat_name, format_bytes, format_bytes_rate, format_duration_ms, format_modified,
+    format_relative_time, format_size, fuzzy_match, status_kind, status_kind_for_message,
+    truncate_with_ellipsis,
 };
 
 fn draw_shadow(f: &mut Frame, area: Rect, app: &App) {
@@ -1713,17 +1714,11 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         .constraints(vec![Constraint::Length(3); fields_per_view])
         .split(fields_area);
 
-    let mut offset = 0;
-    if app.settings.selected_field >= fields_per_view {
-        offset = app
-            .settings
-            .selected_field
-            .saturating_sub(fields_per_view / 2);
-    }
-
-    if field_defs.len() > fields_per_view && offset + fields_per_view > field_defs.len() {
-        offset = field_defs.len() - fields_per_view;
-    }
+    let (offset, _) = centered_window_bounds(
+        app.settings.selected_field,
+        field_defs.len(),
+        fields_per_view,
+    );
     let selected_field_id = app.settings.active_field_def().map(|def| def.id);
 
     for (i, field_def) in field_defs
@@ -1851,11 +1846,7 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         let mut visible_items = items;
         if max_visible > 0 && total > max_visible {
             if let Some(idx) = app.theme_names.iter().position(|&n| n == current_theme) {
-                let mut start = idx.saturating_sub(max_visible / 2);
-                if start + max_visible > total {
-                    start = total.saturating_sub(max_visible);
-                }
-                let end = (start + max_visible).min(total);
+                let (start, end) = centered_window_bounds(idx, total, max_visible);
                 visible_items = app
                     .theme_names
                     .iter()
@@ -1922,18 +1913,7 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
 
         let selected = app.settings.s3_profile_index.min(total.saturating_sub(1));
         let max_visible = profile_area.height.saturating_sub(2) as usize;
-        let mut start = 0usize;
-        if max_visible > 0 && total > max_visible {
-            start = selected.saturating_sub(max_visible / 2);
-            if start + max_visible > total {
-                start = total.saturating_sub(max_visible);
-            }
-        }
-        let end = if max_visible == 0 {
-            total
-        } else {
-            (start + max_visible).min(total)
-        };
+        let (start, end) = centered_window_bounds(selected, total, max_visible);
 
         let visible_items: Vec<ListItem> = app
             .settings
