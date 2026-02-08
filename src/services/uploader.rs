@@ -1,4 +1,4 @@
-use crate::core::config::{Config, S3KeyMode, SseMode};
+use crate::core::config::{Config, DEFAULT_S3_REGION, S3KeyMode, SseMode};
 use anyhow::{Context, Result};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};
@@ -75,7 +75,11 @@ impl Uploader {
         endpoint_cfg: &S3EndpointConfig,
     ) -> Result<(Client, String)> {
         let bucket = endpoint_cfg.bucket.trim();
-        let region = endpoint_cfg.region.as_deref().unwrap_or("us-east-1").trim();
+        let region = endpoint_cfg
+            .region
+            .as_deref()
+            .unwrap_or(DEFAULT_S3_REGION)
+            .trim();
         let endpoint = endpoint_cfg.endpoint.as_deref().map(str::trim);
         let access_key = endpoint_cfg.access_key.as_ref().and_then(|value| {
             let trimmed = value.trim();

@@ -454,6 +454,16 @@ async fn handle_settings_field_enter_key(app: &mut App, conn_mutex: &Arc<Mutex<C
             app.set_status("Select S3 profile (Enter to apply)".to_string());
         }
         skip_save_on_exit = true;
+    } else if active_field.id == SettingsFieldId::S3Region {
+        if app.settings.editing {
+            app.settings.editing = false;
+        } else {
+            app.settings.editing = true;
+            app.set_status(
+                "Select region with arrows or type custom region (Enter to apply)".to_string(),
+            );
+            return;
+        }
     } else if active_field.kind.is_toggle() {
         if let Some(message) = app.settings.toggle_field(active_field.id) {
             app.status_message = message;
@@ -504,6 +514,15 @@ fn handle_settings_field_edit_char(app: &mut App, c: char) {
                     app.settings.cycle_s3_profile_selection_prev();
                 }
             }
+            SettingsFieldId::S3Region => {
+                if c == ']' {
+                    app.settings.cycle_s3_region_selection();
+                } else if c == '[' {
+                    app.settings.cycle_s3_region_selection_prev();
+                } else {
+                    let _ = app.settings.push_char_to_field(field_id, c);
+                }
+            }
             _ => {
                 let _ = app.settings.push_char_to_field(field_id, c);
             }
@@ -544,6 +563,12 @@ async fn handle_settings_field_key(
         {
             app.settings.cycle_s3_profile_selection();
         }
+        KeyCode::Right | KeyCode::Down
+            if app.settings.editing
+                && active_settings_field_id(app) == Some(SettingsFieldId::S3Region) =>
+        {
+            app.settings.cycle_s3_region_selection();
+        }
         KeyCode::Left | KeyCode::Up
             if app.settings.editing
                 && active_settings_field_id(app) == Some(SettingsFieldId::Theme) =>
@@ -555,6 +580,12 @@ async fn handle_settings_field_key(
                 && active_settings_field_id(app) == Some(SettingsFieldId::S3Profile) =>
         {
             app.settings.cycle_s3_profile_selection_prev();
+        }
+        KeyCode::Left | KeyCode::Up
+            if app.settings.editing
+                && active_settings_field_id(app) == Some(SettingsFieldId::S3Region) =>
+        {
+            app.settings.cycle_s3_region_selection_prev();
         }
         KeyCode::Char(c) if app.settings.editing => {
             handle_settings_field_edit_char(app, c);
@@ -736,6 +767,59 @@ async fn handle_settings_center_click(
                         app.last_click_time = None;
                         app.status_message =
                             format!("S3 profile: {}", app.settings.selected_s3_profile_label());
+                    } else {
+                        app.last_click_time = Some(now);
+                        app.last_click_pos = Some((x, y));
+                    }
+                }
+            }
+        } else {
+            app.settings.editing = false;
+        }
+        return;
+    }
+
+    if app.settings.editing && active_settings_field_id(app) == Some(SettingsFieldId::S3Region) {
+        let rel_x = x.saturating_sub(fields_area_x + 1);
+        let rel_y = y.saturating_sub(center_layout.y + 2);
+        let max_width = center_layout.width.saturating_sub(sidebar_width + 2);
+        let max_height = center_layout.height.saturating_sub(2);
+        let list_width = max_width.min(34);
+        let list_height = max_height.clamp(6, 14);
+
+        if rel_x < list_width && rel_y < list_height {
+            let display_height = list_height.saturating_sub(2) as usize;
+            let total = SettingsState::known_s3_regions().len();
+            if total == 0 {
+                return;
+            }
+            if rel_y >= 1 && (rel_y as usize) < display_height + 1 {
+                let inner_rel_y = (rel_y - 1) as usize;
+                let selected = app.settings.selected_s3_region_known_index().unwrap_or(0);
+                let (offset, _) = centered_window_bounds(selected, total, display_height);
+
+                let target_idx = offset + inner_rel_y;
+                if target_idx < total {
+                    let now = Instant::now();
+                    let is_double_click = if let (Some(last_time), Some(last_pos)) =
+                        (app.last_click_time, app.last_click_pos)
+                    {
+                        now.duration_since(last_time) < Duration::from_millis(500)
+                            && last_pos == (x, y)
+                    } else {
+                        false
+                    };
+
+                    app.settings.set_s3_region_by_index(target_idx);
+                    if is_double_click {
+                        app.settings.editing = false;
+                        app.last_click_time = None;
+                        if let Err(e) = persist_settings_state(app, conn_mutex).await {
+                            app.status_message = format!("Failed to save region: {}", e);
+                        } else {
+                            app.status_message =
+                                format!("S3 region: {}", app.settings.selected_s3_region());
+                        }
                     } else {
                         app.last_click_time = Some(now);
                         app.last_click_pos = Some((x, y));

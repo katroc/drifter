@@ -8,7 +8,7 @@ use ratatui::{
     },
 };
 
-use crate::app::settings::SettingsFieldId;
+use crate::app::settings::{SettingsFieldId, SettingsState};
 use crate::app::state::{App, AppFocus, AppTab, InputMode, LayoutTarget, RemoteTarget};
 use crate::components::file_picker::FileEntry;
 use crate::components::wizard::WizardStep;
@@ -1761,6 +1761,7 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         let is_selected =
             (app.settings.selected_field == i) && (app.focus == AppFocus::SettingsFields);
         let is_text_edit_field = field_def.kind.is_text_input();
+        let is_custom_region_field = field_def.id == SettingsFieldId::S3Region;
         let border_style = if is_selected {
             if app.settings.editing {
                 app.theme.input_border_style(true)
@@ -1798,7 +1799,7 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
             .style(value_style);
         f.render_widget(p, field_chunks[chunk_idx]);
 
-        if is_selected && app.settings.editing && is_text_edit_field {
+        if is_selected && app.settings.editing && (is_text_edit_field || is_custom_region_field) {
             f.set_cursor(
                 field_chunks[chunk_idx].x + 1 + display_value.len() as u16,
                 field_chunks[chunk_idx].y + 1,
@@ -1963,6 +1964,64 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         list_state.select(Some(selected.saturating_sub(start)));
         let list = List::new(visible_items).block(list_block);
         f.render_stateful_widget(list, profile_area, &mut list_state);
+    }
+
+    if app.settings.editing && selected_field_id == Some(SettingsFieldId::S3Region) {
+        let max_width = fields_area.width.saturating_sub(2);
+        let max_height = fields_area.height.saturating_sub(2);
+        if max_width < 26 || max_height < 6 {
+            return;
+        }
+
+        let width = max_width.min(34);
+        let height = max_height.clamp(6, 14);
+        let region_area = Rect {
+            x: fields_area.x + 1,
+            y: fields_area.y + 1,
+            width,
+            height,
+        };
+        let region_area = region_area.intersection(fields_area);
+        f.render_widget(Clear, region_area);
+
+        let list_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(app.theme.border_type)
+            .title(" Select S3 Region (Type custom) ")
+            .border_style(app.theme.border_active_style())
+            .style(app.theme.panel_style());
+
+        let regions = SettingsState::known_s3_regions();
+        let total = regions.len();
+        if total == 0 {
+            return;
+        }
+
+        let selected_known = app.settings.selected_s3_region_known_index();
+        let selected_anchor = selected_known.unwrap_or(0);
+        let max_visible = region_area.height.saturating_sub(2) as usize;
+        let (start, end) = centered_window_bounds(selected_anchor, total, max_visible);
+
+        let visible_items: Vec<ListItem> = regions
+            .iter()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .enumerate()
+            .map(|(idx, region)| {
+                let absolute = start + idx;
+                let style = if Some(absolute) == selected_known {
+                    app.theme.selection_style()
+                } else {
+                    app.theme.text_style()
+                };
+                ListItem::new(format!(" {} ", region)).style(style)
+            })
+            .collect();
+
+        let mut list_state = ratatui::widgets::ListState::default();
+        list_state.select(selected_known.map(|idx| idx.saturating_sub(start)));
+        let list = List::new(visible_items).block(list_block);
+        f.render_stateful_widget(list, region_area, &mut list_state);
     }
 }
 

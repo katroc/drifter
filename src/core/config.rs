@@ -3,6 +3,8 @@ use crate::ui::theme::Theme;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_S3_REGION: &str = "ap-southeast-2";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanMode {
@@ -106,7 +108,7 @@ impl Default for Config {
             clamd_socket: None,
             s3_bucket: None,
             s3_prefix: None,
-            s3_region: None,
+            s3_region: Some(DEFAULT_S3_REGION.to_string()),
             s3_endpoint: None,
             s3_access_key: None,
             s3_secret_key: None,
@@ -218,7 +220,7 @@ pub fn load_config_from_db(conn: &Connection) -> Result<Config> {
         clamd_socket: get("clamd_socket"),
         s3_bucket: get("s3_bucket"),
         s3_prefix: get("s3_prefix"),
-        s3_region: get("s3_region"),
+        s3_region: get("s3_region").or_else(|| Some(DEFAULT_S3_REGION.to_string())),
         s3_endpoint: get("s3_endpoint"),
         s3_access_key: get("s3_access_key"),
         s3_secret_key,
@@ -522,6 +524,7 @@ mod tests {
         assert_eq!(config.scan_chunk_size_mb, 24);
         assert_eq!(config.clamd_host, "127.0.0.1");
         assert_eq!(config.clamd_port, 3310);
+        assert_eq!(config.s3_region.as_deref(), Some(DEFAULT_S3_REGION));
         assert_eq!(config.part_size_mb, 128);
         assert_eq!(config.concurrency_upload_global, 1);
         assert_eq!(config.concurrency_scan_global, 2);

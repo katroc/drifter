@@ -1,5 +1,5 @@
 use crate::app::state::AppEvent;
-use crate::core::config::Config;
+use crate::core::config::{Config, DEFAULT_S3_REGION};
 use crate::core::transfer::EndpointKind;
 use crate::db::{self, JobRow, JobStatus, ScanStatus};
 use crate::services::scanner::{ScanResult, Scanner};
@@ -598,13 +598,13 @@ impl Coordinator {
         let source_region = source_endpoint
             .region
             .as_deref()
-            .unwrap_or("us-east-1")
+            .unwrap_or(DEFAULT_S3_REGION)
             .trim()
             .to_ascii_lowercase();
         let destination_region = destination_endpoint
             .region
             .as_deref()
-            .unwrap_or("us-east-1")
+            .unwrap_or(DEFAULT_S3_REGION)
             .trim()
             .to_ascii_lowercase();
         if source_region != destination_region {

@@ -1,4 +1,4 @@
-use crate::core::config::Config;
+use crate::core::config::{Config, DEFAULT_S3_REGION};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WizardStep {
@@ -64,7 +64,7 @@ impl WizardState {
             prefix: defaults.s3_prefix.unwrap_or_default(),
             region: defaults
                 .s3_region
-                .unwrap_or_else(|| "us-east-1".to_string()),
+                .unwrap_or_else(|| DEFAULT_S3_REGION.to_string()),
             endpoint: defaults.s3_endpoint.unwrap_or_default(),
             access_key: defaults.s3_access_key.unwrap_or_default(),
             secret_key: defaults.s3_secret_key.unwrap_or_default(),
@@ -95,7 +95,7 @@ impl WizardState {
             region: cfg
                 .s3_region
                 .clone()
-                .unwrap_or_else(|| "us-east-1".to_string()),
+                .unwrap_or_else(|| DEFAULT_S3_REGION.to_string()),
             endpoint: cfg.s3_endpoint.clone().unwrap_or_default(),
             access_key: cfg.s3_access_key.clone().unwrap_or_default(),
             secret_key: cfg.s3_secret_key.clone().unwrap_or_default(),

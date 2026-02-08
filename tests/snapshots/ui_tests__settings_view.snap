@@ -1,6 +1,6 @@
 ---
 source: tests/ui_tests.rs
-assertion_line: 507
+assertion_line: 508
 expression: output
 ---
 ╭ Navigation ───╭ Configuration ───────────────────────────╮ History [All] ────────────────────────────────────────────╮
@@ -17,7 +17,7 @@ expression: output
 │               │               ││                        ││                                                           │
 │               │               │╰────────────────────────╯│                                                           │
 │               │               │╭S3 Region───────────────╮│                                                           │
-│               │               ││                        ││                                                           │
+│               │               ││▼ ap-southeast-2        ││                                                           │
 │               │               │╰────────────────────────╯│                                                           │
 │               │               │╭S3 Prefix───────────────╮│                                                           │
 │               │               ││                        ││                                                           │

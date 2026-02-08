@@ -1,4 +1,4 @@
-use crate::core::config::Config;
+use crate::core::config::{Config, DEFAULT_S3_REGION};
 use crate::core::transfer::EndpointKind;
 use crate::db;
 use anyhow::Result;
@@ -97,7 +97,7 @@ const S3_FIELD_DEFS: [SettingsFieldDef; 8] = [
     SettingsFieldDef {
         id: SettingsFieldId::S3Region,
         title: "S3 Region",
-        kind: SettingsFieldKind::Text,
+        kind: SettingsFieldKind::Selector,
         save_label: "S3 Region",
     },
     SettingsFieldDef {
@@ -216,6 +216,46 @@ fn field_defs_for_category(category: SettingsCategory) -> &'static [SettingsFiel
     }
 }
 
+const KNOWN_S3_REGIONS: [&str; 37] = [
+    "af-south-1",
+    "ap-east-1",
+    "ap-east-2",
+    "ap-northeast-1",
+    "ap-northeast-2",
+    "ap-northeast-3",
+    "ap-south-1",
+    "ap-south-2",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "ap-southeast-3",
+    "ap-southeast-4",
+    "ap-southeast-5",
+    "ap-southeast-7",
+    "ca-central-1",
+    "ca-west-1",
+    "eu-central-1",
+    "eu-central-2",
+    "eu-north-1",
+    "eu-south-1",
+    "eu-south-2",
+    "eu-west-1",
+    "eu-west-2",
+    "eu-west-3",
+    "il-central-1",
+    "me-central-1",
+    "me-south-1",
+    "mx-central-1",
+    "sa-east-1",
+    "us-east-1",
+    "us-east-2",
+    "us-west-1",
+    "us-west-2",
+    "cn-north-1",
+    "cn-northwest-1",
+    "us-gov-east-1",
+    "us-gov-west-1",
+];
+
 impl SettingsCategory {
     pub fn field_count(&self) -> usize {
         field_defs_for_category(*self).len()
@@ -296,6 +336,10 @@ pub struct SettingsState {
 }
 
 impl SettingsState {
+    pub fn known_s3_regions() -> &'static [&'static str] {
+        &KNOWN_S3_REGIONS
+    }
+
     pub fn field_defs(category: SettingsCategory) -> &'static [SettingsFieldDef] {
         field_defs_for_category(category)
     }
@@ -482,7 +526,10 @@ impl SettingsState {
         Self {
             endpoint: cfg.s3_endpoint.clone().unwrap_or_default(),
             bucket: cfg.s3_bucket.clone().unwrap_or_default(),
-            region: cfg.s3_region.clone().unwrap_or_default(),
+            region: cfg
+                .s3_region
+                .clone()
+                .unwrap_or_else(|| DEFAULT_S3_REGION.to_string()),
             prefix: cfg.s3_prefix.clone().unwrap_or_default(),
             access_key: cfg.s3_access_key.clone().unwrap_or_default(),
             secret_key: cfg.s3_secret_key.clone().unwrap_or_default(),
@@ -625,7 +672,7 @@ impl SettingsState {
             self.s3_profile_is_default_destination = false;
             self.endpoint.clear();
             self.bucket.clear();
-            self.region.clear();
+            self.region = DEFAULT_S3_REGION.to_string();
             self.prefix.clear();
             self.access_key.clear();
             self.secret_key.clear();
@@ -640,7 +687,11 @@ impl SettingsState {
         self.s3_profile_is_default_destination = profile.is_default_destination;
         self.endpoint = profile.endpoint;
         self.bucket = profile.bucket;
-        self.region = profile.region;
+        self.region = if profile.region.trim().is_empty() {
+            DEFAULT_S3_REGION.to_string()
+        } else {
+            profile.region
+        };
         self.prefix = profile.prefix;
         self.access_key = profile.access_key;
         self.secret_key = profile.secret_key;
@@ -693,6 +744,36 @@ impl SettingsState {
 
     pub fn selected_s3_region_mut(&mut self) -> &mut String {
         &mut self.region
+    }
+
+    pub fn selected_s3_region_known_index(&self) -> Option<usize> {
+        let region = self.region.trim();
+        if region.is_empty() {
+            return None;
+        }
+        KNOWN_S3_REGIONS.iter().position(|v| *v == region)
+    }
+
+    pub fn set_s3_region_by_index(&mut self, index: usize) {
+        if let Some(region) = KNOWN_S3_REGIONS.get(index) {
+            self.region = (*region).to_string();
+        }
+    }
+
+    pub fn cycle_s3_region_selection(&mut self) {
+        let next = match self.selected_s3_region_known_index() {
+            Some(idx) => (idx + 1) % KNOWN_S3_REGIONS.len(),
+            None => 0,
+        };
+        self.set_s3_region_by_index(next);
+    }
+
+    pub fn cycle_s3_region_selection_prev(&mut self) {
+        let prev = match self.selected_s3_region_known_index() {
+            Some(idx) => (idx + KNOWN_S3_REGIONS.len() - 1) % KNOWN_S3_REGIONS.len(),
+            None => KNOWN_S3_REGIONS.len() - 1,
+        };
+        self.set_s3_region_by_index(prev);
     }
 
     pub fn selected_s3_prefix_mut(&mut self) -> &mut String {
@@ -825,7 +906,7 @@ impl SettingsState {
             &db::NewEndpointProfile {
                 name,
                 kind: EndpointKind::S3,
-                config: Value::Object(Map::new()),
+                config: serde_json::json!({ "region": DEFAULT_S3_REGION }),
                 credential_ref: None,
                 is_default_source: false,
                 is_default_destination: false,
