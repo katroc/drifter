@@ -1,4 +1,4 @@
-use crate::core::config::{Config, DEFAULT_S3_REGION};
+use crate::core::config::{Config, DEFAULT_S3_REGION, KNOWN_S3_REGIONS};
 use crate::core::transfer::EndpointKind;
 use crate::db;
 use anyhow::Result;
@@ -216,46 +216,6 @@ fn field_defs_for_category(category: SettingsCategory) -> &'static [SettingsFiel
     }
 }
 
-const KNOWN_S3_REGIONS: [&str; 37] = [
-    "af-south-1",
-    "ap-east-1",
-    "ap-east-2",
-    "ap-northeast-1",
-    "ap-northeast-2",
-    "ap-northeast-3",
-    "ap-south-1",
-    "ap-south-2",
-    "ap-southeast-1",
-    "ap-southeast-2",
-    "ap-southeast-3",
-    "ap-southeast-4",
-    "ap-southeast-5",
-    "ap-southeast-7",
-    "ca-central-1",
-    "ca-west-1",
-    "eu-central-1",
-    "eu-central-2",
-    "eu-north-1",
-    "eu-south-1",
-    "eu-south-2",
-    "eu-west-1",
-    "eu-west-2",
-    "eu-west-3",
-    "il-central-1",
-    "me-central-1",
-    "me-south-1",
-    "mx-central-1",
-    "sa-east-1",
-    "us-east-1",
-    "us-east-2",
-    "us-west-1",
-    "us-west-2",
-    "cn-north-1",
-    "cn-northwest-1",
-    "us-gov-east-1",
-    "us-gov-west-1",
-];
-
 impl SettingsCategory {
     pub fn field_count(&self) -> usize {
         field_defs_for_category(*self).len()
@@ -336,8 +296,23 @@ pub struct SettingsState {
 }
 
 impl SettingsState {
+    pub const S3_REGION_OTHER_LABEL: &'static str = "Other (custom)";
+
     pub fn known_s3_regions() -> &'static [&'static str] {
         &KNOWN_S3_REGIONS
+    }
+
+    pub fn s3_region_selector_len(&self) -> usize {
+        KNOWN_S3_REGIONS.len() + 1
+    }
+
+    pub fn s3_region_other_index(&self) -> usize {
+        KNOWN_S3_REGIONS.len()
+    }
+
+    pub fn selected_s3_region_selector_index(&self) -> usize {
+        self.selected_s3_region_known_index()
+            .unwrap_or(self.s3_region_other_index())
     }
 
     pub fn field_defs(category: SettingsCategory) -> &'static [SettingsFieldDef] {
@@ -754,26 +729,34 @@ impl SettingsState {
         KNOWN_S3_REGIONS.iter().position(|v| *v == region)
     }
 
-    pub fn set_s3_region_by_index(&mut self, index: usize) {
-        if let Some(region) = KNOWN_S3_REGIONS.get(index) {
-            self.region = (*region).to_string();
+    pub fn is_s3_region_other_selected(&self) -> bool {
+        self.selected_s3_region_known_index().is_none()
+    }
+
+    pub fn set_s3_region_selector_index(&mut self, index: usize) {
+        if index < KNOWN_S3_REGIONS.len() {
+            self.region = KNOWN_S3_REGIONS[index].to_string();
+        } else if self.selected_s3_region_known_index().is_some() {
+            self.region.clear();
         }
     }
 
     pub fn cycle_s3_region_selection(&mut self) {
         let next = match self.selected_s3_region_known_index() {
-            Some(idx) => (idx + 1) % KNOWN_S3_REGIONS.len(),
+            Some(idx) if idx + 1 < KNOWN_S3_REGIONS.len() => idx + 1,
+            Some(_) => self.s3_region_other_index(),
             None => 0,
         };
-        self.set_s3_region_by_index(next);
+        self.set_s3_region_selector_index(next);
     }
 
     pub fn cycle_s3_region_selection_prev(&mut self) {
         let prev = match self.selected_s3_region_known_index() {
-            Some(idx) => (idx + KNOWN_S3_REGIONS.len() - 1) % KNOWN_S3_REGIONS.len(),
+            Some(0) => self.s3_region_other_index(),
+            Some(idx) => idx - 1,
             None => KNOWN_S3_REGIONS.len() - 1,
         };
-        self.set_s3_region_by_index(prev);
+        self.set_s3_region_selector_index(prev);
     }
 
     pub fn selected_s3_prefix_mut(&mut self) -> &mut String {

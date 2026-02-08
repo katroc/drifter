@@ -1,4 +1,4 @@
-use crate::core::config::{Config, DEFAULT_S3_REGION};
+use crate::core::config::{Config, DEFAULT_S3_REGION, KNOWN_S3_REGIONS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WizardStep {
@@ -47,6 +47,63 @@ impl Default for WizardState {
 }
 
 impl WizardState {
+    pub const S3_REGION_OTHER_LABEL: &'static str = "Other (custom)";
+
+    pub fn known_s3_regions() -> &'static [&'static str] {
+        &KNOWN_S3_REGIONS
+    }
+
+    pub fn s3_region_other_index(&self) -> usize {
+        KNOWN_S3_REGIONS.len()
+    }
+
+    pub fn selected_s3_region_known_index(&self) -> Option<usize> {
+        let region = self.region.trim();
+        if region.is_empty() {
+            return None;
+        }
+        KNOWN_S3_REGIONS.iter().position(|value| *value == region)
+    }
+
+    pub fn selected_s3_region_selector_index(&self) -> usize {
+        self.selected_s3_region_known_index()
+            .unwrap_or(self.s3_region_other_index())
+    }
+
+    pub fn is_s3_region_other_selected(&self) -> bool {
+        self.selected_s3_region_known_index().is_none()
+    }
+
+    pub fn s3_region_selector_len(&self) -> usize {
+        KNOWN_S3_REGIONS.len() + 1
+    }
+
+    pub fn set_s3_region_selector_index(&mut self, index: usize) {
+        if index < KNOWN_S3_REGIONS.len() {
+            self.region = KNOWN_S3_REGIONS[index].to_string();
+        } else if self.selected_s3_region_known_index().is_some() {
+            self.region.clear();
+        }
+    }
+
+    pub fn cycle_s3_region_selection(&mut self) {
+        let next = match self.selected_s3_region_known_index() {
+            Some(idx) if idx + 1 < KNOWN_S3_REGIONS.len() => idx + 1,
+            Some(_) => self.s3_region_other_index(),
+            None => 0,
+        };
+        self.set_s3_region_selector_index(next);
+    }
+
+    pub fn cycle_s3_region_selection_prev(&mut self) {
+        let prev = match self.selected_s3_region_known_index() {
+            Some(0) => self.s3_region_other_index(),
+            Some(idx) => idx - 1,
+            None => KNOWN_S3_REGIONS.len() - 1,
+        };
+        self.set_s3_region_selector_index(prev);
+    }
+
     pub fn new() -> Self {
         let defaults = Config::default();
         Self {

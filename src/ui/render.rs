@@ -11,7 +11,7 @@ use ratatui::{
 use crate::app::settings::{SettingsFieldId, SettingsState};
 use crate::app::state::{App, AppFocus, AppTab, InputMode, LayoutTarget, RemoteTarget};
 use crate::components::file_picker::FileEntry;
-use crate::components::wizard::WizardStep;
+use crate::components::wizard::{WizardState, WizardStep};
 use crate::db::{JobStatus, ScanStatus, UploadStatus};
 use crate::ui::key_hints::footer_hints;
 use crate::ui::theme::{StatusKind, Theme};
@@ -1761,7 +1761,8 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         let is_selected =
             (app.settings.selected_field == i) && (app.focus == AppFocus::SettingsFields);
         let is_text_edit_field = field_def.kind.is_text_input();
-        let is_custom_region_field = field_def.id == SettingsFieldId::S3Region;
+        let is_custom_region_field =
+            field_def.id == SettingsFieldId::S3Region && app.settings.is_s3_region_other_selected();
         let border_style = if is_selected {
             if app.settings.editing {
                 app.theme.input_border_style(true)
@@ -1789,7 +1790,12 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
 
         let reveal_secret = app.settings.editing && is_selected;
         let value = app.settings.field_value(field_def.id, reveal_secret);
-        let display_value = if field_def.kind.is_selector() {
+        let display_value = if field_def.id == SettingsFieldId::S3Region
+            && app.settings.is_s3_region_other_selected()
+            && value.trim().is_empty()
+        {
+            format!("▼ {}", SettingsState::S3_REGION_OTHER_LABEL)
+        } else if field_def.kind.is_selector() {
             format!("▼ {}", value)
         } else {
             value
@@ -1992,34 +1998,37 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
             .style(app.theme.panel_style());
 
         let regions = SettingsState::known_s3_regions();
-        let total = regions.len();
-        if total == 0 {
-            return;
-        }
-
-        let selected_known = app.settings.selected_s3_region_known_index();
-        let selected_anchor = selected_known.unwrap_or(0);
+        let selected = app.settings.selected_s3_region_selector_index();
+        let total = app.settings.s3_region_selector_len();
         let max_visible = region_area.height.saturating_sub(2) as usize;
-        let (start, end) = centered_window_bounds(selected_anchor, total, max_visible);
+        let (start, end) = centered_window_bounds(selected, total, max_visible);
 
-        let visible_items: Vec<ListItem> = regions
+        let selector_items: Vec<String> = regions
+            .iter()
+            .map(|region| region.to_string())
+            .chain(std::iter::once(
+                SettingsState::S3_REGION_OTHER_LABEL.to_string(),
+            ))
+            .collect();
+
+        let visible_items: Vec<ListItem> = selector_items
             .iter()
             .skip(start)
             .take(end.saturating_sub(start))
             .enumerate()
-            .map(|(idx, region)| {
+            .map(|(idx, label)| {
                 let absolute = start + idx;
-                let style = if Some(absolute) == selected_known {
+                let style = if absolute == selected {
                     app.theme.selection_style()
                 } else {
                     app.theme.text_style()
                 };
-                ListItem::new(format!(" {} ", region)).style(style)
+                ListItem::new(format!(" {} ", label)).style(style)
             })
             .collect();
 
         let mut list_state = ratatui::widgets::ListState::default();
-        list_state.select(selected_known.map(|idx| idx.saturating_sub(start)));
+        list_state.select(Some(selected.saturating_sub(start)));
         let list = List::new(visible_items).block(list_block);
         f.render_stateful_widget(list, region_area, &mut list_state);
     }
@@ -2404,7 +2413,7 @@ fn draw_wizard(f: &mut Frame, app: &App) {
                     required: true,
                     secret: false,
                     toggle: false,
-                    help: "AWS/S3 region for API requests.",
+                    help: "Choose a known region, or select Other to type a custom region.",
                 },
                 WizardFieldSpec {
                     label: "Endpoint",
@@ -2537,6 +2546,7 @@ fn draw_wizard(f: &mut Frame, app: &App) {
             .enumerate()
         {
             let is_selected = i == app.wizard.field;
+            let is_region_selector = app.wizard.step == WizardStep::S3 && i == 2;
             let is_editing = is_selected && app.wizard.editing && !spec.toggle;
             if is_selected {
                 active_help = spec.help;
@@ -2569,6 +2579,18 @@ fn draw_wizard(f: &mut Frame, app: &App) {
                 } else {
                     "[ ] Disabled".to_string()
                 }
+            } else if is_region_selector {
+                if is_editing {
+                    if app.wizard.is_s3_region_other_selected() {
+                        format!("▼ {}█", spec.value)
+                    } else {
+                        format!("▼ {}", spec.value)
+                    }
+                } else if app.wizard.is_s3_region_other_selected() && spec.value.trim().is_empty() {
+                    format!("▼ {}", WizardState::S3_REGION_OTHER_LABEL)
+                } else {
+                    format!("▼ {}", spec.value)
+                }
             } else if spec.secret && !is_editing {
                 if spec.value.trim().is_empty() {
                     "(required)".to_string()
@@ -2598,11 +2620,74 @@ fn draw_wizard(f: &mut Frame, app: &App) {
                 .style(value_style);
             f.render_widget(field_widget, field_chunks[visible_idx]);
 
-            if is_editing {
+            if is_editing && (!is_region_selector || app.wizard.is_s3_region_other_selected()) {
+                let cursor_offset = if is_region_selector {
+                    2 + spec.value.len() as u16
+                } else {
+                    spec.value.len() as u16
+                };
                 f.set_cursor(
-                    field_chunks[visible_idx].x + 1 + spec.value.len() as u16,
+                    field_chunks[visible_idx].x + 1 + cursor_offset,
                     field_chunks[visible_idx].y + 1,
                 );
+            }
+        }
+
+        if app.wizard.editing && app.wizard.step == WizardStep::S3 && app.wizard.field == 2 {
+            let max_width = fields_area.width.saturating_sub(2);
+            let max_height = fields_area.height.saturating_sub(2);
+            if max_width >= 26 && max_height >= 6 {
+                let width = max_width.min(34);
+                let height = max_height.clamp(6, 12);
+                let region_area = Rect {
+                    x: fields_area.x + 1,
+                    y: fields_area.y + 1,
+                    width,
+                    height,
+                }
+                .intersection(fields_area);
+                f.render_widget(Clear, region_area);
+
+                let list_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(app.theme.border_type)
+                    .title(" Select Region (Other for custom) ")
+                    .border_style(app.theme.border_active_style())
+                    .style(app.theme.panel_style());
+
+                let selector_items: Vec<String> = WizardState::known_s3_regions()
+                    .iter()
+                    .map(|region| region.to_string())
+                    .chain(std::iter::once(
+                        WizardState::S3_REGION_OTHER_LABEL.to_string(),
+                    ))
+                    .collect();
+
+                let total = app.wizard.s3_region_selector_len();
+                let selected = app.wizard.selected_s3_region_selector_index();
+                let max_visible = region_area.height.saturating_sub(2) as usize;
+                let (start, end) = centered_window_bounds(selected, total, max_visible);
+
+                let visible_items: Vec<ListItem> = selector_items
+                    .iter()
+                    .skip(start)
+                    .take(end.saturating_sub(start))
+                    .enumerate()
+                    .map(|(idx, label)| {
+                        let absolute = start + idx;
+                        let style = if absolute == selected {
+                            app.theme.selection_style()
+                        } else {
+                            app.theme.text_style()
+                        };
+                        ListItem::new(format!(" {} ", label)).style(style)
+                    })
+                    .collect();
+
+                let mut list_state = ratatui::widgets::ListState::default();
+                list_state.select(Some(selected.saturating_sub(start)));
+                let list = List::new(visible_items).block(list_block);
+                f.render_stateful_widget(list, region_area, &mut list_state);
             }
         }
 
@@ -2614,6 +2699,8 @@ fn draw_wizard(f: &mut Frame, app: &App) {
 
     let nav_text = if app.wizard.step == WizardStep::Done {
         "Enter Save & Continue  │  Shift+Tab Back  │  q Quit"
+    } else if app.wizard.editing && app.wizard.step == WizardStep::S3 && app.wizard.field == 2 {
+        "↑/↓ or [] Select Region  │  Other = Type custom  │  Enter Save Field  │  Esc Cancel Edit"
     } else if app.wizard.editing {
         "Type value  │  Enter Save Field  │  Esc Cancel Edit"
     } else {

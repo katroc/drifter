@@ -519,7 +519,7 @@ fn handle_settings_field_edit_char(app: &mut App, c: char) {
                     app.settings.cycle_s3_region_selection();
                 } else if c == '[' {
                     app.settings.cycle_s3_region_selection_prev();
-                } else {
+                } else if app.settings.is_s3_region_other_selected() {
                     let _ = app.settings.push_char_to_field(field_id, c);
                 }
             }
@@ -591,7 +591,10 @@ async fn handle_settings_field_key(
             handle_settings_field_edit_char(app, c);
         }
         KeyCode::Backspace if app.settings.editing => {
-            if let Some(field_id) = active_settings_field_id(app) {
+            if let Some(field_id) = active_settings_field_id(app)
+                && (field_id != SettingsFieldId::S3Region
+                    || app.settings.is_s3_region_other_selected())
+            {
                 let _ = app.settings.pop_char_from_field(field_id);
             }
         }
@@ -789,13 +792,10 @@ async fn handle_settings_center_click(
 
         if rel_x < list_width && rel_y < list_height {
             let display_height = list_height.saturating_sub(2) as usize;
-            let total = SettingsState::known_s3_regions().len();
-            if total == 0 {
-                return;
-            }
+            let total = app.settings.s3_region_selector_len();
             if rel_y >= 1 && (rel_y as usize) < display_height + 1 {
                 let inner_rel_y = (rel_y - 1) as usize;
-                let selected = app.settings.selected_s3_region_known_index().unwrap_or(0);
+                let selected = app.settings.selected_s3_region_selector_index();
                 let (offset, _) = centered_window_bounds(selected, total, display_height);
 
                 let target_idx = offset + inner_rel_y;
@@ -810,15 +810,20 @@ async fn handle_settings_center_click(
                         false
                     };
 
-                    app.settings.set_s3_region_by_index(target_idx);
+                    app.settings.set_s3_region_selector_index(target_idx);
                     if is_double_click {
-                        app.settings.editing = false;
-                        app.last_click_time = None;
-                        if let Err(e) = persist_settings_state(app, conn_mutex).await {
-                            app.status_message = format!("Failed to save region: {}", e);
+                        if app.settings.is_s3_region_other_selected() {
+                            app.last_click_time = Some(now);
+                            app.last_click_pos = Some((x, y));
                         } else {
-                            app.status_message =
-                                format!("S3 region: {}", app.settings.selected_s3_region());
+                            app.settings.editing = false;
+                            app.last_click_time = None;
+                            if let Err(e) = persist_settings_state(app, conn_mutex).await {
+                                app.status_message = format!("Failed to save region: {}", e);
+                            } else {
+                                app.status_message =
+                                    format!("S3 region: {}", app.settings.selected_s3_region());
+                            }
                         }
                     } else {
                         app.last_click_time = Some(now);
@@ -1683,13 +1688,39 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
                                 KeyCode::Char(' ') if !app.wizard.editing => {
                                     app.wizard.toggle_current_field();
                                 }
+                                KeyCode::Right | KeyCode::Down
+                                    if app.wizard.editing
+                                        && app.wizard.step == WizardStep::S3
+                                        && app.wizard.field == 2 =>
+                                {
+                                    app.wizard.cycle_s3_region_selection();
+                                }
+                                KeyCode::Left | KeyCode::Up
+                                    if app.wizard.editing
+                                        && app.wizard.step == WizardStep::S3
+                                        && app.wizard.field == 2 =>
+                                {
+                                    app.wizard.cycle_s3_region_selection_prev();
+                                }
                                 KeyCode::Char(c) if app.wizard.editing => {
-                                    if let Some(field) = app.wizard.get_field_mut() {
+                                    if app.wizard.step == WizardStep::S3 && app.wizard.field == 2 {
+                                        if c == ']' {
+                                            app.wizard.cycle_s3_region_selection();
+                                        } else if c == '[' {
+                                            app.wizard.cycle_s3_region_selection_prev();
+                                        } else if app.wizard.is_s3_region_other_selected() {
+                                            app.wizard.region.push(c);
+                                        }
+                                    } else if let Some(field) = app.wizard.get_field_mut() {
                                         field.push(c);
                                     }
                                 }
                                 KeyCode::Backspace if app.wizard.editing => {
-                                    if let Some(field) = app.wizard.get_field_mut() {
+                                    if app.wizard.step == WizardStep::S3 && app.wizard.field == 2 {
+                                        if app.wizard.is_s3_region_other_selected() {
+                                            app.wizard.region.pop();
+                                        }
+                                    } else if let Some(field) = app.wizard.get_field_mut() {
                                         field.pop();
                                     }
                                 }
