@@ -1,6 +1,6 @@
 [package]
 name = "drifter"
-version = "0.1.11"
+version = "0.1.13"
 edition = "2024"
 description = "A TUI-based S3 multipart uploader featuring resumable transfers and ClamAV integration."
 license = "MIT"
