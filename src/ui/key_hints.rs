@@ -54,7 +54,7 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
             let mut hints = vec![
                 key_action("←/→", "Navigate"),
                 key_action("↑/↓", "Select"),
-                key_action("[]", "Endpoint"),
+                key_action("e", "Select Ep"),
                 key_action("r", "Refresh"),
                 key_action("d", "Download"),
                 key_action("x", "Delete"),
@@ -84,6 +84,11 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
         InputMode::RemoteFolderCreate => {
             vec![key_action("Enter", "Create"), key_action("Esc", "Cancel")]
         }
+        InputMode::EndpointSelect => vec![
+            key_action("↑/↓", "Select"),
+            key_action("Enter", "Apply"),
+            key_action("Esc", "Cancel"),
+        ],
         InputMode::Confirmation => vec![
             key_action("Enter/y", "Confirm"),
             key_action("Esc/n", "Cancel"),
@@ -108,7 +113,7 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
                         crate::core::transfer::TransferDirection::S3ToS3
                     ) {
                         vec![
-                            key_action("[]", "Endpoint"),
+                            key_action("e", "Select Ep"),
                             key_action("a", "Browse"),
                             key_action("r", "Refresh"),
                             key_action("x", "Delete"),
@@ -134,7 +139,7 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
                 AppFocus::History => vec![key_action("←", "Queue")],
                 AppFocus::Remote => {
                     let mut hints = vec![
-                        key_action("[]", "Endpoint"),
+                        key_action("e", "Select Ep"),
                         key_action("a", "Browse"),
                         key_action("r", "Refresh"),
                         key_action("d", "Download"),
@@ -202,6 +207,11 @@ pub fn footer_hints(app: &App) -> Vec<KeyHint> {
                         key_action("Enter", "Edit"),
                         key_action("s", "Save"),
                         key_action("t", "Test"),
+                    ],
+                    SettingsCategory::General => vec![
+                        key_action("←", "Category"),
+                        key_action("Enter", "Edit/Open"),
+                        key_action("s", "Save"),
                     ],
                     _ => vec![
                         key_action("←", "Category"),

@@ -1,5 +1,6 @@
 ---
 source: tests/ui_tests.rs
+assertion_line: 690
 expression: output
 ---
 ╭ Navigation ───╭ Local Source /test/╮ Remote Destination (╮ History [All] ────────────────────────────────────────────╮
@@ -41,4 +42,4 @@ expression: output
 │               │                                          │Disk Read:  0 B               Net Down: 0 B                │
 │               │                                          │Disk Write: 0 B               Net Up:   0 B                │
 ╰───────────────╰──────────────────────────────────────────╯───────────────────────────────────────────────────────────╯
-←/→ Navigate  │  ↑/↓ Select  │  [] Endpo             ClamAV: Connected  │  S3: Not Configured  │  Jobs: 0  │  Threats: 0
+←/→ Navigate  │  ↑/↓ Select  │  e Select             ClamAV: Connected  │  S3: Not Configured  │  Jobs: 0  │  Threats: 0

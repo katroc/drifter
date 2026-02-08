@@ -87,6 +87,32 @@ pub struct JobTransferMetadata {
     pub scan_policy: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WizardStatus {
+    NotComplete,
+    Complete,
+    Skipped,
+}
+
+impl WizardStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotComplete => "not_complete",
+            Self::Complete => "complete",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "not_complete" => Some(Self::NotComplete),
+            "complete" => Some(Self::Complete),
+            "skipped" => Some(Self::Skipped),
+            _ => None,
+        }
+    }
+}
+
 pub fn init_db(state_dir: &str) -> Result<Connection> {
     debug!("Initializing database in: {}", state_dir);
     let configured_state_dir = PathBuf::from(state_dir);
@@ -1051,6 +1077,14 @@ pub fn update_job_staged(
     Ok(())
 }
 
+pub fn update_job_staged_path(conn: &Connection, job_id: i64, staged_path: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE jobs SET staged_path = ? WHERE id = ?",
+        params![staged_path, job_id],
+    )?;
+    Ok(())
+}
+
 pub fn update_job_error(conn: &Connection, job_id: i64, status: &str, error: &str) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET status = ?, error = ? WHERE id = ?",
@@ -1508,6 +1542,33 @@ pub fn load_all_settings(conn: &Connection) -> Result<HashMap<String, String>> {
 pub fn has_settings(conn: &Connection) -> Result<bool> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))?;
     Ok(count > 0)
+}
+
+pub fn get_wizard_status(conn: &Connection) -> Result<WizardStatus> {
+    const WIZARD_STATUS_KEY: &str = "wizard_status";
+
+    if let Some(raw) = get_setting(conn, WIZARD_STATUS_KEY)? {
+        if let Some(parsed) = WizardStatus::from_str(raw.trim()) {
+            return Ok(parsed);
+        }
+        warn!(
+            "Unknown wizard_status '{}'; treating wizard as not complete",
+            raw
+        );
+        return Ok(WizardStatus::NotComplete);
+    }
+
+    // Legacy behavior fallback: if any settings exist, assume setup already completed.
+    if has_settings(conn)? {
+        Ok(WizardStatus::Complete)
+    } else {
+        Ok(WizardStatus::NotComplete)
+    }
+}
+
+pub fn set_wizard_status(conn: &Connection, status: WizardStatus) -> Result<()> {
+    const WIZARD_STATUS_KEY: &str = "wizard_status";
+    set_setting(conn, WIZARD_STATUS_KEY, status.as_str())
 }
 
 #[cfg(test)]
@@ -2322,6 +2383,36 @@ mod tests {
 
         assert!(has_settings(&conn)?);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_wizard_status_defaults_not_complete_without_settings() -> Result<()> {
+        let conn = setup_test_db()?;
+        assert_eq!(get_wizard_status(&conn)?, WizardStatus::NotComplete);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_wizard_status_defaults_complete_for_legacy_settings() -> Result<()> {
+        let conn = setup_test_db()?;
+        set_setting(&conn, "theme", "nord")?;
+        assert_eq!(get_wizard_status(&conn)?, WizardStatus::Complete);
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_and_get_wizard_status() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        set_wizard_status(&conn, WizardStatus::NotComplete)?;
+        assert_eq!(get_wizard_status(&conn)?, WizardStatus::NotComplete);
+
+        set_wizard_status(&conn, WizardStatus::Skipped)?;
+        assert_eq!(get_wizard_status(&conn)?, WizardStatus::Skipped);
+
+        set_wizard_status(&conn, WizardStatus::Complete)?;
+        assert_eq!(get_wizard_status(&conn)?, WizardStatus::Complete);
         Ok(())
     }
 

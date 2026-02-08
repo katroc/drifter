@@ -1,12 +1,13 @@
 ---
 source: tests/ui_tests.rs
+assertion_line: 507
 expression: output
 ---
 ╭ Navigation ───╭ Configuration ───────────────────────────╮ History [All] ────────────────────────────────────────────╮
 │  Transfers    │ S3 Storage    │╭Profile─────────────────╮│File                     Result   Route    Size    Duration│
-│  Quarantine   │ Scanner       ││Unconfigured            ││                                                           │
+│  Quarantine   │ Scanner       ││▼ Unconfigured          ││                                                           │
 │  Logs         │ Performance   │╰────────────────────────╯│                                                           │
-│▌ Settings     │ Theme         │╭Profile Name────────────╮│                                                           │
+│▌ Settings     │ General       │╭Profile Name────────────╮│                                                           │
 │               │               ││Unconfigured            ││                                                           │
 │               │               │╰────────────────────────╯│                                                           │
 │               │               │╭S3 Endpoint─────────────╮│                                                           │

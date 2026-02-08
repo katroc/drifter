@@ -331,6 +331,8 @@ impl TestAppBuilder {
             s3_profiles: Vec::new(),
             transfer_source_endpoint_id: None,
             transfer_destination_endpoint_id: None,
+            transfer_endpoint_select_target: None,
+            transfer_endpoint_select_index: 0,
 
             last_refresh: Instant::now(),
             status_message: "Ready".to_string(),
@@ -377,6 +379,7 @@ impl TestAppBuilder {
             async_tx: tx,
             show_wizard: self.show_wizard,
             wizard: WizardState::new(),
+            wizard_from_settings: false,
             theme,
             theme_names: Theme::list_names(),
             pending_action: self.pending_action,

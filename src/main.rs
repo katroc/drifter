@@ -12,12 +12,25 @@ mod utils;
 use crate::app::state::AppEvent;
 use crate::coordinator::Coordinator;
 use crate::core::config;
+use crate::db::WizardStatus;
 use crate::db::init_db;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex, mpsc};
 use tokio::sync::Mutex as AsyncMutex;
+
+fn config_requires_wizard(cfg: &config::Config) -> bool {
+    if cfg.validate().is_err() {
+        return true;
+    }
+
+    cfg.quarantine_dir.trim().is_empty()
+        || cfg.reports_dir.trim().is_empty()
+        || cfg.state_dir.trim().is_empty()
+        || cfg.clamd_host.trim().is_empty()
+        || cfg.clamd_port == 0
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,17 +45,28 @@ async fn main() -> Result<()> {
 
     let conn = init_db(&state_dir)?;
 
-    // Check if first run (no settings in DB)
-    let needs_wizard = !db::has_settings(&conn)?;
-
-    // If no settings, initialize with defaults
-    if needs_wizard {
+    // First run bootstrap: initialize defaults and explicitly mark setup incomplete.
+    if !db::has_settings(&conn)? {
         let default_cfg = config::Config::default();
         config::save_config_to_db(&conn, &default_cfg)?;
+        db::set_wizard_status(&conn, WizardStatus::NotComplete)?;
     }
 
     // Load config from database
     let cfg = config::load_config_from_db(&conn)?;
+
+    // Determine wizard visibility using explicit status + config health fallback.
+    let wizard_status = db::get_wizard_status(&conn)?;
+    let needs_wizard = match wizard_status {
+        WizardStatus::NotComplete => true,
+        WizardStatus::Skipped => false,
+        WizardStatus::Complete => config_requires_wizard(&cfg),
+    };
+
+    // If config health check failed while marked complete, downgrade state until setup is rerun.
+    if matches!(wizard_status, WizardStatus::Complete) && needs_wizard {
+        db::set_wizard_status(&conn, WizardStatus::NotComplete)?;
+    }
 
     // Apply persisted log level
     if let Some(log_level) = &Some(&cfg.log_level) {

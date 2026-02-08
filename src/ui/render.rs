@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use crate::app::settings::SettingsCategory;
-use crate::app::state::{App, AppFocus, AppTab, InputMode, LayoutTarget};
+use crate::app::state::{App, AppFocus, AppTab, InputMode, LayoutTarget, RemoteTarget};
 use crate::components::file_picker::FileEntry;
 use crate::components::wizard::WizardStep;
 use crate::ui::key_hints::footer_hints;
@@ -437,7 +437,7 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(vertical_chunks[0]);
 
-    match app.transfer_direction {
+    let (primary_remote_area, secondary_remote_area) = match app.transfer_direction {
         crate::core::transfer::TransferDirection::S3ToLocal => {
             let source_label = format!(
                 "Remote Source ({})",
@@ -458,6 +458,7 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
                 Some(&app.selected_remote_items),
             );
             draw_browser(f, app, horizontal_chunks[1], "Local Destination", false);
+            (Some(horizontal_chunks[0]), None)
         }
         crate::core::transfer::TransferDirection::S3ToS3 => {
             let source_label = format!(
@@ -496,6 +497,7 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
                 app.focus == AppFocus::Browser,
                 Some(&app.selected_remote_items_secondary),
             );
+            (Some(horizontal_chunks[0]), Some(horizontal_chunks[1]))
         }
         crate::core::transfer::TransferDirection::LocalToS3 => {
             let destination_label = format!(
@@ -517,11 +519,131 @@ fn draw_transfers(f: &mut Frame, app: &App, area: Rect) {
                 app.focus == AppFocus::Remote,
                 Some(&app.selected_remote_items),
             );
+            (Some(horizontal_chunks[1]), None)
+        }
+    };
+
+    if app.input_mode == InputMode::EndpointSelect
+        && let Some(target) = app.transfer_endpoint_select_target
+    {
+        match target {
+            RemoteTarget::Primary => {
+                if let Some(panel_area) = primary_remote_area {
+                    draw_transfer_endpoint_selector(f, app, panel_area, target);
+                }
+            }
+            RemoteTarget::Secondary => {
+                if let Some(panel_area) = secondary_remote_area {
+                    draw_transfer_endpoint_selector(f, app, panel_area, target);
+                }
+            }
         }
     }
 
     // Render Queue (bottom)
     draw_jobs(f, app, vertical_chunks[1]);
+}
+
+fn draw_transfer_endpoint_selector(
+    f: &mut Frame,
+    app: &App,
+    panel_area: Rect,
+    target: RemoteTarget,
+) {
+    if panel_area.width < 18 || panel_area.height < 6 {
+        return;
+    }
+
+    let max_width = panel_area.width.saturating_sub(4);
+    let width = max_width.min(34);
+    if width < 16 {
+        return;
+    }
+
+    let max_height = panel_area.height.saturating_sub(2);
+    if max_height < 4 {
+        return;
+    }
+
+    let title = match (app.transfer_direction, target) {
+        (crate::core::transfer::TransferDirection::LocalToS3, RemoteTarget::Primary) => {
+            " Select Destination "
+        }
+        (crate::core::transfer::TransferDirection::S3ToLocal, RemoteTarget::Primary) => {
+            " Select Source "
+        }
+        (crate::core::transfer::TransferDirection::S3ToS3, RemoteTarget::Primary) => {
+            " Select Source "
+        }
+        (crate::core::transfer::TransferDirection::S3ToS3, RemoteTarget::Secondary) => {
+            " Select Destination "
+        }
+        _ => " Select Endpoint ",
+    };
+
+    let items_len = app.s3_profiles.len().max(1);
+    let height = ((items_len as u16).saturating_add(2)).clamp(4, max_height.min(12));
+    let area = Rect {
+        x: panel_area.x + 2,
+        y: panel_area.y + 1,
+        width,
+        height,
+    };
+    f.render_widget(Clear, area);
+
+    let list_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(app.theme.border_type)
+        .title(title)
+        .border_style(app.theme.border_active_style())
+        .style(app.theme.panel_style());
+
+    if app.s3_profiles.is_empty() {
+        let list = List::new(vec![ListItem::new(" No S3 profiles configured ")])
+            .block(list_block)
+            .style(app.theme.text_style());
+        f.render_widget(list, area);
+        return;
+    }
+
+    let max_visible = area.height.saturating_sub(2) as usize;
+    let selected = app
+        .transfer_endpoint_select_index
+        .min(app.s3_profiles.len().saturating_sub(1));
+    let mut start = 0usize;
+    if max_visible > 0 && app.s3_profiles.len() > max_visible {
+        start = selected.saturating_sub(max_visible / 2);
+        if start + max_visible > app.s3_profiles.len() {
+            start = app.s3_profiles.len().saturating_sub(max_visible);
+        }
+    }
+    let end = if max_visible == 0 {
+        app.s3_profiles.len()
+    } else {
+        (start + max_visible).min(app.s3_profiles.len())
+    };
+
+    let visible_items: Vec<ListItem> = app
+        .s3_profiles
+        .iter()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .enumerate()
+        .map(|(idx, profile)| {
+            let absolute = start + idx;
+            let style = if absolute == selected {
+                app.theme.selection_style()
+            } else {
+                app.theme.text_style()
+            };
+            ListItem::new(format!(" {} ", profile.name)).style(style)
+        })
+        .collect();
+
+    let mut list_state = ratatui::widgets::ListState::default();
+    list_state.select(Some(selected.saturating_sub(start)));
+    let list = List::new(visible_items).block(list_block);
+    f.render_stateful_widget(list, area, &mut list_state);
 }
 
 fn draw_browser(f: &mut Frame, app: &App, area: Rect, role_label: &str, is_left_panel: bool) {
@@ -1549,7 +1671,7 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Length(16), Constraint::Min(0)])
         .split(inner_area);
 
-    let categories = ["S3 Storage", "Scanner", "Performance", "Theme"];
+    let categories = ["S3 Storage", "Scanner", "Performance", "General"];
     let cat_items: Vec<ListItem> = categories
         .iter()
         .enumerate()
@@ -1647,7 +1769,10 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
                 },
             ),
         ],
-        SettingsCategory::Theme => vec![("Theme", app.settings.theme.as_str())],
+        SettingsCategory::General => vec![
+            ("Theme", app.settings.theme.as_str()),
+            ("Setup Wizard", "Run guided setup"),
+        ],
     };
 
     if fields_per_view == 0 {
@@ -1679,6 +1804,12 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
 
         let is_selected =
             (app.settings.selected_field == i) && (app.focus == AppFocus::SettingsFields);
+        let is_text_edit_field = matches!(
+            (app.settings.active_category, i),
+            (SettingsCategory::S3, 1..=7)
+                | (SettingsCategory::Scanner, 0..=2)
+                | (SettingsCategory::Performance, 0..=4)
+        );
         let border_style = if is_selected {
             if app.settings.editing {
                 app.theme.input_border_style(true)
@@ -1696,10 +1827,7 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
             .border_style(border_style)
             .style(app.theme.panel_style());
 
-        let value_style = if is_selected
-            && app.settings.editing
-            && app.settings.active_category != SettingsCategory::Theme
-        {
+        let value_style = if is_selected && app.settings.editing && is_text_edit_field {
             app.theme.input_style(true)
         } else if is_selected {
             app.theme.text_style().add_modifier(Modifier::BOLD)
@@ -1707,21 +1835,30 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
             app.theme.text_style()
         };
 
-        let p = Paragraph::new(*value).block(block).style(value_style);
+        let display_value = if app.settings.active_category == SettingsCategory::S3 && i == 0 {
+            format!("▼ {}", value)
+        } else if app.settings.active_category == SettingsCategory::General && i == 0 {
+            format!("▼ {}", value)
+        } else {
+            (*value).to_string()
+        };
+        let p = Paragraph::new(display_value.clone())
+            .block(block)
+            .style(value_style);
         f.render_widget(p, field_chunks[chunk_idx]);
 
-        if is_selected
-            && app.settings.editing
-            && app.settings.active_category != SettingsCategory::Theme
-        {
+        if is_selected && app.settings.editing && is_text_edit_field {
             f.set_cursor(
-                field_chunks[chunk_idx].x + 1 + value.len() as u16,
+                field_chunks[chunk_idx].x + 1 + display_value.len() as u16,
                 field_chunks[chunk_idx].y + 1,
             );
         }
     }
 
-    if app.settings.editing && app.settings.active_category == SettingsCategory::Theme {
+    if app.settings.editing
+        && app.settings.active_category == SettingsCategory::General
+        && app.settings.selected_field == 0
+    {
         let max_width = fields_area.width.saturating_sub(2);
         let max_height = fields_area.height.saturating_sub(2);
         if max_width < 22 || max_height < 8 {
@@ -1821,6 +1958,82 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
             render_theme_preview(f, &preview_theme, preview_area);
         }
     }
+
+    if app.settings.editing
+        && app.settings.active_category == SettingsCategory::S3
+        && app.settings.selected_field == 0
+    {
+        let max_width = fields_area.width.saturating_sub(2);
+        let max_height = fields_area.height.saturating_sub(2);
+        if max_width < 22 || max_height < 6 {
+            return;
+        }
+
+        let width = max_width.min(42);
+        let height = max_height.clamp(6, 14);
+        let profile_area = Rect {
+            x: fields_area.x + 1,
+            y: fields_area.y + 1,
+            width,
+            height,
+        };
+        let profile_area = profile_area.intersection(fields_area);
+        f.render_widget(Clear, profile_area);
+
+        let list_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(app.theme.border_type)
+            .title(" Select S3 Profile ")
+            .border_style(app.theme.border_active_style())
+            .style(app.theme.panel_style());
+
+        let total = app.settings.s3_profile_count();
+        if total == 0 {
+            let list = List::new(vec![ListItem::new(" No S3 profiles configured ")])
+                .block(list_block)
+                .style(app.theme.text_style());
+            f.render_widget(list, profile_area);
+            return;
+        }
+
+        let selected = app.settings.s3_profile_index.min(total.saturating_sub(1));
+        let max_visible = profile_area.height.saturating_sub(2) as usize;
+        let mut start = 0usize;
+        if max_visible > 0 && total > max_visible {
+            start = selected.saturating_sub(max_visible / 2);
+            if start + max_visible > total {
+                start = total.saturating_sub(max_visible);
+            }
+        }
+        let end = if max_visible == 0 {
+            total
+        } else {
+            (start + max_visible).min(total)
+        };
+
+        let visible_items: Vec<ListItem> = app
+            .settings
+            .s3_profiles
+            .iter()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .enumerate()
+            .map(|(idx, profile)| {
+                let absolute = start + idx;
+                let style = if absolute == selected {
+                    app.theme.selection_style()
+                } else {
+                    app.theme.text_style()
+                };
+                ListItem::new(format!(" {} ", profile.name)).style(style)
+            })
+            .collect();
+
+        let mut list_state = ratatui::widgets::ListState::default();
+        list_state.select(Some(selected.saturating_sub(start)));
+        let list = List::new(visible_items).block(list_block);
+        f.render_stateful_widget(list, profile_area, &mut list_state);
+    }
 }
 
 fn render_theme_preview(f: &mut Frame, theme: &Theme, area: Rect) {
@@ -1869,121 +2082,558 @@ fn render_theme_preview(f: &mut Frame, theme: &Theme, area: Rect) {
 }
 
 fn draw_wizard(f: &mut Frame, app: &App) {
+    struct WizardFieldSpec<'a> {
+        label: &'a str,
+        value: String,
+        required: bool,
+        secret: bool,
+        toggle: bool,
+        help: &'a str,
+    }
+
     let area = f.size();
-    let wizard_area = centered_rect(area, 60, 70);
+    let wizard_area = centered_rect(area, 74, 78);
 
     draw_shadow(f, wizard_area, app);
-    f.render_widget(Clear, wizard_area); // Ensure we clear behind it if on top of main UI
-    f.render_widget(Block::default().style(app.theme.base_style()), wizard_area); // Actually base style covers it, but let's be safe
+    f.render_widget(Clear, wizard_area);
+    f.render_widget(Block::default().style(app.theme.base_style()), wizard_area);
 
-    let step_title = match app.wizard.step {
-        WizardStep::Paths => "Step 1/4: Directory Paths",
-        WizardStep::Scanner => "Step 2/4: ClamAV Scanner",
-        WizardStep::S3 => "Step 3/4: S3 Storage",
-        WizardStep::Performance => "Step 4/4: Performance",
-        WizardStep::Done => "Setup Complete!",
+    let (step_idx, step_title, step_subtitle) = match app.wizard.step {
+        WizardStep::Paths => (
+            1usize,
+            "Storage Paths",
+            "Choose where quarantine, reports, and state data are stored.",
+        ),
+        WizardStep::Scanner => (
+            2usize,
+            "Scanner",
+            "Configure scanner connectivity and scanning controls.",
+        ),
+        WizardStep::S3 => (
+            3usize,
+            "S3 Credentials",
+            "Set destination bucket, path prefix, and credentials.",
+        ),
+        WizardStep::Performance => (
+            4usize,
+            "Performance",
+            "Tune throughput and runtime behavior flags.",
+        ),
+        WizardStep::Done => (
+            5usize,
+            "Review & Finish",
+            "Setup is complete. Save and start using Drifter.",
+        ),
     };
+    let setup_steps = 4usize;
+    let progress_step = step_idx.min(setup_steps);
+    let bar_width = 28usize;
+    let filled = ((progress_step * bar_width) + (setup_steps / 2)) / setup_steps;
+    let progress_bar = format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(bar_width.saturating_sub(filled))
+    );
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
-        .title(format!(" {} Setup Wizard ", "🚀"))
+        .title(" Setup Wizard ")
         .border_style(app.theme.modal_border_style());
 
     let inner = block.inner(wizard_area);
     f.render_widget(block, wizard_area);
 
-    let chunks = Layout::default()
+    let root_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Length(4),
             Constraint::Min(0),
-            Constraint::Length(2),
+            Constraint::Length(3),
         ])
         .split(inner);
 
-    let title = Paragraph::new(step_title)
-        .style(app.theme.highlight_style())
-        .alignment(ratatui::layout::Alignment::Center);
-    f.render_widget(title, chunks[0]);
+    let header_lines = vec![
+        Line::from(vec![
+            Span::styled("Initial Setup", app.theme.highlight_style()),
+            Span::styled(
+                format!("  ·  Step {}/{}", progress_step, setup_steps),
+                app.theme.muted_style(),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("[{}] {}", progress_bar, step_title),
+            app.theme.text_style(),
+        )),
+        Line::from(Span::styled(step_subtitle, app.theme.dim_style())),
+    ];
+    let header = Paragraph::new(header_lines).style(app.theme.text_style());
+    f.render_widget(header, root_chunks[0]);
 
-    let fields: Vec<(&str, &str)> = match app.wizard.step {
-        WizardStep::Paths => vec![("Quarantine Directory", &app.wizard.quarantine_dir)],
-        WizardStep::Scanner => vec![
-            ("ClamAV Host", &app.wizard.clamd_host),
-            ("ClamAV Port", &app.wizard.clamd_port),
-        ],
-        WizardStep::S3 => vec![
-            ("Bucket Name", &app.wizard.bucket),
-            ("Region", &app.wizard.region),
-            ("Endpoint (optional)", &app.wizard.endpoint),
-            ("Access Key", &app.wizard.access_key),
-            ("Secret Key", &app.wizard.secret_key),
-        ],
-        WizardStep::Performance => vec![
-            ("Part Size (MB)", &app.wizard.part_size),
-            ("Concurrency", &app.wizard.concurrency),
-        ],
-        WizardStep::Done => vec![],
+    let body_shell = Block::default()
+        .borders(Borders::ALL)
+        .border_type(app.theme.border_type)
+        .border_style(app.theme.border_style())
+        .style(app.theme.panel_style());
+    let body_inner = body_shell.inner(root_chunks[1]);
+    f.render_widget(body_shell, root_chunks[1]);
+
+    let body_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(22), Constraint::Min(0)])
+        .split(body_inner);
+
+    let step_rows = [
+        (WizardStep::Paths, "1  Paths"),
+        (WizardStep::Scanner, "2  Scanner"),
+        (WizardStep::S3, "3  S3"),
+        (WizardStep::Performance, "4  Performance"),
+        (WizardStep::Done, "5  Finish"),
+    ];
+    let step_items: Vec<ListItem> = step_rows
+        .iter()
+        .map(|(step, label)| {
+            let style = if *step == app.wizard.step {
+                app.theme.selection_style()
+            } else if (*step as usize) < (app.wizard.step as usize) {
+                app.theme.status_style(StatusKind::Success)
+            } else {
+                app.theme.text_style()
+            };
+            ListItem::new(format!(" {} ", label)).style(style)
+        })
+        .collect();
+    let step_block = Block::default()
+        .borders(Borders::RIGHT)
+        .border_type(app.theme.border_type)
+        .title(" Steps ")
+        .border_style(app.theme.border_style())
+        .style(app.theme.base_style());
+    let step_list = List::new(step_items).block(step_block);
+    f.render_widget(step_list, body_chunks[0]);
+
+    let content_area = Rect {
+        x: body_chunks[1].x + 1,
+        y: body_chunks[1].y,
+        width: body_chunks[1].width.saturating_sub(1),
+        height: body_chunks[1].height,
     };
-
     if app.wizard.step == WizardStep::Done {
-        let done_text = Paragraph::new("Configuration saved! Press Enter to continue.")
-            .style(app.theme.status_style(StatusKind::Success))
-            .alignment(ratatui::layout::Alignment::Center);
-        f.render_widget(done_text, chunks[1]);
+        let secret_display = if app.wizard.secret_key.trim().is_empty() {
+            "(empty)".to_string()
+        } else {
+            "********".to_string()
+        };
+        let summary_lines = vec![
+            Line::from(Span::styled(
+                "Configuration summary:",
+                app.theme.highlight_style(),
+            )),
+            Line::from(""),
+            Line::from(format!(
+                "  Quarantine: {}",
+                app.wizard.quarantine_dir.trim()
+            )),
+            Line::from(format!("  Reports:    {}", app.wizard.reports_dir.trim())),
+            Line::from(format!("  State:      {}", app.wizard.state_dir.trim())),
+            Line::from(format!(
+                "  Scanner:    {}",
+                if app.wizard.scanner_enabled {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                }
+            )),
+            Line::from(format!(
+                "  ClamAV:     {}:{}",
+                app.wizard.clamd_host, app.wizard.clamd_port
+            )),
+            Line::from(format!("  Scan Chunk: {} MB", app.wizard.scan_chunk_size)),
+            Line::from(format!(
+                "  S3 Bucket:  {}",
+                if app.wizard.bucket.trim().is_empty() {
+                    "(empty)"
+                } else {
+                    app.wizard.bucket.as_str()
+                }
+            )),
+            Line::from(format!(
+                "  S3 Prefix:  {}",
+                if app.wizard.prefix.trim().is_empty() {
+                    "(none)"
+                } else {
+                    app.wizard.prefix.as_str()
+                }
+            )),
+            Line::from(format!("  S3 Region:  {}", app.wizard.region)),
+            Line::from(format!(
+                "  Endpoint:   {}",
+                if app.wizard.endpoint.trim().is_empty() {
+                    "(default)"
+                } else {
+                    app.wizard.endpoint.as_str()
+                }
+            )),
+            Line::from(format!(
+                "  Access Key: {}",
+                if app.wizard.access_key.trim().is_empty() {
+                    "(empty)"
+                } else {
+                    app.wizard.access_key.as_str()
+                }
+            )),
+            Line::from(format!("  Secret:     {}", secret_display)),
+            Line::from(format!("  Part Size:  {} MB", app.wizard.part_size)),
+            Line::from(format!(
+                "  Upload Concurrency: {}",
+                app.wizard.concurrency_upload_global
+            )),
+            Line::from(format!(
+                "  Scan Concurrency:   {}",
+                app.wizard.concurrency_scan_global
+            )),
+            Line::from(format!(
+                "  Upload Streams:     {}",
+                app.wizard.concurrency_upload_parts
+            )),
+            Line::from(format!(
+                "  Scan Streams:       {}",
+                app.wizard.concurrency_scan_parts
+            )),
+            Line::from(format!(
+                "  Delete Source:      {}",
+                if app.wizard.delete_source_after_upload {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                }
+            )),
+            Line::from(format!(
+                "  Metrics:            {}",
+                if app.wizard.host_metrics_enabled {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                }
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Press Enter to save configuration and start.",
+                app.theme.status_style(StatusKind::Success),
+            )),
+        ];
+        let summary = Paragraph::new(summary_lines)
+            .wrap(Wrap { trim: true })
+            .style(app.theme.text_style());
+        f.render_widget(summary, content_area);
     } else {
-        let field_items: Vec<Line> = fields
+        let specs: Vec<WizardFieldSpec<'_>> = match app.wizard.step {
+            WizardStep::Paths => vec![
+                WizardFieldSpec {
+                    label: "Quarantine Directory",
+                    value: app.wizard.quarantine_dir.clone(),
+                    required: true,
+                    secret: false,
+                    toggle: false,
+                    help: "Infected files are moved here after a positive scan.",
+                },
+                WizardFieldSpec {
+                    label: "Reports Directory",
+                    value: app.wizard.reports_dir.clone(),
+                    required: true,
+                    secret: false,
+                    toggle: false,
+                    help: "Session reports and transfer summaries are written here.",
+                },
+                WizardFieldSpec {
+                    label: "State Directory",
+                    value: app.wizard.state_dir.clone(),
+                    required: true,
+                    secret: false,
+                    toggle: false,
+                    help: "Database and runtime state are stored here.",
+                },
+            ],
+            WizardStep::Scanner => vec![
+                WizardFieldSpec {
+                    label: "Enable Scanner",
+                    value: if app.wizard.scanner_enabled {
+                        "Enabled".to_string()
+                    } else {
+                        "Disabled".to_string()
+                    },
+                    required: true,
+                    secret: false,
+                    toggle: true,
+                    help: "Enable or disable malware scanning before transfer.",
+                },
+                WizardFieldSpec {
+                    label: "ClamAV Host",
+                    value: app.wizard.clamd_host.clone(),
+                    required: true,
+                    secret: false,
+                    toggle: false,
+                    help: "Host or IP for the ClamAV daemon.",
+                },
+                WizardFieldSpec {
+                    label: "ClamAV Port",
+                    value: app.wizard.clamd_port.clone(),
+                    required: true,
+                    secret: false,
+                    toggle: false,
+                    help: "TCP port for ClamAV (default 3310).",
+                },
+                WizardFieldSpec {
+                    label: "Scan Chunk Size (MB)",
+                    value: app.wizard.scan_chunk_size.clone(),
+                    required: true,
+                    secret: false,
+                    toggle: false,
+                    help: "Chunk size used while streaming data to scanner.",
+                },
+            ],
+            WizardStep::S3 => vec![
+                WizardFieldSpec {
+                    label: "Bucket Name",
+                    value: app.wizard.bucket.clone(),
+                    required: true,
+                    secret: false,
+                    toggle: false,
+                    help: "Target bucket for uploads.",
+                },
+                WizardFieldSpec {
+                    label: "Prefix",
+                    value: app.wizard.prefix.clone(),
+                    required: false,
+                    secret: false,
+                    toggle: false,
+                    help: "Optional path prefix prepended to object keys.",
+                },
+                WizardFieldSpec {
+                    label: "Region",
+                    value: app.wizard.region.clone(),
+                    required: true,
+                    secret: false,
+                    toggle: false,
+                    help: "AWS/S3 region for API requests.",
+                },
+                WizardFieldSpec {
+                    label: "Endpoint",
+                    value: app.wizard.endpoint.clone(),
+                    required: false,
+                    secret: false,
+                    toggle: false,
+                    help: "Custom endpoint URL for S3-compatible providers.",
+                },
+                WizardFieldSpec {
+                    label: "Access Key",
+                    value: app.wizard.access_key.clone(),
+                    required: true,
+                    secret: false,
+                    toggle: false,
+                    help: "Access key ID used for S3 authentication.",
+                },
+                WizardFieldSpec {
+                    label: "Secret Key",
+                    value: app.wizard.secret_key.clone(),
+                    required: true,
+                    secret: true,
+                    toggle: false,
+                    help: "Secret key used to sign S3 requests.",
+                },
+            ],
+            WizardStep::Performance => vec![
+                WizardFieldSpec {
+                    label: "Part Size (MB)",
+                    value: app.wizard.part_size.clone(),
+                    required: true,
+                    secret: false,
+                    toggle: false,
+                    help: "Multipart part size; impacts memory and retry overhead.",
+                },
+                WizardFieldSpec {
+                    label: "Global Upload Concurrency",
+                    value: app.wizard.concurrency_upload_global.clone(),
+                    required: true,
+                    secret: false,
+                    toggle: false,
+                    help: "Number of files uploaded in parallel.",
+                },
+                WizardFieldSpec {
+                    label: "Global Scan Concurrency",
+                    value: app.wizard.concurrency_scan_global.clone(),
+                    required: true,
+                    secret: false,
+                    toggle: false,
+                    help: "Number of files scanned in parallel.",
+                },
+                WizardFieldSpec {
+                    label: "Upload Part Concurrency",
+                    value: app.wizard.concurrency_upload_parts.clone(),
+                    required: true,
+                    secret: false,
+                    toggle: false,
+                    help: "Multipart upload streams per file.",
+                },
+                WizardFieldSpec {
+                    label: "Scanner Chunk Concurrency",
+                    value: app.wizard.concurrency_scan_parts.clone(),
+                    required: true,
+                    secret: false,
+                    toggle: false,
+                    help: "Scanner workers per file for chunked scanning.",
+                },
+                WizardFieldSpec {
+                    label: "Delete Source After Upload",
+                    value: if app.wizard.delete_source_after_upload {
+                        "Enabled".to_string()
+                    } else {
+                        "Disabled".to_string()
+                    },
+                    required: false,
+                    secret: false,
+                    toggle: true,
+                    help: "Delete local files after successful upload.",
+                },
+                WizardFieldSpec {
+                    label: "Show Host Metrics",
+                    value: if app.wizard.host_metrics_enabled {
+                        "Enabled".to_string()
+                    } else {
+                        "Disabled".to_string()
+                    },
+                    required: false,
+                    secret: false,
+                    toggle: true,
+                    help: "Show or hide CPU, RAM, and network stats in footer.",
+                },
+            ],
+            WizardStep::Done => Vec::new(),
+        };
+
+        let content_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Min(0),
+                Constraint::Length(2),
+            ])
+            .split(content_area);
+
+        let intro = Paragraph::new(Span::styled(step_subtitle, app.theme.dim_style()));
+        f.render_widget(intro, content_chunks[0]);
+
+        let fields_area = content_chunks[1];
+        let display_height = fields_area.height as usize;
+        let fields_per_view = (display_height / 3).max(1);
+        let mut offset = 0usize;
+        if app.wizard.field >= fields_per_view {
+            offset = app.wizard.field.saturating_sub(fields_per_view / 2);
+        }
+        if specs.len() > fields_per_view && offset + fields_per_view > specs.len() {
+            offset = specs.len() - fields_per_view;
+        }
+
+        let field_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(vec![Constraint::Length(3); fields_per_view])
+            .split(fields_area);
+
+        let mut active_help = "";
+        for (visible_idx, (i, spec)) in specs
             .iter()
             .enumerate()
-            .flat_map(|(i, (label, value))| {
-                let is_selected = i == app.wizard.field;
-                let is_editing = is_selected && app.wizard.editing;
+            .skip(offset)
+            .take(fields_per_view)
+            .enumerate()
+        {
+            let is_selected = i == app.wizard.field;
+            let is_editing = is_selected && app.wizard.editing && !spec.toggle;
+            if is_selected {
+                active_help = spec.help;
+            }
 
-                let label_style = if is_selected {
-                    app.theme.highlight_style()
+            let title = if spec.required {
+                format!("{} *", spec.label)
+            } else {
+                spec.label.to_string()
+            };
+            let border_style = if is_selected {
+                if is_editing {
+                    app.theme.input_border_style(true)
                 } else {
-                    app.theme.muted_style()
-                };
+                    app.theme.border_active_style()
+                }
+            } else {
+                app.theme.border_style()
+            };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(app.theme.border_type)
+                .title(title)
+                .border_style(border_style)
+                .style(app.theme.panel_style());
 
-                let value_display = if is_editing {
-                    format!("{}█", value)
+            let display_value = if spec.toggle {
+                if spec.value == "Enabled" {
+                    "[X] Enabled".to_string()
                 } else {
-                    value.to_string()
-                };
-
-                let value_style = if is_editing {
-                    app.theme.input_style(true)
-                } else if is_selected {
-                    app.theme.selection_soft_style()
+                    "[ ] Disabled".to_string()
+                }
+            } else if spec.secret && !is_editing {
+                if spec.value.trim().is_empty() {
+                    "(required)".to_string()
                 } else {
-                    app.theme.dim_style()
-                };
+                    "********".to_string()
+                }
+            } else if spec.value.trim().is_empty() {
+                if spec.required {
+                    "(required)".to_string()
+                } else {
+                    "(optional)".to_string()
+                }
+            } else if is_editing {
+                format!("{}█", spec.value)
+            } else {
+                spec.value.clone()
+            };
+            let value_style = if is_editing {
+                app.theme.input_style(true)
+            } else if is_selected {
+                app.theme.text_style().add_modifier(Modifier::BOLD)
+            } else {
+                app.theme.text_style()
+            };
+            let field_widget = Paragraph::new(display_value)
+                .block(block)
+                .style(value_style);
+            f.render_widget(field_widget, field_chunks[visible_idx]);
 
-                vec![
-                    Line::from(Span::styled(format!("  {}", label), label_style)),
-                    Line::from(Span::styled(format!("  > {}", value_display), value_style)),
-                    Line::from(""),
-                ]
-            })
-            .collect();
+            if is_editing {
+                f.set_cursor(
+                    field_chunks[visible_idx].x + 1 + spec.value.len() as u16,
+                    field_chunks[visible_idx].y + 1,
+                );
+            }
+        }
 
-        let fields_widget = Paragraph::new(field_items);
-        f.render_widget(fields_widget, chunks[1]);
+        let help_text = Paragraph::new(active_help)
+            .style(app.theme.muted_style())
+            .wrap(Wrap { trim: true });
+        f.render_widget(help_text, content_chunks[2]);
     }
 
     let nav_text = if app.wizard.step == WizardStep::Done {
-        "Enter: Continue"
+        "Enter Save & Continue  │  Shift+Tab Back  │  q Quit"
     } else if app.wizard.editing {
-        "Enter: Confirm | Esc: Cancel"
+        "Type value  │  Enter Save Field  │  Esc Cancel Edit"
     } else {
-        "↑/↓: Select | Enter: Edit | Tab: Next Step | Shift+Tab: Back | q: Quit"
+        "↑/↓ Field  │  Enter Edit/Toggle  │  Space Toggle  │  s Skip  │  Tab/Shift+Tab Step  │  q Quit"
     };
-
     let nav = Paragraph::new(nav_text)
         .style(app.theme.dim_style())
         .alignment(ratatui::layout::Alignment::Center);
-    f.render_widget(nav, chunks[2]);
+    f.render_widget(nav, root_chunks[2]);
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {

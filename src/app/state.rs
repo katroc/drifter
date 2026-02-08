@@ -88,6 +88,7 @@ pub enum InputMode {
     HistorySearch,      // In Job History
     RemoteBrowsing,     // For navigating S3 directories
     RemoteFolderCreate, // Modal for creating new folder in Remote view
+    EndpointSelect,     // Endpoint profile selector popover in Transfers
 }
 
 #[derive(Debug)]
@@ -166,6 +167,8 @@ pub struct App {
     pub s3_profiles: Vec<EndpointProfileRow>,
     pub transfer_source_endpoint_id: Option<i64>,
     pub transfer_destination_endpoint_id: Option<i64>,
+    pub transfer_endpoint_select_target: Option<RemoteTarget>,
+    pub transfer_endpoint_select_index: usize,
 
     pub last_refresh: Instant,
     pub status_message: String,
@@ -217,6 +220,7 @@ pub struct App {
     // Wizard
     pub show_wizard: bool,
     pub wizard: WizardState,
+    pub wizard_from_settings: bool,
     pub theme: Theme,
     pub theme_names: Vec<&'static str>,
     // Modal State
@@ -288,6 +292,8 @@ impl App {
             s3_profiles: Vec::new(),
             transfer_source_endpoint_id: None,
             transfer_destination_endpoint_id: None,
+            transfer_endpoint_select_target: None,
+            transfer_endpoint_select_index: 0,
 
             last_refresh: Instant::now() - Duration::from_secs(5),
             status_message: "Ready".to_string(),
@@ -313,6 +319,7 @@ impl App {
             async_tx: tx,
             show_wizard: false,
             wizard: WizardState::new(),
+            wizard_from_settings: false,
             theme,
             theme_names: Theme::list_names(),
             pending_action: ModalAction::None,
@@ -453,20 +460,6 @@ impl App {
         Ok(())
     }
 
-    fn cycle_profile_id(&self, current: Option<i64>, forward: bool) -> Option<i64> {
-        if self.s3_profiles.is_empty() {
-            return None;
-        }
-
-        let current_idx = current.and_then(|id| self.s3_profiles.iter().position(|p| p.id == id));
-        let idx = match (current_idx, forward) {
-            (Some(i), true) => (i + 1) % self.s3_profiles.len(),
-            (Some(i), false) => (i + self.s3_profiles.len() - 1) % self.s3_profiles.len(),
-            (None, _) => 0,
-        };
-        Some(self.s3_profiles[idx].id)
-    }
-
     pub fn endpoint_profile_name(&self, endpoint_id: Option<i64>) -> String {
         let Some(endpoint_id) = endpoint_id else {
             return "Unconfigured".to_string();
@@ -493,25 +486,6 @@ impl App {
         } else {
             None
         }
-    }
-
-    pub fn cycle_primary_remote_endpoint(&mut self, forward: bool) -> Option<String> {
-        let next = self.cycle_profile_id(self.primary_remote_endpoint_id(), forward);
-        match self.transfer_direction {
-            TransferDirection::LocalToS3 => {
-                self.transfer_destination_endpoint_id = next;
-            }
-            TransferDirection::S3ToLocal | TransferDirection::S3ToS3 => {
-                self.transfer_source_endpoint_id = next;
-            }
-        }
-        Some(self.endpoint_profile_name(next))
-    }
-
-    pub fn cycle_secondary_remote_endpoint(&mut self, forward: bool) -> Option<String> {
-        let next = self.cycle_profile_id(self.transfer_destination_endpoint_id, forward);
-        self.transfer_destination_endpoint_id = next;
-        Some(self.endpoint_profile_name(next))
     }
 
     pub fn refresh_jobs(&mut self, conn: &Connection) -> Result<()> {

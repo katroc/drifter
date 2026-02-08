@@ -10,7 +10,7 @@ pub enum SettingsCategory {
     S3,
     Scanner,
     Performance,
-    Theme,
+    General,
 }
 
 impl SettingsCategory {
@@ -19,7 +19,35 @@ impl SettingsCategory {
             SettingsCategory::S3 => 8,
             SettingsCategory::Scanner => 4,
             SettingsCategory::Performance => 7,
-            SettingsCategory::Theme => 1,
+            SettingsCategory::General => 2,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            SettingsCategory::S3 => SettingsCategory::Scanner,
+            SettingsCategory::Scanner => SettingsCategory::Performance,
+            SettingsCategory::Performance => SettingsCategory::General,
+            SettingsCategory::General => SettingsCategory::S3,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            SettingsCategory::S3 => SettingsCategory::General,
+            SettingsCategory::Scanner => SettingsCategory::S3,
+            SettingsCategory::Performance => SettingsCategory::Scanner,
+            SettingsCategory::General => SettingsCategory::Performance,
+        }
+    }
+
+    pub fn from_sidebar_index(idx: usize) -> Self {
+        match idx {
+            0 => SettingsCategory::S3,
+            1 => SettingsCategory::Scanner,
+            2 => SettingsCategory::Performance,
+            3 => SettingsCategory::General,
+            _ => SettingsCategory::S3,
         }
     }
 }
@@ -265,6 +293,14 @@ impl SettingsState {
         }
         let next = (self.s3_profile_index + self.s3_profiles.len() - 1) % self.s3_profiles.len();
         self.apply_profile_index(next);
+    }
+
+    pub fn set_s3_profile_selection_index(&mut self, index: usize) {
+        self.apply_profile_index(index);
+    }
+
+    pub fn s3_profile_count(&self) -> usize {
+        self.s3_profiles.len()
     }
 
     pub fn selected_s3_endpoint_mut(&mut self) -> &mut String {

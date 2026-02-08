@@ -331,66 +331,67 @@ impl Coordinator {
                 )?;
             }
             Ok(ScanResult::Infected(virus_name)) => {
-                let (quarantine_dir, _delete_source) = {
+                let quarantine_dir = {
                     let cfg = lock_async_mutex(&self.config).await;
-                    (
-                        PathBuf::from(&cfg.quarantine_dir),
-                        cfg.delete_source_after_upload,
-                    )
+                    PathBuf::from(&cfg.quarantine_dir)
                 };
-
-                if !quarantine_dir.exists()
-                    && let Err(e) = std::fs::create_dir_all(&quarantine_dir)
-                {
-                    error!(
-                        "Failed to create quarantine directory {:?}: {}",
-                        quarantine_dir, e
-                    );
-                }
-
-                let file_name = std::path::Path::new(path).file_name();
-                let mut quarantine_path_str = String::new();
-
-                if let Some(fname) = file_name {
-                    let dest = quarantine_dir.join(fname);
-                    if let Err(e) = std::fs::rename(path, &dest) {
-                        error!("Failed to quarantine file: {}", e);
-                    } else {
-                        quarantine_path_str = dest.to_string_lossy().to_string();
-                    }
-                }
+                let quarantine_result = Self::quarantine_file_to_dir(
+                    std::path::Path::new(path),
+                    &quarantine_dir,
+                    job.id,
+                );
 
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_scan_status(&conn, job.id, "infected", "quarantined")?;
-
-                    // Store virus name in error column so it appears in details
-                    db::update_job_error(
-                        &conn,
-                        job.id,
-                        "quarantined",
-                        &format!("Infected: {}", virus_name),
-                    )?;
-
-                    if !quarantine_path_str.is_empty()
-                        && let Err(e) = db::update_job_staged(
-                            &conn,
-                            job.id,
-                            &quarantine_path_str,
-                            "quarantined",
-                        )
-                    {
-                        warn!(
-                            "Failed to update quarantined staged path for job {}: {}",
-                            job.id, e
-                        );
+                    match quarantine_result {
+                        Ok(quarantine_path) => {
+                            db::update_scan_status(&conn, job.id, "infected", "quarantined")?;
+                            db::update_job_staged_path(
+                                &conn,
+                                job.id,
+                                &quarantine_path.to_string_lossy(),
+                            )?;
+                            // Keep virus details visible in UI details panel.
+                            db::update_job_error(
+                                &conn,
+                                job.id,
+                                "quarantined",
+                                &format!("Infected: {}", virus_name),
+                            )?;
+                            db::insert_event(
+                                &conn,
+                                job.id,
+                                "scan",
+                                &format!(
+                                    "scan failed: infected with {} (moved to {})",
+                                    virus_name,
+                                    quarantine_path.to_string_lossy()
+                                ),
+                            )?;
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to quarantine infected file for job {}: {}",
+                                job.id, e
+                            );
+                            db::update_scan_status(&conn, job.id, "infected", "failed")?;
+                            db::update_job_error(
+                                &conn,
+                                job.id,
+                                "failed",
+                                &format!("Infected: {} (quarantine failed: {})", virus_name, e),
+                            )?;
+                            db::insert_event(
+                                &conn,
+                                job.id,
+                                "scan",
+                                &format!(
+                                    "scan failed: infected with {} (quarantine failed: {})",
+                                    virus_name, e
+                                ),
+                            )?;
+                        }
                     }
-                    db::insert_event(
-                        &conn,
-                        job.id,
-                        "scan",
-                        &format!("scan failed: infected with {}", virus_name),
-                    )?;
                 }
                 self.check_and_report(&job.session_id).await?;
             }
@@ -1211,6 +1212,108 @@ impl Coordinator {
 
         self.notify_work();
         Ok(())
+    }
+
+    fn quarantine_destination_path(
+        quarantine_dir: &std::path::Path,
+        source_path: &std::path::Path,
+        job_id: i64,
+    ) -> PathBuf {
+        let base_name = source_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("unknown.bin");
+
+        for attempt in 0..10_000usize {
+            let candidate = if attempt == 0 {
+                format!("job_{}_{}", job_id, base_name)
+            } else {
+                format!("job_{}_{}_{}", job_id, attempt, base_name)
+            };
+            let candidate_path = quarantine_dir.join(candidate);
+            if !candidate_path.exists() {
+                return candidate_path;
+            }
+        }
+
+        let fallback = format!(
+            "job_{}_{}_{}",
+            job_id,
+            chrono::Utc::now().timestamp(),
+            base_name
+        );
+        quarantine_dir.join(fallback)
+    }
+
+    fn quarantine_file_to_dir(
+        source_path: &std::path::Path,
+        quarantine_dir: &std::path::Path,
+        job_id: i64,
+    ) -> Result<PathBuf> {
+        if !source_path.exists() {
+            anyhow::bail!(
+                "source file does not exist: {}",
+                source_path.to_string_lossy()
+            );
+        }
+
+        std::fs::create_dir_all(quarantine_dir).with_context(|| {
+            format!(
+                "failed to create quarantine directory '{}'",
+                quarantine_dir.to_string_lossy()
+            )
+        })?;
+
+        let destination_path =
+            Self::quarantine_destination_path(quarantine_dir, source_path, job_id);
+        match std::fs::rename(source_path, &destination_path) {
+            Ok(()) => Ok(destination_path),
+            Err(rename_err) => {
+                warn!(
+                    "Rename into quarantine failed for '{}': {}. Trying copy+remove fallback.",
+                    source_path.to_string_lossy(),
+                    rename_err
+                );
+
+                std::fs::copy(source_path, &destination_path).with_context(|| {
+                    format!(
+                        "failed to copy '{}' to '{}'",
+                        source_path.to_string_lossy(),
+                        destination_path.to_string_lossy()
+                    )
+                })?;
+
+                {
+                    let file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&destination_path)
+                        .with_context(|| {
+                            format!(
+                                "failed to open copied quarantine file '{}'",
+                                destination_path.to_string_lossy()
+                            )
+                        })?;
+                    file.sync_all().with_context(|| {
+                        format!(
+                            "failed to fsync copied quarantine file '{}'",
+                            destination_path.to_string_lossy()
+                        )
+                    })?;
+                }
+
+                if let Err(remove_err) = std::fs::remove_file(source_path) {
+                    let _ = std::fs::remove_file(&destination_path);
+                    return Err(anyhow::anyhow!(
+                        "failed to remove original '{}' after copy fallback: {}",
+                        source_path.to_string_lossy(),
+                        remove_err
+                    ));
+                }
+
+                Ok(destination_path)
+            }
+        }
     }
 
     /// Calculate exponential backoff delay in seconds
