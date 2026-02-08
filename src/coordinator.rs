@@ -172,7 +172,7 @@ impl Coordinator {
         if scanner_enabled {
             let active_scans = {
                 let conn = lock_mutex(&self.conn)?;
-                db::count_jobs_with_job_status(&conn, JobStatus::Scanning)?
+                db::count_jobs_with_status(&conn, JobStatus::Scanning)?
             };
 
             let available_scan_slots = scan_limit.saturating_sub(active_scans as usize);
@@ -185,16 +185,11 @@ impl Coordinator {
 
                 let dispatch = {
                     let conn = lock_mutex(&self.conn)?;
-                    if let Some(job) = db::get_next_job_with_status(&conn, JobStatus::Queued)? {
+                    if let Some(job) = db::get_next_job(&conn, JobStatus::Queued)? {
                         let scan_policy = db::get_job_transfer_metadata(&conn, job.id)?
                             .and_then(|m| m.scan_policy);
                         if scan_policy.as_deref() == Some("never") {
-                            db::update_scan_status_with_job_status(
-                                &conn,
-                                job.id,
-                                "skipped",
-                                JobStatus::Scanned,
-                            )?;
+                            db::update_scan_status(&conn, job.id, "skipped", JobStatus::Scanned)?;
                             db::insert_event(
                                 &conn,
                                 job.id,
@@ -203,12 +198,7 @@ impl Coordinator {
                             )?;
                             ScanDispatch::Skipped
                         } else {
-                            db::update_scan_status_with_job_status(
-                                &conn,
-                                job.id,
-                                "scanning",
-                                JobStatus::Scanning,
-                            )?;
+                            db::update_scan_status(&conn, job.id, "scanning", JobStatus::Scanning)?;
                             ScanDispatch::Spawn(Box::new(job))
                         }
                     } else {
@@ -237,13 +227,8 @@ impl Coordinator {
             for _ in 0..32 {
                 let skipped_job = {
                     let conn = lock_mutex(&self.conn)?;
-                    if let Some(job) = db::get_next_job_with_status(&conn, JobStatus::Queued)? {
-                        db::update_scan_status_with_job_status(
-                            &conn,
-                            job.id,
-                            "skipped",
-                            JobStatus::Scanned,
-                        )?;
+                    if let Some(job) = db::get_next_job(&conn, JobStatus::Queued)? {
+                        db::update_scan_status(&conn, job.id, "skipped", JobStatus::Scanned)?;
                         db::insert_event(&conn, job.id, "scan", "scan skipped by policy")?;
                         Some(job)
                     } else {
@@ -265,8 +250,8 @@ impl Coordinator {
             let conn = lock_mutex(&self.conn)?;
             (
                 cfg.concurrency_upload_global,
-                db::count_jobs_with_job_status(&conn, JobStatus::Uploading)?
-                    + db::count_jobs_with_job_status(&conn, JobStatus::Transferring)?,
+                db::count_jobs_with_status(&conn, JobStatus::Uploading)?
+                    + db::count_jobs_with_status(&conn, JobStatus::Transferring)?,
             )
         };
 
@@ -274,7 +259,7 @@ impl Coordinator {
         for _ in 0..available_upload_slots {
             let scanned_job = {
                 let conn = lock_mutex(&self.conn)?;
-                if let Some(job) = db::get_next_job_with_status(&conn, JobStatus::Scanned)? {
+                if let Some(job) = db::get_next_job(&conn, JobStatus::Scanned)? {
                     let transfer_direction = match db::get_job_transfer_metadata(&conn, job.id) {
                         Ok(metadata) => metadata.and_then(|value| value.transfer_direction),
                         Err(e)
@@ -292,12 +277,7 @@ impl Coordinator {
                         JobStatus::Uploading
                     };
                     let initial_phase = if is_s3_to_s3 { "copying" } else { "uploading" };
-                    db::update_upload_status_with_job_status(
-                        &conn,
-                        job.id,
-                        initial_phase,
-                        initial_status,
-                    )?;
+                    db::update_upload_status(&conn, job.id, initial_phase, initial_status)?;
                     Some(job)
                 } else {
                     None
@@ -325,12 +305,7 @@ impl Coordinator {
             Some(p) => p,
             None => {
                 let conn = lock_mutex(&self.conn)?;
-                db::update_job_error_with_status(
-                    &conn,
-                    job.id,
-                    JobStatus::Failed,
-                    "no staged path",
-                )?;
+                db::update_job_error(&conn, job.id, JobStatus::Failed, "no staged path")?;
                 self.notify_work();
                 return Ok(());
             }
@@ -346,7 +321,7 @@ impl Coordinator {
             Ok(ScanResult::Clean) => {
                 let duration = start_time.elapsed().as_millis() as i64;
                 let conn = lock_mutex(&self.conn)?;
-                db::update_scan_status_with_job_status(&conn, job.id, "clean", JobStatus::Scanned)?;
+                db::update_scan_status(&conn, job.id, "clean", JobStatus::Scanned)?;
                 db::update_scan_duration(&conn, job.id, duration)?;
                 db::insert_event(
                     &conn,
@@ -370,7 +345,7 @@ impl Coordinator {
                     let conn = lock_mutex(&self.conn)?;
                     match quarantine_result {
                         Ok(quarantine_path) => {
-                            db::update_scan_status_with_job_status(
+                            db::update_scan_status(
                                 &conn,
                                 job.id,
                                 "infected",
@@ -382,7 +357,7 @@ impl Coordinator {
                                 &quarantine_path.to_string_lossy(),
                             )?;
                             // Keep virus details visible in UI details panel.
-                            db::update_job_error_with_status(
+                            db::update_job_error(
                                 &conn,
                                 job.id,
                                 JobStatus::Quarantined,
@@ -404,13 +379,8 @@ impl Coordinator {
                                 "Failed to quarantine infected file for job {}: {}",
                                 job.id, e
                             );
-                            db::update_scan_status_with_job_status(
-                                &conn,
-                                job.id,
-                                "infected",
-                                JobStatus::Failed,
-                            )?;
-                            db::update_job_error_with_status(
+                            db::update_scan_status(&conn, job.id, "infected", JobStatus::Failed)?;
+                            db::update_job_error(
                                 &conn,
                                 job.id,
                                 JobStatus::Failed,
@@ -433,7 +403,7 @@ impl Coordinator {
             Err(e) => {
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_job_error_with_status(
+                    db::update_job_error(
                         &conn,
                         job.id,
                         JobStatus::Failed,
@@ -467,7 +437,7 @@ impl Coordinator {
             other => {
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_job_error_with_status(
+                    db::update_job_error(
                         &conn,
                         job.id,
                         JobStatus::Failed,
@@ -584,7 +554,7 @@ impl Coordinator {
             Err(e) => {
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_job_error_with_status(
+                    db::update_job_error(
                         &conn,
                         job.id,
                         JobStatus::Failed,
@@ -606,7 +576,7 @@ impl Coordinator {
         if !Uploader::supports_server_side_copy(&source_endpoint, &destination_endpoint) {
             {
                 let conn = lock_mutex(&self.conn)?;
-                db::update_job_error_with_status(
+                db::update_job_error(
                     &conn,
                     job.id,
                     JobStatus::Failed,
@@ -639,7 +609,7 @@ impl Coordinator {
         if source_region != destination_region {
             {
                 let conn = lock_mutex(&self.conn)?;
-                db::update_job_error_with_status(
+                db::update_job_error(
                     &conn,
                     job.id,
                     JobStatus::Failed,
@@ -711,7 +681,7 @@ impl Coordinator {
                             )?;
                             false
                         } else {
-                            db::update_job_error_with_status(
+                            db::update_job_error(
                                 &conn,
                                 job.id,
                                 JobStatus::Failed,
@@ -733,12 +703,7 @@ impl Coordinator {
                 "skip" => {
                     {
                         let conn = lock_mutex(&self.conn)?;
-                        db::update_upload_status_with_job_status(
-                            &conn,
-                            job.id,
-                            "skipped",
-                            JobStatus::Complete,
-                        )?;
+                        db::update_upload_status(&conn, job.id, "skipped", JobStatus::Complete)?;
                         db::insert_event(
                             &conn,
                             job.id,
@@ -756,7 +721,7 @@ impl Coordinator {
                 "prompt" => {
                     {
                         let conn = lock_mutex(&self.conn)?;
-                        db::update_job_error_with_status(
+                        db::update_job_error(
                             &conn,
                             job.id,
                             JobStatus::Failed,
@@ -779,12 +744,7 @@ impl Coordinator {
 
         {
             let conn = lock_mutex(&self.conn)?;
-            db::update_upload_status_with_job_status(
-                &conn,
-                job.id,
-                "copying",
-                JobStatus::Transferring,
-            )?;
+            db::update_upload_status(&conn, job.id, "copying", JobStatus::Transferring)?;
             db::insert_event(
                 &conn,
                 job.id,
@@ -819,12 +779,7 @@ impl Coordinator {
                 let duration = start_time.elapsed().as_millis() as i64;
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_upload_status_with_job_status(
-                        &conn,
-                        job.id,
-                        "completed",
-                        JobStatus::Complete,
-                    )?;
+                    db::update_upload_status(&conn, job.id, "completed", JobStatus::Complete)?;
                     db::update_upload_duration(&conn, job.id, duration)?;
                     db::insert_event(
                         &conn,
@@ -871,7 +826,7 @@ impl Coordinator {
                         )?;
                         false
                     } else {
-                        db::update_job_error_with_status(
+                        db::update_job_error(
                             &conn,
                             job.id,
                             JobStatus::Failed,
@@ -919,12 +874,7 @@ impl Coordinator {
                 "skip" => {
                     {
                         let conn = lock_mutex(&self.conn)?;
-                        db::update_upload_status_with_job_status(
-                            &conn,
-                            job.id,
-                            "skipped",
-                            JobStatus::Complete,
-                        )?;
+                        db::update_upload_status(&conn, job.id, "skipped", JobStatus::Complete)?;
                         db::insert_event(
                             &conn,
                             job.id,
@@ -942,7 +892,7 @@ impl Coordinator {
                 "prompt" => {
                     {
                         let conn = lock_mutex(&self.conn)?;
-                        db::update_job_error_with_status(
+                        db::update_job_error(
                             &conn,
                             job.id,
                             JobStatus::Failed,
@@ -973,7 +923,7 @@ impl Coordinator {
         {
             {
                 let conn = lock_mutex(&self.conn)?;
-                db::update_job_error_with_status(
+                db::update_job_error(
                     &conn,
                     job.id,
                     JobStatus::Failed,
@@ -1001,12 +951,7 @@ impl Coordinator {
 
         {
             let conn = lock_mutex(&self.conn)?;
-            db::update_upload_status_with_job_status(
-                &conn,
-                job.id,
-                "downloading",
-                JobStatus::Uploading,
-            )?;
+            db::update_upload_status(&conn, job.id, "downloading", JobStatus::Uploading)?;
             db::insert_event(
                 &conn,
                 job.id,
@@ -1025,12 +970,7 @@ impl Coordinator {
                 let duration = start_time.elapsed().as_millis() as i64;
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_upload_status_with_job_status(
-                        &conn,
-                        job.id,
-                        "completed",
-                        JobStatus::Complete,
-                    )?;
+                    db::update_upload_status(&conn, job.id, "completed", JobStatus::Complete)?;
                     db::update_upload_duration(&conn, job.id, duration)?;
                     db::insert_event(
                         &conn,
@@ -1077,7 +1017,7 @@ impl Coordinator {
                         )?;
                         false
                     } else {
-                        db::update_job_error_with_status(
+                        db::update_job_error(
                             &conn,
                             job.id,
                             JobStatus::Failed,
@@ -1122,7 +1062,7 @@ impl Coordinator {
             Err(e) => {
                 {
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_job_error_with_status(
+                    db::update_job_error(
                         &conn,
                         job.id,
                         JobStatus::Failed,
@@ -1145,12 +1085,7 @@ impl Coordinator {
         // Set status to "uploading" BEFORE starting upload
         {
             let conn = lock_mutex(&self.conn)?;
-            db::update_upload_status_with_job_status(
-                &conn,
-                job.id,
-                "starting",
-                JobStatus::Uploading,
-            )?;
+            db::update_upload_status(&conn, job.id, "starting", JobStatus::Uploading)?;
         }
 
         let cancel_token = Arc::new(AtomicBool::new(false));
@@ -1185,12 +1120,7 @@ impl Coordinator {
                 {
                     let duration = start_time.elapsed().as_millis() as i64;
                     let conn = lock_mutex(&self.conn)?;
-                    db::update_upload_status_with_job_status(
-                        &conn,
-                        job.id,
-                        "completed",
-                        JobStatus::Complete,
-                    )?;
+                    db::update_upload_status(&conn, job.id, "completed", JobStatus::Complete)?;
                     db::update_upload_duration(&conn, job.id, duration)?;
                     db::insert_event(
                         &conn,
@@ -1270,7 +1200,7 @@ impl Coordinator {
                             "Upload failed for job {} after {} retries: {}",
                             job.id, job.retry_count, e
                         );
-                        db::update_job_error_with_status(
+                        db::update_job_error(
                             &conn,
                             job.id,
                             JobStatus::Failed,
@@ -1613,7 +1543,7 @@ mod tests {
         let job_id = {
             let c = lock_mutex(&conn)?;
             let id = db::create_job(&c, "session1", "/tmp/file.txt", 100, None)?;
-            db::update_job_staged(&c, id, "/tmp/staged.txt", "queued")?;
+            db::update_job_staged(&c, id, "/tmp/staged.txt", JobStatus::Queued)?;
             id
         };
 
@@ -1639,8 +1569,8 @@ mod tests {
         let job_id = {
             let c = lock_mutex(&conn)?;
             let id = db::create_job(&c, "session1", "/tmp/file.txt", 100, None)?;
-            db::update_job_staged(&c, id, "/tmp/staged.txt", "queued")?;
-            db::update_scan_status_with_job_status(&c, id, "clean", JobStatus::Scanned)?;
+            db::update_job_staged(&c, id, "/tmp/staged.txt", JobStatus::Queued)?;
+            db::update_scan_status(&c, id, "clean", JobStatus::Scanned)?;
             id
         };
 

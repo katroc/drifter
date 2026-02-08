@@ -80,7 +80,12 @@ async fn stress_test_coordinator_cycle() -> Result<()> {
                 1024,
                 None,
             )?;
-            db::update_job_staged(&c, job_id, &format!("/tmp/staged_{}.txt", i), "queued")?;
+            db::update_job_staged(
+                &c,
+                job_id,
+                &format!("/tmp/staged_{}.txt", i),
+                db::JobStatus::Queued,
+            )?;
         }
     }
 
@@ -102,8 +107,8 @@ async fn stress_test_coordinator_cycle() -> Result<()> {
     // Verify some jobs were picked up
     let (scanning_count, uploading_count) = {
         let c = conn.lock().unwrap();
-        let scanning = db::count_jobs_with_status(&c, "scanning")?;
-        let uploading = db::count_jobs_with_status(&c, "uploading")?;
+        let scanning = db::count_jobs_with_status(&c, db::JobStatus::Scanning)?;
+        let uploading = db::count_jobs_with_status(&c, db::JobStatus::Uploading)?;
         (scanning, uploading)
     };
 

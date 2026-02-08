@@ -2860,14 +2860,12 @@ pub async fn run_tui(args: TuiArgs) -> Result<()> {
 
                                         let conn = lock_mutex(&conn_mutex)?;
                                         let mut quarantine_removed = true;
-                                        if let Err(e) =
-                                            crate::db::update_scan_status_with_job_status(
-                                                &conn,
-                                                id,
-                                                "removed",
-                                                crate::db::JobStatus::QuarantinedRemoved,
-                                            )
-                                        {
+                                        if let Err(e) = crate::db::update_scan_status(
+                                            &conn,
+                                            id,
+                                            "removed",
+                                            crate::db::JobStatus::QuarantinedRemoved,
+                                        ) {
                                             quarantine_removed = false;
                                             app.status_message = format!(
                                                 "Failed to update quarantine status: {}",

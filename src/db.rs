@@ -1136,17 +1136,13 @@ pub fn get_session_jobs(conn: &Connection, session_id: &str) -> Result<Vec<JobRo
     Ok(rows)
 }
 
-pub fn count_jobs_with_status(conn: &Connection, status: &str) -> Result<i64> {
+pub fn count_jobs_with_status(conn: &Connection, status: JobStatus) -> Result<i64> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM jobs WHERE status = ?",
-        params![status],
+        params![status.as_str()],
         |row| row.get(0),
     )?;
     Ok(count)
-}
-
-pub fn count_jobs_with_job_status(conn: &Connection, status: JobStatus) -> Result<i64> {
-    count_jobs_with_status(conn, status.as_str())
 }
 
 pub fn count_pending_session_jobs(conn: &Connection, session_id: &str) -> Result<i64> {
@@ -1162,22 +1158,13 @@ pub fn update_job_staged(
     conn: &Connection,
     job_id: i64,
     staged_path: &str,
-    status: &str,
+    status: JobStatus,
 ) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET staged_path = ?, status = ?, error = NULL WHERE id = ?",
-        params![staged_path, status, job_id],
+        params![staged_path, status.as_str(), job_id],
     )?;
     Ok(())
-}
-
-pub fn update_job_staged_with_status(
-    conn: &Connection,
-    job_id: i64,
-    staged_path: &str,
-    status: JobStatus,
-) -> Result<()> {
-    update_job_staged(conn, job_id, staged_path, status.as_str())
 }
 
 pub fn update_job_staged_path(conn: &Connection, job_id: i64, staged_path: &str) -> Result<()> {
@@ -1188,21 +1175,17 @@ pub fn update_job_staged_path(conn: &Connection, job_id: i64, staged_path: &str)
     Ok(())
 }
 
-pub fn update_job_error(conn: &Connection, job_id: i64, status: &str, error: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE jobs SET status = ?, error = ? WHERE id = ?",
-        params![status, error, job_id],
-    )?;
-    Ok(())
-}
-
-pub fn update_job_error_with_status(
+pub fn update_job_error(
     conn: &Connection,
     job_id: i64,
     status: JobStatus,
     error: &str,
 ) -> Result<()> {
-    update_job_error(conn, job_id, status.as_str(), error)
+    conn.execute(
+        "UPDATE jobs SET status = ?, error = ? WHERE id = ?",
+        params![status.as_str(), error, job_id],
+    )?;
+    Ok(())
 }
 
 pub fn retry_job(conn: &Connection, job_id: i64) -> Result<()> {
@@ -1412,44 +1395,26 @@ pub fn update_scan_status(
     conn: &Connection,
     job_id: i64,
     status: &str,
-    global_status: &str,
+    global_status: JobStatus,
 ) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET scan_status = ?, status = ? WHERE id = ?",
-        params![status, global_status, job_id],
+        params![status, global_status.as_str(), job_id],
     )?;
     Ok(())
-}
-
-pub fn update_scan_status_with_job_status(
-    conn: &Connection,
-    job_id: i64,
-    status: &str,
-    global_status: JobStatus,
-) -> Result<()> {
-    update_scan_status(conn, job_id, status, global_status.as_str())
 }
 
 pub fn update_upload_status(
     conn: &Connection,
     job_id: i64,
     status: &str,
-    global_status: &str,
+    global_status: JobStatus,
 ) -> Result<()> {
     conn.execute(
         "UPDATE jobs SET upload_status = ?, status = ? WHERE id = ?",
-        params![status, global_status, job_id],
+        params![status, global_status.as_str(), job_id],
     )?;
     Ok(())
-}
-
-pub fn update_upload_status_with_job_status(
-    conn: &Connection,
-    job_id: i64,
-    status: &str,
-    global_status: JobStatus,
-) -> Result<()> {
-    update_upload_status(conn, job_id, status, global_status.as_str())
 }
 
 pub fn update_job_checksums(
@@ -1481,25 +1446,18 @@ pub fn update_upload_duration(conn: &Connection, job_id: i64, duration_ms: i64) 
     Ok(())
 }
 
-pub fn get_next_job(conn: &Connection, current_status: &str) -> Result<Option<JobRow>> {
+pub fn get_next_job(conn: &Connection, current_status: JobStatus) -> Result<Option<JobRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {} FROM jobs WHERE status = ? ORDER BY priority DESC, id ASC LIMIT 1",
         JOB_COLUMNS
     ))?;
-    let mut rows = stmt.query_map(params![current_status], map_job_row)?;
+    let mut rows = stmt.query_map(params![current_status.as_str()], map_job_row)?;
 
     if let Some(row) = rows.next() {
         Ok(Some(row?))
     } else {
         Ok(None)
     }
-}
-
-pub fn get_next_job_with_status(
-    conn: &Connection,
-    current_status: JobStatus,
-) -> Result<Option<JobRow>> {
-    get_next_job(conn, current_status.as_str())
 }
 
 pub fn get_job(conn: &Connection, job_id: i64) -> Result<Option<JobRow>> {
@@ -1926,13 +1884,13 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "complete", "")?;
+        update_job_error(&conn, id1, JobStatus::Complete, "")?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "quarantined", "infected")?;
+        update_job_error(&conn, id2, JobStatus::Quarantined, "infected")?;
 
         let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
-        update_job_error(&conn, id3, "cancelled", "user cancelled")?;
+        update_job_error(&conn, id3, JobStatus::Cancelled, "user cancelled")?;
 
         create_job(&conn, "session1", "/tmp/active.txt", 400, None)?;
 
@@ -1947,10 +1905,10 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "complete", "")?;
+        update_job_error(&conn, id1, JobStatus::Complete, "")?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "quarantined", "infected")?;
+        update_job_error(&conn, id2, JobStatus::Quarantined, "infected")?;
 
         let history = list_history_jobs(&conn, 100, Some("Complete"))?;
         assert_eq!(history.len(), 1);
@@ -1964,13 +1922,18 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "complete", "")?;
+        update_job_error(&conn, id1, JobStatus::Complete, "")?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "quarantined", "infected")?;
+        update_job_error(&conn, id2, JobStatus::Quarantined, "infected")?;
 
         let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
-        update_job_error(&conn, id3, "quarantined_removed", "infected and removed")?;
+        update_job_error(
+            &conn,
+            id3,
+            JobStatus::QuarantinedRemoved,
+            "infected and removed",
+        )?;
 
         let history = list_history_jobs(&conn, 100, Some("Quarantined"))?;
         assert_eq!(history.len(), 2);
@@ -1983,10 +1946,10 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "quarantined", "infected")?;
+        update_job_error(&conn, id1, JobStatus::Quarantined, "infected")?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "complete", "")?;
+        update_job_error(&conn, id2, JobStatus::Complete, "")?;
 
         let quarantined = list_quarantined_jobs(&conn, 100)?;
         assert_eq!(quarantined.len(), 1);
@@ -2020,12 +1983,12 @@ mod tests {
         create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
 
         let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
-        update_job_error(&conn, id3, "complete", "")?;
+        update_job_error(&conn, id3, JobStatus::Complete, "")?;
 
-        let count = count_jobs_with_status(&conn, "ingesting")?;
+        let count = count_jobs_with_status(&conn, JobStatus::Ingesting)?;
         assert_eq!(count, 2);
 
-        let count_complete = count_jobs_with_status(&conn, "complete")?;
+        let count_complete = count_jobs_with_status(&conn, JobStatus::Complete)?;
         assert_eq!(count_complete, 1);
 
         Ok(())
@@ -2039,7 +2002,7 @@ mod tests {
         create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
 
         let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
-        update_job_error(&conn, id3, "complete", "")?;
+        update_job_error(&conn, id3, JobStatus::Complete, "")?;
 
         create_job(&conn, "session2", "/tmp/file4.txt", 400, None)?;
 
@@ -2054,7 +2017,7 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_job_staged(&conn, job_id, "/data/file.txt", "queued")?;
+        update_job_staged(&conn, job_id, "/data/file.txt", JobStatus::Queued)?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
         assert_eq!(job.staged_path, Some("/data/file.txt".to_string()));
@@ -2069,7 +2032,7 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_job_error(&conn, job_id, "failed", "Network timeout")?;
+        update_job_error(&conn, job_id, JobStatus::Failed, "Network timeout")?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
         assert_eq!(job.status, "failed");
@@ -2096,18 +2059,18 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "queued", "")?;
+        update_job_error(&conn, id1, JobStatus::Queued, "")?;
         set_job_priority(&conn, id1, 10)?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "queued", "")?;
+        update_job_error(&conn, id2, JobStatus::Queued, "")?;
         set_job_priority(&conn, id2, 50)?;
 
         let id3 = create_job(&conn, "session1", "/tmp/file3.txt", 300, None)?;
-        update_job_error(&conn, id3, "queued", "")?;
+        update_job_error(&conn, id3, JobStatus::Queued, "")?;
         set_job_priority(&conn, id3, 30)?;
 
-        let next = get_next_job(&conn, "queued")?.expect("Should have next job");
+        let next = get_next_job(&conn, JobStatus::Queued)?.expect("Should have next job");
         assert_eq!(next.id, id2);
         assert_eq!(next.priority, 50);
 
@@ -2199,8 +2162,8 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_scan_status(&conn, job_id, "completed", "scanned")?;
-        update_job_error(&conn, job_id, "failed", "Upload error")?;
+        update_scan_status(&conn, job_id, "completed", JobStatus::Scanned)?;
+        update_job_error(&conn, job_id, JobStatus::Failed, "Upload error")?;
 
         retry_job(&conn, job_id)?;
 
@@ -2216,7 +2179,7 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_job_error(&conn, job_id, "failed", "Scan error")?;
+        update_job_error(&conn, job_id, JobStatus::Failed, "Scan error")?;
 
         retry_job(&conn, job_id)?;
 
@@ -2232,7 +2195,7 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_scan_status(&conn, job_id, "completed", "scanned")?;
+        update_scan_status(&conn, job_id, "completed", JobStatus::Scanned)?;
 
         pause_job(&conn, job_id)?;
         let job = get_job(&conn, job_id)?.expect("Job should exist");
@@ -2359,7 +2322,7 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_scan_status(&conn, job_id, "clean", "scanned")?;
+        update_scan_status(&conn, job_id, "clean", JobStatus::Scanned)?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
         assert_eq!(job.scan_status, Some("clean".to_string()));
@@ -2373,7 +2336,7 @@ mod tests {
         let conn = setup_test_db()?;
 
         let job_id = create_job(&conn, "session1", "/tmp/file.txt", 100, None)?;
-        update_upload_status(&conn, job_id, "in_progress", "uploading")?;
+        update_upload_status(&conn, job_id, "in_progress", JobStatus::Uploading)?;
 
         let job = get_job(&conn, job_id)?.expect("Job should exist");
         assert_eq!(job.status, "uploading");
@@ -2838,14 +2801,14 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "complete", "")?;
+        update_job_error(&conn, id1, JobStatus::Complete, "")?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "quarantined", "infected")?;
+        update_job_error(&conn, id2, JobStatus::Quarantined, "infected")?;
 
         // Create an active job with "pending" status (which is excluded from clear_history)
         let id3 = create_job(&conn, "session1", "/tmp/active.txt", 300, None)?;
-        update_job_error(&conn, id3, "pending", "")?;
+        update_job_error(&conn, id3, JobStatus::Pending, "")?;
 
         clear_history(&conn, None)?;
 
@@ -2866,10 +2829,10 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "complete", "")?;
+        update_job_error(&conn, id1, JobStatus::Complete, "")?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "quarantined", "infected")?;
+        update_job_error(&conn, id2, JobStatus::Quarantined, "infected")?;
 
         clear_history(&conn, Some("Complete"))?;
 
@@ -2887,10 +2850,10 @@ mod tests {
         let conn = setup_test_db()?;
 
         let id1 = create_job(&conn, "session1", "/tmp/file1.txt", 100, None)?;
-        update_job_error(&conn, id1, "complete", "")?;
+        update_job_error(&conn, id1, JobStatus::Complete, "")?;
 
         let id2 = create_job(&conn, "session1", "/tmp/file2.txt", 200, None)?;
-        update_job_error(&conn, id2, "quarantined", "infected")?;
+        update_job_error(&conn, id2, JobStatus::Quarantined, "infected")?;
 
         clear_history(&conn, Some("Quarantined"))?;
 
